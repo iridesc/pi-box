@@ -15,6 +15,9 @@ services:
       - TZ=${TZ:-Asia/Shanghai}
       # 网页访问密码（可选，建议设置）
       - PI_WEB_PASSWORD=${PI_WEB_PASSWORD:-}
+      # 通过反向代理（Caddy/Nginx）以域名访问时，必须列出信任的域名，
+      # 否则 pi-web 的 Host 头校验会返回 403 "Untrusted request"（逗号分隔多个）
+      - PI_WEB_ALLOWED_HOSTS=${PI_WEB_ALLOWED_HOSTS:-}
     env_file:
       - path: .env
         required: false

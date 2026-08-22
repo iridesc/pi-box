@@ -51,6 +51,23 @@ podman compose up -d --build
 
 > **首次启动自动引导**：entrypoint 会在容器启动时检测 `/workspace` 是否已有会话，没有则自动创建一个引导会话（发一条最小 prompt 让模型回复后落盘）。这样 pi-web 打开后 `/workspace` 已是被信任的项目目录，侧边栏"新建对话"按钮直接可用（pi-web 的"新建对话"依赖已选中的项目目录，而目录只有在存在落盘会话后才被信任）。
 
+### 通过反向代理 / 域名访问（Caddy/Nginx）
+
+pi-web 内置了 **Host 头校验**（middleware）：只信任 `localhost` / IP 直连，以及 `PI_WEB_ALLOWED_HOSTS`（或 `PI_WEB_HOSTNAME`）环境变量中列出的域名。
+
+**现象**：用 Caddy/Nginx 反代后通过域名访问（如 `https://pibox.irid.cc`），返回 `403 Untrusted request`，但容器内直连 `127.0.0.1:8000` 正常。
+
+**解决**：在 `.env` 里配置信任的域名，重启容器：
+
+```bash
+# .env
+PI_WEB_ALLOWED_HOSTS=pibox.irid.cc,another.example.com   # 多个域名逗号分隔
+
+podman compose up -d   # 或 docker compose up -d
+```
+
+注意：域名反代 + HTTPS 证书签发（如 Caddy 自动 Let's Encrypt）与 `PI_WEB_PASSWORD` 的 Basic Auth 互不影响，密码保护依然生效。
+
 ### 配置周期任务（两种方式）
 
 **统一任务模型**：任务 = 一条 shell 命令，不区分类型。
