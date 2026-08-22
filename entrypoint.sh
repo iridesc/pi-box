@@ -37,50 +37,24 @@ PIWEB_PID=$!
 
 # 4) 首次启动引导：pi-web 中"新建对话"按钮依赖已选中的项目目录，
 #    而项目目录只有存在落盘会话后才被信任（空会话不落盘，必须有回复）。
-#    若 /workspace 还没有任何会话，自动创建一个真实引导会话（发一条最小 prompt），
-#    让 /workspace 成为受信项目、按钮直接可用。会话落盘在 agent-data。
-#    循环重试直到成功：模型可能在容器启动后才配置（auth.json 后写），
-#    无需重启容器，配置好后 60s 内自动补建引导会话。
+#    直接用 pi -p（非交互）在 /workspace 跑一次，会话落盘到默认 session 目录
+#    （~/.pi/agent/sessions/--workspace--/，即 pi-web 读取的目录），
+#    不经过 pi-web API，也就不受 Basic Auth / pi-web 就绪时序影响。
+#    模型可能在容器启动后才配置，循环重试直到成功。
 bootstrap_workspace() {
   local tries=0
+  local sess_dir="$HOME/.pi/agent/sessions/--workspace--"
+  mkdir -p "$HOME/.pi/agent/sessions"
   while [ $tries -lt 60 ]; do  # 最多重试 60 次（约 1 小时），避免异常死循环
     tries=$((tries+1))
-    local i ok=1
-    # 等 pi-web 就绪（最多 30s）。注意：若设置了 PI_WEB_PASSWORD，
-    # pi-web 的 Basic Auth 会保护 /api/*，探测请求必须带认证头，否则 401 会被误判为"未就绪"。
-    for i in $(seq 1 30); do
-      if node -e "
-        const h=process.env.PI_WEB_PASSWORD?{Authorization:'Basic '+Buffer.from('pi:'+process.env.PI_WEB_PASSWORD).toString('base64')}:{};
-        fetch('http://127.0.0.1:30141/api/sessions',{headers:h}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
-      " 2>/dev/null; then
-        ok=0; break
-      fi
-      sleep 1
-    done
-    [ "$ok" = 1 ] && { echo "[bootstrap] pi-web 未就绪，60s 后重试"; sleep 60; continue; }
-    # 已有 /workspace 会话则跳过（用 API 判断，避免依赖目录编码）
-    if node -e "
-      const h=process.env.PI_WEB_PASSWORD?{Authorization:'Basic '+Buffer.from('pi:'+process.env.PI_WEB_PASSWORD).toString('base64')}:{};
-      fetch('http://127.0.0.1:30141/api/sessions',{headers:h}).then(r=>r.json()).then(j=>{
-        process.exit((j.sessions||[]).some(s=>s.cwd==='/workspace')?0:1)
-      }).catch(()=>process.exit(1))
-    " 2>/dev/null; then
-      echo "[bootstrap] /workspace 已有会话，引导完成"; return 0
+    if ls "$sess_dir"/*.jsonl >/dev/null 2>&1; then
+      echo "[bootstrap] /workspace 已有会话，引导完成"
+      return 0
     fi
-    # 创建引导会话：type=prompt 会真实调一次模型，回复落盘后 /workspace 才被持久信任
-    if node -e "
-      const h=process.env.PI_WEB_PASSWORD?{Authorization:'Basic '+Buffer.from('pi:'+process.env.PI_WEB_PASSWORD).toString('base64')}:{};
-      fetch('http://127.0.0.1:30141/api/agent/new', {
-        method: 'POST',
-        headers: Object.assign({ 'Content-Type': 'application/json' }, h),
-        body: JSON.stringify({ cwd: '/workspace', type: 'prompt', toolNames: [], message: '请只回复：就绪' }),
-      }).then(r=>r.json()).then(j=>{
-        if (!j.success) throw new Error(j.error || 'unknown error');
-        console.log('[bootstrap] workspace 引导会话已创建:', j.sessionId);
-        process.exit(0);
-      }).catch(e=>{ console.error('[bootstrap] workspace 引导失败:', e.message); process.exit(1); })
-    " 2>/dev/null; then
-      echo "[bootstrap] workspace 引导完成"; return 0
+    # 直接 pi -p 跑一次（勿用 pi-run：它指定了 cron 专用 session-dir）
+    if (cd /workspace && pi -p -a "请只回复：就绪" >/dev/null 2>&1) && ls "$sess_dir"/*.jsonl >/dev/null 2>&1; then
+      echo "[bootstrap] workspace 引导会话已创建（$sess_dir）"
+      return 0
     fi
     echo "[bootstrap] 引导未成功（模型可能未配置），60s 后重试"
     sleep 60
