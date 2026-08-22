@@ -1,0 +1,11 @@
+#!/bin/bash
+# pi-run — Agent 任务快捷方式：非交互跑一次 pi（cron 任务统一命令模型下的便捷包装）
+# 用法：pi-run "自然语言任务描述"
+# 与 pi-job 共用全局凭据（/home/agent/.pi/agent），session 隔离在 /workspace/.cron/sessions
+set -euo pipefail
+
+export HOME=/home/agent
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+export TZ="${TZ:-Asia/Shanghai}"
+
+exec pi -p -a --session-dir /workspace/.cron/sessions "$@"

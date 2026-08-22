@@ -1,0 +1,20 @@
+services:
+  pi:
+    build: .
+    container_name: pi-box
+    restart: unless-stopped
+    ports:
+      # 只暴露到本机回环，容器外不可达
+      - "127.0.0.1:8000:30141"
+    volumes:
+      # 工作区：用户项目 + .cron/ 任务配置，全部在此
+      - ./workspace:/workspace
+      # pi 数据：凭据(auth.json)、设置、session，网页登录一次 cron 直接复用
+      - ./agent-data:/home/agent/.pi
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      # 网页访问密码（可选，建议设置）
+      - PI_WEB_PASSWORD=${PI_WEB_PASSWORD:-}
+    env_file:
+      - path: .env
+        required: false

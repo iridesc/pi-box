@@ -1,0 +1,243 @@
+#!/bin/bash
+# pi-job v3 — cron 任务执行器 / 状态查询 / 日志查看
+#
+# 统一任务模型：任务 = 一条 shell 命令（不区分 Agent/脚本类型）。
+#   - Agent 任务：命令用 pi-run "自然语言描述"（非交互跑一次 pi，见 /usr/local/bin/pi-run）
+#   - 脚本任务：任意命令（bash script.sh、curl ...、python3 ...）
+#
+# 每任务独立加锁（flock）：同一任务重叠时跳过本次，不同任务互不阻塞。
+# 目录规范（全部在挂载目录，宿主机可直接查看）：
+#   /workspace/.cron/jobs                    # crontab 配置（唯一配置源）
+#   /workspace/.cron/logs/<id>/<ts>.log      # 每次运行一个日志（含起止时间/退出码）
+#   /workspace/.cron/logs/<id>/latest.log    # 软链到最近一次
+#   /workspace/.cron/state/<id>.json         # 运行状态（机器可读）
+#
+# 用法：
+#   pi-job --id <id> "<命令>"
+#   pi-job status            # 列出 jobs 中所有任务及其运行状态
+#   pi-job log <id> [n]      # 查看任务最近 n 个日志（默认 1 个）
+set -euo pipefail
+
+# cron 执行任务时环境很精简：PATH 无 /usr/local/bin（node/pi 在那里）、HOME=/root（passwd 默认）、无 TZ。
+# 这里兜底补全：pi-box 的凭据与配置都在 /home/agent/.pi，必须固定 HOME。
+export HOME=/home/agent
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+export TZ="${TZ:-Asia/Shanghai}"
+
+CRON_DIR=/workspace/.cron
+LOG_DIR=$CRON_DIR/logs
+STATE_DIR=$CRON_DIR/state
+LOCK_DIR=/tmp/pi-job-locks
+JOBS_FILE=$CRON_DIR/jobs
+KEEP_LOGS=50   # 每个任务最多保留的日志文件数
+
+mkdir -p "$LOG_DIR" "$STATE_DIR" "$LOCK_DIR"
+
+iso_ts() { date -Is; }
+
+usage() {
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ---- 参数解析（status 与运行时共用，保证 id 一致）----
+
+# 从参数中提取 --id 的值；没有则对整串参数做 md5 哈希
+task_id_from_args() {
+  local orig="$*" id="" i=0
+  local args=("$@")
+  while [ $i -lt ${#args[@]} ]; do
+    if [ "${args[$i]}" = "--id" ] && [ $((i + 1)) -lt ${#args[@]} ]; then
+      id="${args[$((i + 1))]}"
+      break
+    fi
+    i=$((i + 1))
+  done
+  if [ -n "$id" ]; then
+    printf '%s' "$id"
+  else
+    printf '%s' "$orig" | md5sum | cut -c1-12
+  fi
+}
+
+# 去掉 --id 及其值，剩余部分为要执行的命令
+extract_command() {
+  local args=("$@") out=() i=0
+  while [ $i -lt ${#args[@]} ]; do
+    case "${args[$i]}" in
+      --id) i=$((i + 2)) ;;
+      *) out+=("${args[$i]}"); i=$((i + 1)) ;;
+    esac
+  done
+  printf '%s' "${out[*]}"
+}
+
+# ---- 状态文件读写（node 保证 JSON 正确）----
+
+write_state() {
+  local id=$1 mode=$2 val=$3
+  node -e '
+    const fs = require("fs");
+    const [id, mode, val] = process.argv.slice(1);
+    const f = `/workspace/.cron/state/${id}.json`;
+    let s = {};
+    try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch {}
+    s.id = id;
+    const now = new Date();
+    if (mode === "start") {
+      s.last_start = now.toISOString();
+      s.last_start_epoch = Date.now();
+      s.running = true;
+      s.pid = Number(val);
+      delete s.last_end; delete s.last_exit; delete s.last_duration;
+    } else if (mode === "end") {
+      s.last_end = now.toISOString();
+      s.last_exit = Number(val);
+      s.running = false;
+      if (s.last_start_epoch) s.last_duration = Math.round((Date.now() - s.last_start_epoch) / 1000);
+      delete s.last_start_epoch;
+    }
+    fs.writeFileSync(f, JSON.stringify(s, null, 2));
+  ' "$id" "$mode" "$val"
+}
+
+read_state() {
+  local id=$1 key=$2
+  node -e '
+    const fs = require("fs");
+    const [id, key] = process.argv.slice(1);
+    const f = `/workspace/.cron/state/${id}.json`;
+    try { const s = JSON.parse(fs.readFileSync(f, "utf8")); console.log(s[key] ?? ""); } catch { console.log(""); }
+  ' "$id" "$key"
+}
+
+# 判断任务是否在运行：0 = 空闲（尝试拿到锁并释放），1 = 运行中
+is_running() {
+  local lockfile=$1
+  ( exec 9<>"$lockfile"; flock -n 9 ) 2>/dev/null
+}
+
+# ---- 执行一次任务 ----
+
+run_main() {
+  local id command
+  id=$(task_id_from_args "$@")
+  if ! printf '%s' "$*" | grep -q -- "--id"; then
+    echo "[pi-job] 警告: 未指定 --id，使用哈希 ID（$id）。建议在 crontab 行中显式命名：--id <可读名称>"
+  fi
+  command=$(extract_command "$@")
+
+  local stamp logfile lockfile
+  stamp=$(date +%Y%m%d-%H%M%S)
+  mkdir -p "$LOG_DIR/$id"
+  logfile="$LOG_DIR/$id/$stamp.log"
+  lockfile="$LOCK_DIR/$id.lock"
+
+  # 加锁：同一任务已在运行则跳过本次（cron 下一次周期再触发）
+  exec 9<>"$lockfile"
+  if ! flock -n 9; then
+    echo "[$(iso_ts)] pi-job: 任务 $id 正在运行，跳过本次（锁 $lockfile）" > "$logfile"
+    echo "[pi-job] 任务 $id 正在运行，跳过本次"
+    exit 0
+  fi
+  truncate -s 0 "$lockfile" 2>/dev/null || true
+  echo $$ >&9   # 锁文件中记录 pid，供 status 展示
+
+  write_state "$id" start "$$"
+  {
+    echo "[$(iso_ts)] pi-job start: id=$id cmd=$command"
+  } >> "$logfile"
+
+  cd /workspace
+  local start_epoch exit_code
+  start_epoch=$(date +%s)
+  exit_code=0
+  if [ -n "$command" ]; then
+    sh -c "$command" >> "$logfile" 2>&1 || exit_code=$?
+  else
+    echo "[$(iso_ts)] pi-job 错误: 任务命令为空" >> "$logfile"
+    exit_code=1
+  fi
+  local duration
+  duration=$(( $(date +%s) - start_epoch ))
+
+  echo "[$(iso_ts)] pi-job end: exit=$exit_code duration=${duration}s" >> "$logfile"
+  ln -sf "$stamp.log" "$LOG_DIR/$id/latest.log"
+  write_state "$id" end "$exit_code"
+
+  # 清理旧日志，保留最近 KEEP_LOGS 个
+  ls -1t "$LOG_DIR/$id"/*.log 2>/dev/null | tail -n +$((KEEP_LOGS + 1)) | xargs -r rm -f
+
+  echo "[pi-job] 任务 $id 完成 exit=$exit_code duration=${duration}s 日志: $logfile"
+  exit "$exit_code"
+}
+
+# ---- status：列出所有任务及运行状态 ----
+
+status_cmd() {
+  printf '%-24s %-16s %-16s %-20s %-5s %-6s\n' \
+    "ID" "调度" "状态" "上次运行(本地)" "退出" "时长"
+  local line
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local disabled=0 l="$line"
+    if [[ "$l" == "# [disabled] "* ]]; then
+      # 显式禁用标记的任务行（cron-job.sh disable 生成）
+      l=${l#"# [disabled] "}
+      disabled=1
+    elif [[ "$l" == \#* ]]; then
+      # 其他注释行（说明/示例）跳过
+      continue
+    fi
+    local sched rest id lockfile running pid last_exit last_dur
+    sched=$(printf '%s' "$l" | cut -d' ' -f1-5)
+    rest=$(printf '%s' "$l" | cut -d' ' -f6- | tr -d '"')
+    rest=${rest#*/usr/local/bin/pi-job}
+    rest=${rest#*pi-job}
+    rest=${rest# }
+    read -r -a rest_arr <<< "$rest"
+    id=$(task_id_from_args "${rest_arr[@]}")
+    if [ "$disabled" = 1 ]; then
+      running="已禁用"
+    else
+      lockfile="$LOCK_DIR/$id.lock"
+      if ! is_running "$lockfile"; then
+        pid=$(cat "$lockfile" 2>/dev/null || true)
+        running="运行中(pid ${pid:-?})"
+      else
+        running="空闲"
+      fi
+    fi
+    last_exit=$(read_state "$id" last_exit)
+    last_dur=$(read_state "$id" last_duration)
+    last_start=$(read_state "$id" last_start)
+    if [ -n "$last_start" ]; then
+      last_start=$(date -d "$last_start" "+%m-%d %H:%M:%S" 2>/dev/null || printf '%s' "$last_start")
+    fi
+    printf '%-24s %-16s %-16s %-20s %-5s %-6s\n' \
+      "$id" "$sched" "$running" "${last_start:-"-"}" "${last_exit:-"-"}" "${last_dur:+${last_dur}s}"
+  done < "$JOBS_FILE"
+}
+
+# ---- log：查看任务日志 ----
+
+log_cmd() {
+  local id=$1 n=${2:-1}
+  if [ ! -d "$LOG_DIR/$id" ]; then
+    echo "[pi-job] 任务 $id 暂无日志"
+    exit 0
+  fi
+  local f
+  ls -1t "$LOG_DIR/$id"/*.log 2>/dev/null | head -n "$n" | while read -r f; do
+    echo "===== $f ====="
+    cat "$f"
+  done
+}
+
+# ---- 入口 ----
+
+case "${1:-}" in
+  status) shift; status_cmd "$@";;
+  log) shift; log_cmd "$@";;
+  -h | --help | help) usage;;
+  *) run_main "$@";;
+esac
