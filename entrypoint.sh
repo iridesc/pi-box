@@ -38,36 +38,48 @@ PIWEB_PID=$!
 # 4) 首次启动引导：pi-web 中"新建对话"按钮依赖已选中的项目目录，
 #    而项目目录只有存在落盘会话后才被信任（空会话不落盘，必须有回复）。
 #    若 /workspace 还没有任何会话，自动创建一个真实引导会话（发一条最小 prompt），
-#    让 /workspace 成为受信项目、按钮直接可用。会话落盘在 agent-data，仅首次创建一次。
+#    让 /workspace 成为受信项目、按钮直接可用。会话落盘在 agent-data。
+#    循环重试直到成功：模型可能在容器启动后才配置（auth.json 后写），
+#    无需重启容器，配置好后 60s 内自动补建引导会话。
 bootstrap_workspace() {
-  local i ok=1
-  # 等 pi-web 就绪（最多 30s）
-  for i in $(seq 1 30); do
-    if node -e "fetch('http://127.0.0.1:30141/api/sessions').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
-      ok=0; break
+  local tries=0
+  while [ $tries -lt 60 ]; do  # 最多重试 60 次（约 1 小时），避免异常死循环
+    tries=$((tries+1))
+    local i ok=1
+    # 等 pi-web 就绪（最多 30s）
+    for i in $(seq 1 30); do
+      if node -e "fetch('http://127.0.0.1:30141/api/sessions').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
+        ok=0; break
+      fi
+      sleep 1
+    done
+    [ "$ok" = 1 ] && { echo "[bootstrap] pi-web 未就绪，60s 后重试"; sleep 60; continue; }
+    # 已有 /workspace 会话则跳过（用 API 判断，避免依赖目录编码）
+    if node -e "
+      fetch('http://127.0.0.1:30141/api/sessions').then(r=>r.json()).then(j=>{
+        process.exit((j.sessions||[]).some(s=>s.cwd==='/workspace')?0:1)
+      }).catch(()=>process.exit(1))
+    " 2>/dev/null; then
+      echo "[bootstrap] /workspace 已有会话，引导完成"; return 0
     fi
-    sleep 1
+    # 创建引导会话：type=prompt 会真实调一次模型，回复落盘后 /workspace 才被持久信任
+    if node -e "
+      fetch('http://127.0.0.1:30141/api/agent/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: '/workspace', type: 'prompt', toolNames: [], message: '请只回复：就绪' }),
+      }).then(r=>r.json()).then(j=>{
+        if (!j.success) throw new Error(j.error || 'unknown error');
+        console.log('[bootstrap] workspace 引导会话已创建:', j.sessionId);
+        process.exit(0);
+      }).catch(e=>{ console.error('[bootstrap] workspace 引导失败:', e.message); process.exit(1); })
+    " 2>/dev/null; then
+      echo "[bootstrap] workspace 引导完成"; return 0
+    fi
+    echo "[bootstrap] 引导未成功（模型可能未配置），60s 后重试"
+    sleep 60
   done
-  [ "$ok" = 1 ] && { echo "[bootstrap] pi-web 未就绪，跳过 workspace 引导"; return 0; }
-  # 已有 /workspace 会话则跳过（用 API 判断，避免依赖目录编码）
-  if node -e "
-    fetch('http://127.0.0.1:30141/api/sessions').then(r=>r.json()).then(j=>{
-      process.exit((j.sessions||[]).some(s=>s.cwd==='/workspace')?0:1)
-    }).catch(()=>process.exit(1))
-  " 2>/dev/null; then
-    echo "[bootstrap] /workspace 已有会话，跳过"; return 0
-  fi
-  # 创建引导会话：type=prompt 会真实调一次模型，回复落盘后 /workspace 才被持久信任
-  node -e "
-    fetch('http://127.0.0.1:30141/api/agent/new', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cwd: '/workspace', type: 'prompt', toolNames: [], message: '请只回复：就绪' }),
-    }).then(r=>r.json()).then(j=>{
-      if (!j.success) throw new Error(j.error || 'unknown error');
-      console.log('[bootstrap] workspace 引导会话已创建:', j.sessionId);
-    }).catch(e=>console.error('[bootstrap] workspace 引导失败:', e.message))
-  " || true
+  echo "[bootstrap] 多次重试后仍未成功，放弃（重启容器可重新触发）"
 }
 bootstrap_workspace &
 
