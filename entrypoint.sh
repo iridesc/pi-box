@@ -46,9 +46,13 @@ bootstrap_workspace() {
   while [ $tries -lt 60 ]; do  # 最多重试 60 次（约 1 小时），避免异常死循环
     tries=$((tries+1))
     local i ok=1
-    # 等 pi-web 就绪（最多 30s）
+    # 等 pi-web 就绪（最多 30s）。注意：若设置了 PI_WEB_PASSWORD，
+    # pi-web 的 Basic Auth 会保护 /api/*，探测请求必须带认证头，否则 401 会被误判为"未就绪"。
     for i in $(seq 1 30); do
-      if node -e "fetch('http://127.0.0.1:30141/api/sessions').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then
+      if node -e "
+        const h=process.env.PI_WEB_PASSWORD?{Authorization:'Basic '+Buffer.from('pi:'+process.env.PI_WEB_PASSWORD).toString('base64')}:{};
+        fetch('http://127.0.0.1:30141/api/sessions',{headers:h}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      " 2>/dev/null; then
         ok=0; break
       fi
       sleep 1
@@ -56,7 +60,8 @@ bootstrap_workspace() {
     [ "$ok" = 1 ] && { echo "[bootstrap] pi-web 未就绪，60s 后重试"; sleep 60; continue; }
     # 已有 /workspace 会话则跳过（用 API 判断，避免依赖目录编码）
     if node -e "
-      fetch('http://127.0.0.1:30141/api/sessions').then(r=>r.json()).then(j=>{
+      const h=process.env.PI_WEB_PASSWORD?{Authorization:'Basic '+Buffer.from('pi:'+process.env.PI_WEB_PASSWORD).toString('base64')}:{};
+      fetch('http://127.0.0.1:30141/api/sessions',{headers:h}).then(r=>r.json()).then(j=>{
         process.exit((j.sessions||[]).some(s=>s.cwd==='/workspace')?0:1)
       }).catch(()=>process.exit(1))
     " 2>/dev/null; then
@@ -64,9 +69,10 @@ bootstrap_workspace() {
     fi
     # 创建引导会话：type=prompt 会真实调一次模型，回复落盘后 /workspace 才被持久信任
     if node -e "
+      const h=process.env.PI_WEB_PASSWORD?{Authorization:'Basic '+Buffer.from('pi:'+process.env.PI_WEB_PASSWORD).toString('base64')}:{};
       fetch('http://127.0.0.1:30141/api/agent/new', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: Object.assign({ 'Content-Type': 'application/json' }, h),
         body: JSON.stringify({ cwd: '/workspace', type: 'prompt', toolNames: [], message: '请只回复：就绪' }),
       }).then(r=>r.json()).then(j=>{
         if (!j.success) throw new Error(j.error || 'unknown error');
