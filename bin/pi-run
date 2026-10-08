@@ -8,4 +8,9 @@ export HOME=/home/agent
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 export TZ="${TZ:-Asia/Shanghai}"
 
+# 回填容器注入的环境变量（compose environment / env_file）：cron 不继承容器环境，
+# 见 entrypoint.sh 的导出逻辑；/workspace/.cron/env 为用户自定义变量（可选，优先级更高）。
+if [ -r /run/pi-box/job-env.sh ]; then . /run/pi-box/job-env.sh; fi
+if [ -r /workspace/.cron/env ]; then . /workspace/.cron/env; fi
+
 exec pi -p -a --session-dir /workspace/.cron/sessions "$@"

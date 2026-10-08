@@ -8,7 +8,7 @@
 pi-box/
 ├── Dockerfile            # 预装 pi CLI + pi-web + cron
 ├── docker-compose.yml    # 挂载 workspace 与 agent-data，端口 8000
-├── entrypoint.sh         # 安装系统提示词 + 启动 cron + pi-web
+├── entrypoint.sh         # 导出环境变量 + 安装系统提示词 + 启动 cron + pi-web
 ├── bin/pi-job            # cron 任务包装：非交互跑一次 pi，日志落盘
 ├── system-prompt/
 │   └── SYSTEM.md         # 通用系统提示词模板（构建进镜像，首启自动安装）
@@ -17,6 +17,7 @@ pi-box/
 └── workspace/            # ← 挂载目录，宿主机直接编辑
     └── .cron/
         ├── jobs          # 周期任务配置（crontab 语法，唯一配置源）
+        ├── env           # 可选：任务专用环境变量（sh 语法，pi-job/pi-run 启动时加载）
         ├── logs/<id>/    # 任务日志（每次运行一个文件 + latest.log）
         └── state/<id>.json  # 运行状态（pi-job status 查询用）
 ```
@@ -90,6 +91,25 @@ agent 会通过 cron-jobs skill（工具 `cron-job.sh`）编辑 `/workspace/.cro
 podman exec pi-box crontab /workspace/.cron/jobs   # 重载
 podman exec pi-box crontab -l                      # 查看生效任务
 ```
+
+### 环境变量如何传给定时任务
+
+**cron 不继承容器环境**：vixie-cron 会给每个 job 重建环境（只有 `HOME`/`PATH`/`SHELL`/`LOGNAME`/`PWD`），因此 compose 的 `environment:` 与 `env_file: .env` 注入的变量在定时任务里默认**不可见**——表现为「网页会话里能用，定时任务里读不到」。
+
+pi-box 的处理：entrypoint 启动时把容器注入的环境变量导出到 `/run/pi-box/job-env.sh`，`pi-job` / `pi-run` 在任务启动时 source 回填。所以 `.env` 里加变量后**重启容器**，网页会话与定时任务看到同一套变量：
+
+```bash
+# .env
+MY_TOKEN=your-token-here
+
+podman compose up -d
+podman exec pi-box pi-job --id env-test 'echo "TOKEN=$MY_TOKEN"'   # → TOKEN=your-token-here
+```
+
+- **过滤规则**：容器固有变量（`HOME`/`PATH`/`PWD`/`SHLVL`/`TERM`/`HOSTNAME`/`BASH_*`/`NODE_VERSION` 等）跳过，避免覆盖任务运行环境；其余全部导出，值经 `printf %q` 安全转义（含空格、引号的密钥可用）。
+- **落盘位置**：`/run/pi-box/job-env.sh`（容器可写层，权限 600，每次启动幂等重建，不落挂载目录）。需要更强隔离时可在 compose 给该目录挂 tmpfs：`tmpfs: [/run/pi-box]`。
+- **只给任务用的变量**（不进 `.env`、改完不必重启容器）：编辑 `/workspace/.cron/env`（sh 语法，如 `export API_KEY=xxx`），`pi-job`/`pi-run` 每次运行都会加载，优先级高于自动导出。
+- **注意**：cron 行中的变量由 cron 自身解析，只有经由 `pi-job` 包装的命令（本项目的规范写法）才会拿到上述变量。
 
 ### 任务状态与日志
 

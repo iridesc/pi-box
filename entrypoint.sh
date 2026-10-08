@@ -5,6 +5,26 @@ set -e
 #    和 cron 任务里的 date 都按 UTC 跑。改为容器 TZ（默认 Asia/Shanghai）。
 ln -sf /usr/share/zoneinfo/${TZ:-Asia/Shanghai} /etc/localtime
 
+# 0.5) 容器注入的环境变量（compose 的 environment / env_file）导出为任务环境文件。
+#      cron 不继承容器环境（vixie-cron 会给每个 job 重建环境，实测 job 里只剩
+#      HOME/PATH/SHELL/LOGNAME/PWD），导致 .env 里加的变量在定时任务中不可见。
+#      这里导出成 shell 片段，由 pi-job / pi-run 在任务启动时 source 回填，
+#      使网页会话与定时任务看到同一套变量。
+#      放 /run（容器可写层，不落挂载目录）；每次启动幂等重建，.env 改动需重启容器生效。
+ENV_FILE=/run/pi-box/job-env.sh
+mkdir -p /run/pi-box
+: > "$ENV_FILE"
+while IFS= read -r -d '' kv; do
+  key=${kv%%=*}
+  case "$key" in
+    # 容器固有变量：跳过，避免覆盖 pi-job 自己设定的 HOME/PATH/TZ 等运行环境
+    HOME | PATH | PWD | OLDPWD | SHLVL | _ | TERM | HOSTNAME | BASH_* | FUNCNAME | NODE_VERSION | YARN_VERSION | npm_*) continue ;;
+  esac
+  printf 'export %s=%q\n' "$key" "${kv#*=}" >> "$ENV_FILE"
+done < <(env -0)
+chmod 600 "$ENV_FILE"
+echo "[bootstrap] 已导出容器环境变量到定时任务环境文件: $ENV_FILE（$(grep -c '^export ' "$ENV_FILE" || true) 个变量）"
+
 # 1) 通用系统提示词 + cron-jobs skill：镜像内置模板，首启时安装到全局 agent 目录。
 #    之后每次启动跳过（宿主机 agent-data/ 下已存在即保留用户版本）。
 mkdir -p /home/agent/.pi/agent
