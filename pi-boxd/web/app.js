@@ -242,14 +242,19 @@ function renderDispatchForm() {
 }
 
 // ─── 设置弹窗 ───────────────────────────────────────────────────────────────────────
-function fillModelList(meta) {
-  const dl = document.getElementById("cfg-model-list");
-  dl.innerHTML = "";
-  for (const m of meta.models || []) {
+function fillModelList(meta, selected) {
+  const sel = document.getElementById("cfg-model");
+  sel.innerHTML = "";
+  const models = meta.models || [];
+  // 当前值不在列表时也加进去（避免被覆盖）
+  const list = selected && !models.includes(selected) ? [selected, ...models] : models;
+  for (const m of list) {
     const o = document.createElement("option");
     o.value = m;
-    dl.appendChild(o);
+    o.textContent = m;
+    sel.appendChild(o);
   }
+  if (selected) sel.value = selected;
 }
 
 async function openSettings() {
@@ -269,8 +274,7 @@ async function openSettings() {
     sel.onchange = () => {
       const meta = cfgProviders.find((p) => p.id === sel.value);
       if (meta) {
-        fillModelList(meta);
-        document.getElementById("cfg-model").value = meta.defaultModel;
+        fillModelList(meta, meta.defaultModel);
         document.getElementById("cfg-baseurl").value = meta.defaultBaseUrl || "";
       }
     };
@@ -279,10 +283,9 @@ async function openSettings() {
   const r = await fetch("/api/settings");
   const cfg = await r.json();
   document.getElementById("cfg-provider").value = cfg.provider;
-  // 当前 provider 的模型列表也要填上
+  // 当前 provider 的模型列表 + 选中当前模型
   const current = cfgProviders.find((p) => p.id === cfg.provider);
-  if (current) fillModelList(current);
-  document.getElementById("cfg-model").value = cfg.modelId;
+  if (current) fillModelList(current, cfg.modelId);
   document.getElementById("cfg-baseurl").value = cfg.baseUrl || "";
   document.getElementById("cfg-key").value = "";
   document.getElementById("cfg-key").placeholder = cfg.hasKey ? "未改动时留空保留原 key" : "填入你的 API Key";
