@@ -8,9 +8,10 @@ import { fileURLToPath } from "node:url";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { AgentDoc, createRegistry, Harness } from "@earendil-works/pi-durable";
+import { Type } from "@earendil-works/pi-ai";
+import { AgentDoc, configure, createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -34,8 +35,8 @@ const WEB_DIR = process.env.PI_BOXD_WEB_DIR
 const models = createModels();
 let model = { provider: "openai", modelId: "gpt-6-sol" };
 const useFaux = process.env.OPENAI_API_KEY === undefined;
-if (useFaux) {
-  const faux = fauxProvider();
+const faux = useFaux ? fauxProvider() : null;
+if (faux) {
   models.setProvider(faux.provider);
   model = { provider: "faux", modelId: "faux-1" };
 } else {
@@ -45,6 +46,54 @@ if (useFaux) {
 // ─── Harness：文件工具 + env(cwd) 项目隔离 ──────────────────────────────────
 const registry = createRegistry();
 registry.install(CodingTools);
+
+// ─── pi-box 扩展：delegate_agent 工具（owned conversation，保留 ownership 层级）──
+const DelegateAgent = defineTool({
+  name: "delegate_agent",
+  description: "派发任务给项目内配置的 agent。读 <父 cwd>/.pi/agents/<name>.md，创建 owned 子会话（归当前 task 所有），子会话的 instructions/cwd 用 agent 定义。返回子会话 ID。",
+  parameters: Type.Object({
+    agent: Type.String({ description: "agent 名（.pi/agents/<name>.md 去 .md）" }),
+    task: Type.String({ description: "子 agent 要完成的任务描述" }),
+  }),
+  replay: "safe",
+  execute: async (args, api, ctx) => {
+    // 1. 父会话的 cwd（env 由 HarnessOptions.env 构造时填入）
+    const cwd = api.env?.cwd;
+    if (!cwd) throw new Error("父会话没有 cwd，无法定位 .pi/agents/ 目录");
+    // 2. 读 agent 定义
+    const defPath = join(cwd, ".pi", "agents", `${args.agent}.md`);
+    let def;
+    try {
+      def = parseAgentDef(await readFile(defPath, "utf-8"));
+    } catch {
+      throw new Error(`Agent "${args.agent}" 不存在（未找到 ${defPath}）`);
+    }
+    // 3. 创建 owned 子会话（归当前工具调用的 task 所有，崩溃重放幂等）
+    const childId = await api.commit(async (tx) => {
+      const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
+      if (existing !== undefined) return existing.id;
+      const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
+      return created.id;
+    }, ctx);
+    // 4. 配置子 agent（model/instructions/cwd）
+    await api.commit((tx) => configure(tx, childId, {
+      model: def.model ? { provider: "openai", modelId: def.model } : undefined,
+      instructions: def.instructions,
+      cwd,
+    }), ctx);
+    // 5. submit 任务给子会话（不 wait —— 子 agent 后台跑）
+    const handle = await api.conversation(childId, ctx);
+    if (!handle) throw new Error("无法获取子会话 handle");
+    await handle.submit({ type: "input", content: args.task }, ctx);
+    return {
+      content: [{ type: "text", text: `已派发到 agent "${args.agent}" → 会话 #${childId}（归 task #${api.taskId}）` }],
+      details: { conversationId: childId, agent: args.agent },
+    };
+  },
+});
+const PiBoxExtension = defineExtension({ name: "pi-box", tools: [DelegateAgent] });
+registry.install(PiBoxExtension);
+
 await mkdir(DATA_DIR, { recursive: true });
 const storage = await openNodeSqliteStorage(join(DATA_DIR, "session.sqlite"));
 const harness = await Harness.open(
@@ -212,6 +261,52 @@ const server = createWebServer({
         await conv.submit({ type: "input", content: task }, context);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ conversationId: conv.id, project, agent, task, cwd }));
+      },
+    },
+    // 演示 delegate_agent 工具（仅 faux 模式）：设 4 轮脚本，提交输入进项目会话
+    // 轮 1：父 agent 调 delegate_agent（创建 owned 子会话）
+    // 轮 2：父 agent 回复“已派发”
+    // 轮 3：子 agent 回复“审查完成”
+    // 轮 4：子 agent 回复“任务结束”
+    "/api/demo-delegate": {
+      method: "POST",
+      async handler(req, res) {
+        if (!faux) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "/api/demo-delegate 仅在 faux 模式下可用" }));
+          return;
+        }
+        // 重置 faux 脚本
+        faux.setResponses([
+          fauxAssistantMessage([fauxToolCall("delegate_agent", { agent: "reviewer", task: "审查项目根目录的文件" }, { id: "demo-1" })], { stopReason: "toolUse" }),
+          fauxAssistantMessage([fauxText("已派发 reviewer 去审查项目")], { stopReason: "endTurn" }),
+          fauxAssistantMessage([fauxText("审查完成：未发现明显问题")], { stopReason: "endTurn" }),
+          fauxAssistantMessage([fauxText("任务结束")], { stopReason: "endTurn" }),
+        ]);
+        // 找 proj-alpha 会话
+        const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+        let projAlphaConvId = null;
+        for (const rec of records) {
+          const a = await harness.snapshot(AgentDoc, rec.id, context);
+          if (a?.cwd === join(PROJECTS_DIR, "proj-alpha")) {
+            projAlphaConvId = rec.id;
+            break;
+          }
+        }
+        if (!projAlphaConvId) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "未找到 proj-alpha 会话" }));
+          return;
+        }
+        const conv = await harness.conversation(projAlphaConvId, context);
+        if (!conv) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "会话 handle 未找到" }));
+          return;
+        }
+        await conv.submit({ type: "input", content: "请审查这个项目" }, context);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, parentConversationId: projAlphaConvId, note: "看会话树：parent → delegate task → child agent 会话" }));
       },
     },
   },
