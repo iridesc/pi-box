@@ -111,7 +111,7 @@ function renderEntries() {
   if (!conv) { el.textContent = "（无会话）"; return; }
   const title = document.createElement("div");
   title.className = "entries-title";
-  title.textContent = `会话 #${conv.id} 的转录（${conv.entries.length} 条）`;
+  title.textContent = `会话 #${conv.id} 的消息（${conv.entries.length} 条）`;
   el.appendChild(title);
   for (const e of conv.entries) {
     const div = document.createElement("div");
