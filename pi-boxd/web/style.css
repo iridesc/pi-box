@@ -48,6 +48,14 @@ section:last-child { border-right: none; }
 .scroll { flex: 1; overflow-y: auto; padding: 8px; }
 
 /* 会话树 */
+.project-group {
+  padding: 6px 8px 4px;
+  margin-top: 4px;
+  color: #58a6ff;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid #21262d;
+}
 .conv-node {
   padding: 6px 8px;
   cursor: pointer;

@@ -45,32 +45,59 @@ function lockIfNoKey() {
 
 // ─── 会话树（ownership 层级）───────────────────────────────────────────────
 function renderConversationTree() {
-  const nodes = new Map(state.conversations.map((c) => [c.id, { ...c, children: [] }]));
-  const roots = [];
-  for (const n of nodes.values()) {
-    const pid = n.owner ? String(n.owner.conversationId) : null;
-    if (pid && nodes.has(pid)) nodes.get(pid).children.push(n);
-    else roots.push(n);
-  }
   const el = document.getElementById("conversation-tree");
   el.innerHTML = "";
-  const renderNode = (n, depth) => {
+  const renderNode = (n, depth, nodes) => {
     const div = document.createElement("div");
     div.className = "conv-node" + (n.id === selectedId ? " selected" : "");
-    div.style.paddingLeft = (depth * 16 + 8) + "px";
+    div.style.paddingLeft = depth * 16 + 8 + "px";
     div.textContent = `#${n.id} · ${n.entries.length} entries`;
     const tag = document.createElement("span");
     tag.className = "conv-tag";
-    const parts = [];
-    if (n.project) parts.push(`📁 ${n.project}`);
-    parts.push(n.owner ? `owned (task #${n.owner.taskId})` : "top-level");
-    tag.textContent = parts.join(" · ");
+    tag.textContent = n.owner ? `owned (task #${n.owner.taskId})` : "top-level";
     div.appendChild(tag);
-    div.onclick = () => { selectedId = n.id; render(); };
+    div.onclick = () => {
+      selectedId = n.id;
+      render();
+    };
     el.appendChild(div);
-    n.children.forEach((c) => renderNode(c, depth + 1));
+    n.children.forEach((c) => renderNode(c, depth + 1, nodes));
   };
-  roots.forEach((r) => renderNode(r, 0));
+  // 组内按 ownership 建树
+  const buildTree = (convs) => {
+    const nodes = new Map(convs.map((c) => [c.id, { ...c, children: [] }]));
+    const roots = [];
+    for (const n of nodes.values()) {
+      const pid = n.owner ? String(n.owner.conversationId) : null;
+      if (pid && nodes.has(pid)) nodes.get(pid).children.push(n);
+      else roots.push(n);
+    }
+    return { roots, nodes };
+  };
+
+  const conversations = state.conversations;
+  const hasProjects = conversations.some((c) => c.project);
+  if (!hasProjects) {
+    // 无 project 概念（纯 durable 页）→ 平铺
+    const { roots, nodes } = buildTree(conversations);
+    roots.forEach((r) => renderNode(r, 0, nodes));
+    return;
+  }
+  // 按 project 分组（项目作为第一层）
+  const groups = new Map();
+  for (const c of conversations) {
+    const key = c.project || "（无项目）";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  for (const [proj, convs] of groups) {
+    const head = document.createElement("div");
+    head.className = "project-group";
+    head.textContent = `📁 ${proj}`;
+    el.appendChild(head);
+    const { roots, nodes } = buildTree(convs);
+    roots.forEach((r) => renderNode(r, 1, nodes));
+  }
 }
 
 // ─── 转录（entries）────────────────────────────────────────────────────────
