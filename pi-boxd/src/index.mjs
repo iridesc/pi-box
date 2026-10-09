@@ -52,25 +52,42 @@ async function saveConfig(cfg) {
 // keyEnv 是 pi-ai 该 provider 的 auth resolve 会查的环境变量名
 const PROVIDERS = {
   openai: { name: "OpenAI", defaultModel: "gpt-4o", defaultBaseUrl: "https://api.openai.com/v1", keyEnv: "OPENAI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/openai").then((m) => m.openaiProvider()) },
-  deepseek: { name: "DeepSeek", defaultModel: "deepseek-chat", defaultBaseUrl: "https://api.deepseek.com/v1", keyEnv: "DEEPSEEK_API_KEY", load: () => import("@earendil-works/pi-ai/providers/deepseek").then((m) => m.deepseekProvider()) },
-  moonshotai: { name: "Moonshot (Kimi)", defaultModel: "moonshot-v1-8k", defaultBaseUrl: "https://api.moonshot.cn/v1", keyEnv: "MOONSHOT_API_KEY", load: () => import("@earendil-works/pi-ai/providers/moonshotai").then((m) => m.moonshotaiProvider()) },
-  google: { name: "Google Gemini", defaultModel: "gemini-2.0-flash-exp", defaultBaseUrl: "", keyEnv: "GEMINI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/google").then((m) => m.googleProvider()) },
-  groq: { name: "Groq", defaultModel: "llama-3.1-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1", keyEnv: "GROQ_API_KEY", load: () => import("@earendil-works/pi-ai/providers/groq").then((m) => m.groqProvider()) },
+  deepseek: { name: "DeepSeek", defaultModel: "deepseek-flash", defaultBaseUrl: "https://api.deepseek.com/v1", keyEnv: "DEEPSEEK_API_KEY", load: () => import("@earendil-works/pi-ai/providers/deepseek").then((m) => m.deepseekProvider()) },
+  moonshotai: { name: "Moonshot (Kimi)", defaultModel: "kimi-k2.6", defaultBaseUrl: "https://api.moonshot.cn/v1", keyEnv: "MOONSHOT_API_KEY", load: () => import("@earendil-works/pi-ai/providers/moonshotai").then((m) => m.moonshotaiProvider()) },
+  google: { name: "Google Gemini", defaultModel: "gemini-2.5-flash", defaultBaseUrl: "", keyEnv: "GEMINI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/google").then((m) => m.googleProvider()) },
+  groq: { name: "Groq", defaultModel: "llama-3.3-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1", keyEnv: "GROQ_API_KEY", load: () => import("@earendil-works/pi-ai/providers/groq").then((m) => m.groqProvider()) },
   openrouter: { name: "OpenRouter", defaultModel: "openai/gpt-4o", defaultBaseUrl: "https://openrouter.ai/api/v1", keyEnv: "OPENROUTER_API_KEY", load: () => import("@earendil-works/pi-ai/providers/openrouter").then((m) => m.openrouterProvider()) },
-  mistral: { name: "Mistral", defaultModel: "mistral-large-latest", defaultBaseUrl: "https://api.mistral.ai/v1", keyEnv: "MISTRAL_API_KEY", load: () => import("@earendil-works/pi-ai/providers/mistral").then((m) => m.mistralProvider()) },
-  xai: { name: "xAI (Grok)", defaultModel: "grok-2-latest", defaultBaseUrl: "https://api.x.ai/v1", keyEnv: "XAI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/xai").then((m) => m.xaiProvider()) },
-  anthropic: { name: "Anthropic Claude", defaultModel: "claude-3-5-sonnet-latest", defaultBaseUrl: "https://api.anthropic.com", keyEnv: "ANTHROPIC_API_KEY", load: () => import("@earendil-works/pi-ai/providers/anthropic").then((m) => m.anthropicProvider()) },
+  mistral: { name: "Mistral", defaultModel: "codestral-latest", defaultBaseUrl: "https://api.mistral.ai/v1", keyEnv: "MISTRAL_API_KEY", load: () => import("@earendil-works/pi-ai/providers/mistral").then((m) => m.mistralProvider()) },
+  xai: { name: "xAI (Grok)", defaultModel: "grok-4.3", defaultBaseUrl: "https://api.x.ai/v1", keyEnv: "XAI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/xai").then((m) => m.xaiProvider()) },
+  anthropic: { name: "Anthropic Claude", defaultModel: "claude-fable-5", defaultBaseUrl: "https://api.anthropic.com", keyEnv: "ANTHROPIC_API_KEY", load: () => import("@earendil-works/pi-ai/providers/anthropic").then((m) => m.anthropicProvider()) },
   minimax: { name: "MiniMax (国际)", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimax.io/anthropic", keyEnv: "MINIMAX_API_KEY", load: () => import("@earendil-works/pi-ai/providers/minimax").then((m) => m.minimaxProvider()) },
   "minimax-cn": { name: "MiniMax (中国)", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimaxi.com/anthropic", keyEnv: "MINIMAX_API_KEY", load: () => import("@earendil-works/pi-ai/providers/minimax").then((m) => m.minimaxProvider()) },
 };
 
-// 前端用的列表（不含 load 函数）
+// 前端用的列表（不含 load 函数；defaultModel 为 fallback，前端选 provider 后会取真实模型列表）
 const PROVIDER_LIST = Object.entries(PROVIDERS).map(([id, p]) => ({
   id,
   name: p.name,
   defaultModel: p.defaultModel,
   defaultBaseUrl: p.defaultBaseUrl,
 }));
+
+// 各 provider 的真实模型列表（懒加载 + 缓存）
+let providerModelsCache = null;
+async function getAllProviderModels() {
+  if (providerModelsCache) return providerModelsCache;
+  const result = {};
+  for (const [id, def] of Object.entries(PROVIDERS)) {
+    try {
+      const p = await def.load();
+      result[id] = (await p.getModels()).map((m) => m.id);
+    } catch {
+      result[id] = [];
+    }
+  }
+  providerModelsCache = result;
+  return result;
+}
 
 // authContext：让 pi-ai 从 config.json 读 key（回退到 process.env）
 const authContext = {
@@ -113,7 +130,18 @@ async function initProvider() {
     }
     models.setProvider(p);
     currentModelProvider = p.id; // 真实 provider id（model.provider 必须用这个）
-    model = { provider: p.id, modelId: cfg.modelId };
+    // 校验模型是否在列表内；不在则自动 fallback 到第一个可用模型
+    let modelId = cfg.modelId;
+    try {
+      const available = (await p.getModels()).map((m) => m.id);
+      if (available.length > 0 && modelId && !available.includes(modelId)) {
+        console.warn(`[config] 模型 "${modelId}" 不在 ${cfg.provider} 列表中，自动改用 "${available[0]}"（可用：${available.slice(0, 5).join(", ")}）`);
+        modelId = available[0];
+      }
+    } catch {
+      /* 忽略 */
+    }
+    model = { provider: p.id, modelId };
   } else {
     useFaux = true;
     faux = fauxProvider();
@@ -312,12 +340,17 @@ const server = createWebServer({
   createConversation: () =>
     harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model, cwd: PROJECTS_DIR } }, context),
   extraRoutes: {
-    // 列出可配置的 provider 列表
+    // 列出可配置的 provider 列表（含真实模型列表）
     "/api/providers": {
       method: "GET",
       async handler(req, res) {
+        const modelsByProvider = await getAllProviderModels();
+        const providers = PROVIDER_LIST.map((p) => {
+          const models = modelsByProvider[p.id] ?? [];
+          return { ...p, models, defaultModel: models[0] ?? p.defaultModel };
+        });
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ providers: PROVIDER_LIST }));
+        res.end(JSON.stringify({ providers }));
       },
     },
     // 配置读/写（GET 读，POST 写）—— extraRoutes 支持单 method 或方法列表
@@ -347,6 +380,14 @@ const server = createWebServer({
         if (baseUrl === undefined) {
           const meta = PROVIDER_LIST.find((p) => p.id === provider);
           baseUrl = meta?.defaultBaseUrl || "";
+        }
+        // 校验 modelId 是否在 provider 的可用模型列表中（pi-ai 只能查列表内的模型）
+        const modelsByProvider = await getAllProviderModels();
+        const available = modelsByProvider[provider] ?? [];
+        if (available.length > 0 && modelId && !available.includes(modelId)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `模型 "${modelId}" 不在 ${provider} 的可用列表中`, available: available.slice(0, 30) }));
+          return;
         }
         const old = await loadConfig();
         if (apiKey === undefined || apiKey === null) apiKey = old.apiKey || "";

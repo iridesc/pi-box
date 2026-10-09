@@ -242,6 +242,16 @@ function renderDispatchForm() {
 }
 
 // ─── 设置弹窗 ───────────────────────────────────────────────────────────────────────
+function fillModelList(meta) {
+  const dl = document.getElementById("cfg-model-list");
+  dl.innerHTML = "";
+  for (const m of meta.models || []) {
+    const o = document.createElement("option");
+    o.value = m;
+    dl.appendChild(o);
+  }
+}
+
 async function openSettings() {
   // 加载 provider 列表
   if (cfgProviders.length === 0) {
@@ -259,6 +269,7 @@ async function openSettings() {
     sel.onchange = () => {
       const meta = cfgProviders.find((p) => p.id === sel.value);
       if (meta) {
+        fillModelList(meta);
         document.getElementById("cfg-model").value = meta.defaultModel;
         document.getElementById("cfg-baseurl").value = meta.defaultBaseUrl || "";
       }
@@ -268,6 +279,9 @@ async function openSettings() {
   const r = await fetch("/api/settings");
   const cfg = await r.json();
   document.getElementById("cfg-provider").value = cfg.provider;
+  // 当前 provider 的模型列表也要填上
+  const current = cfgProviders.find((p) => p.id === cfg.provider);
+  if (current) fillModelList(current);
   document.getElementById("cfg-model").value = cfg.modelId;
   document.getElementById("cfg-baseurl").value = cfg.baseUrl || "";
   document.getElementById("cfg-key").value = "";
