@@ -2,14 +2,13 @@
 // 打开一个 Harness（SQLite 落盘），每个「项目目录」对应一个 conversation（cwd 指向项目根），
 // 文件工具（read/write/edit/bash）通过 env(cwd) 在各自项目目录里执行 —— 项目隔离的软边界。
 // 复用 pi-durable-web 的 core（snapshot + HTTP/SSE），用自己的 web 目录（含 agent 派发 UI）。
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
 import { basename, join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { Type } from "@earendil-works/pi-ai";
 import { AgentDoc, configure, createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -31,8 +30,7 @@ const WEB_DIR = process.env.PI_BOXD_WEB_DIR
   ? resolve(process.env.PI_BOXD_WEB_DIR)
   : join(_piBoxdDir, "web"); // .../pi-boxd/web/
 
-// ─── 模型：有 key 用 openai（兼容 OpenAI 协议，含可配 baseUrl 走其他 provider），无 key 用 faux（离线） ──
-const models = createModels();
+// ─── 模型：有 key 用对应 provider，无 key 用 faux（离线） ──────────────────
 let model = { provider: "openai", modelId: "gpt-4o" };
 let useFaux = true;
 let faux = null;
@@ -50,45 +48,76 @@ async function saveConfig(cfg) {
   await writeFile(configPath, JSON.stringify(cfg, null, 2), "utf-8");
 }
 
-// Provider 列表（仅元数据，供前端下拉）
-// api: "openai" = openai-compatible（含 openai/deepseek/groq/openrouter/xai/mistral/moonshotai）
-//      "anthropic" = anthropic-messages 协议（含 anthropic/minimax/minimax-cn）
-const PROVIDER_LIST = [
-  { id: "openai", name: "OpenAI", api: "openai", defaultModel: "gpt-4o", defaultBaseUrl: "https://api.openai.com/v1" },
-  { id: "deepseek", name: "DeepSeek", api: "openai", defaultModel: "deepseek-chat", defaultBaseUrl: "https://api.deepseek.com/v1" },
-  { id: "moonshotai", name: "Moonshot (Kimi)", api: "openai", defaultModel: "moonshot-v1-8k", defaultBaseUrl: "https://api.moonshot.cn/v1" },
-  { id: "google", name: "Google Gemini", api: "openai", defaultModel: "gemini-2.0-flash-exp", defaultBaseUrl: "" },
-  { id: "groq", name: "Groq", api: "openai", defaultModel: "llama-3.1-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1" },
-  { id: "openrouter", name: "OpenRouter", api: "openai", defaultModel: "openai/gpt-4o", defaultBaseUrl: "https://openrouter.ai/api/v1" },
-  { id: "mistral", name: "Mistral", api: "openai", defaultModel: "mistral-large-latest", defaultBaseUrl: "https://api.mistral.ai/v1" },
-  { id: "xai", name: "xAI (Grok)", api: "openai", defaultModel: "grok-2-latest", defaultBaseUrl: "https://api.x.ai/v1" },
-  { id: "anthropic", name: "Anthropic Claude", api: "anthropic", defaultModel: "claude-3-5-sonnet-latest", defaultBaseUrl: "https://api.anthropic.com" },
-  { id: "minimax", name: "MiniMax (国际)", api: "anthropic", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimax.io/anthropic" },
-  { id: "minimax-cn", name: "MiniMax (中国)", api: "anthropic", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimaxi.com/anthropic" },
-];
+// Provider 定义：前端元数据 + 后端 factory/keyEnv
+// keyEnv 是 pi-ai 该 provider 的 auth resolve 会查的环境变量名
+const PROVIDERS = {
+  openai: { name: "OpenAI", defaultModel: "gpt-4o", defaultBaseUrl: "https://api.openai.com/v1", keyEnv: "OPENAI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/openai").then((m) => m.openaiProvider()) },
+  deepseek: { name: "DeepSeek", defaultModel: "deepseek-chat", defaultBaseUrl: "https://api.deepseek.com/v1", keyEnv: "DEEPSEEK_API_KEY", load: () => import("@earendil-works/pi-ai/providers/deepseek").then((m) => m.deepseekProvider()) },
+  moonshotai: { name: "Moonshot (Kimi)", defaultModel: "moonshot-v1-8k", defaultBaseUrl: "https://api.moonshot.cn/v1", keyEnv: "MOONSHOT_API_KEY", load: () => import("@earendil-works/pi-ai/providers/moonshotai").then((m) => m.moonshotaiProvider()) },
+  google: { name: "Google Gemini", defaultModel: "gemini-2.0-flash-exp", defaultBaseUrl: "", keyEnv: "GEMINI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/google").then((m) => m.googleProvider()) },
+  groq: { name: "Groq", defaultModel: "llama-3.1-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1", keyEnv: "GROQ_API_KEY", load: () => import("@earendil-works/pi-ai/providers/groq").then((m) => m.groqProvider()) },
+  openrouter: { name: "OpenRouter", defaultModel: "openai/gpt-4o", defaultBaseUrl: "https://openrouter.ai/api/v1", keyEnv: "OPENROUTER_API_KEY", load: () => import("@earendil-works/pi-ai/providers/openrouter").then((m) => m.openrouterProvider()) },
+  mistral: { name: "Mistral", defaultModel: "mistral-large-latest", defaultBaseUrl: "https://api.mistral.ai/v1", keyEnv: "MISTRAL_API_KEY", load: () => import("@earendil-works/pi-ai/providers/mistral").then((m) => m.mistralProvider()) },
+  xai: { name: "xAI (Grok)", defaultModel: "grok-2-latest", defaultBaseUrl: "https://api.x.ai/v1", keyEnv: "XAI_API_KEY", load: () => import("@earendil-works/pi-ai/providers/xai").then((m) => m.xaiProvider()) },
+  anthropic: { name: "Anthropic Claude", defaultModel: "claude-3-5-sonnet-latest", defaultBaseUrl: "https://api.anthropic.com", keyEnv: "ANTHROPIC_API_KEY", load: () => import("@earendil-works/pi-ai/providers/anthropic").then((m) => m.anthropicProvider()) },
+  minimax: { name: "MiniMax (国际)", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimax.io/anthropic", keyEnv: "MINIMAX_API_KEY", load: () => import("@earendil-works/pi-ai/providers/minimax").then((m) => m.minimaxProvider()) },
+  "minimax-cn": { name: "MiniMax (中国)", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimaxi.com/anthropic", keyEnv: "MINIMAX_API_KEY", load: () => import("@earendil-works/pi-ai/providers/minimax").then((m) => m.minimaxProvider()) },
+};
 
-// 根据 config 初始化 provider：有 key 则按 provider 的 api 协议选 factory，无 key 则 faux
+// 前端用的列表（不含 load 函数）
+const PROVIDER_LIST = Object.entries(PROVIDERS).map(([id, p]) => ({
+  id,
+  name: p.name,
+  defaultModel: p.defaultModel,
+  defaultBaseUrl: p.defaultBaseUrl,
+}));
+
+// authContext：让 pi-ai 从 config.json 读 key（回退到 process.env）
+const authContext = {
+  async env(name) {
+    const cfg = await loadConfig();
+    if (cfg?.apiKey) {
+      const def = PROVIDERS[cfg.provider];
+      if (def && name === def.keyEnv) return cfg.apiKey;
+      // anthropic 协议还可能查 ANTHROPIC_AUTH_TOKEN
+      if (def && def.keyEnv === "ANTHROPIC_API_KEY" && name === "ANTHROPIC_AUTH_TOKEN") return cfg.apiKey;
+    }
+    return process.env[name];
+  },
+  async fileExists(path) {
+    try {
+      await stat(path.replace(/^~/, process.env.HOME ?? ""));
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+const models = createModels({ authContext });
+
+// 根据 config 初始化 provider：有 key 则用对应 provider，无 key 则 faux
+let currentModelProvider = "faux"; // 实际 provider id（minimax-cn 用 minimaxProvider 时是 "minimax"）
 async function initProvider() {
   const cfg = await loadConfig();
-  // 清理现有
   for (const p of models.getProviders()) models.deleteProvider(p.id);
   if (cfg.apiKey) {
+    const def = PROVIDERS[cfg.provider] ?? PROVIDERS.openai;
     useFaux = false;
-    model = { provider: cfg.provider, modelId: cfg.modelId };
-    // 查 provider 元数据选 factory
-    const meta = PROVIDER_LIST.find((p) => p.id === cfg.provider);
-    let p;
-    if (meta?.api === "anthropic") {
-      p = (await import("@earendil-works/pi-ai/providers/anthropic")).anthropicProvider();
-    } else {
-      // openai-compatible 统一走 openaiProvider
-      p = openaiProvider();
+    const p = await def.load();
+    // 覆盖 baseUrl：pi-ai 用 model.baseUrl（不是 provider.baseUrl），所以改模型定义
+    if (cfg.baseUrl) {
+      p.baseUrl = cfg.baseUrl;
+      const all = typeof p.getAllModels === "function" ? p.getAllModels() : [];
+      for (const m of all) m.baseUrl = cfg.baseUrl;
     }
-    if (cfg.baseUrl) p.baseUrl = cfg.baseUrl;
     models.setProvider(p);
+    currentModelProvider = p.id; // 真实 provider id（model.provider 必须用这个）
+    model = { provider: p.id, modelId: cfg.modelId };
   } else {
     useFaux = true;
     faux = fauxProvider();
+    currentModelProvider = "faux";
     model = { provider: "faux", modelId: "faux-1" };
     models.setProvider(faux.provider);
   }
@@ -135,14 +164,16 @@ const DelegateAgent = defineTool({
     }, ctx);
     // 4. 配置子 agent（model/instructions/cwd）
     await api.commit((tx) => configure(tx, childId, {
-      model: def.model ? { provider: "openai", modelId: def.model } : undefined,
+      model: resolveAgentModel(def.model, model),
       instructions: def.instructions,
       cwd,
     }), ctx);
     // 5. submit 任务给子会话（不 wait —— 子 agent 后台跑）
     const handle = await api.conversation(childId, ctx);
     if (!handle) throw new Error("无法获取子会话 handle");
-    await handle.submit({ type: "input", content: args.task }, ctx);
+    const sub = await handle.submit({ type: "input", content: args.task }, ctx);
+    // 唤醒 scheduler（不 await，后台跑）
+    sub.wait(ctx).catch(() => {});
     return {
       content: [{ type: "text", text: `已派发到 agent "${args.agent}" → 会话 #${childId}（归 task #${api.taskId}）` }],
       details: { conversationId: childId, agent: args.agent },
@@ -156,7 +187,7 @@ await mkdir(DATA_DIR, { recursive: true });
 const storage = await openNodeSqliteStorage(join(DATA_DIR, "session.sqlite"));
 const harness = await Harness.open(
   storage,
-  { models, registry, env: (target) => new NodeExecutionEnv({ cwd: target.cwd ?? process.cwd() }) },
+  { models, registry, env: (target) => new NodeExecutionEnv({ cwd: target.cwd ?? process.cwd() }), onReport: (e) => console.error("[harness report]", String(e?.stack ?? e)) },
   context,
 );
 
@@ -201,8 +232,7 @@ function parseAgentDef(md) {
 }
 
 /** 列出项目内的 agent 定义 */
-async function listAgents(projectName) {
-  const agentDir = join(PROJECTS_DIR, projectName, ".pi", "agents");
+async function listAgents(projectName) {  const agentDir = join(PROJECTS_DIR, projectName, ".pi", "agents");
   try {
     const files = await readdir(agentDir);
     const mdFiles = files.filter((f) => f.endsWith(".md"));
@@ -218,6 +248,23 @@ async function listAgents(projectName) {
   } catch {
     return [];
   }
+}
+
+/**
+ * 解析 agent 定义里的 model 字段，从全局 model 派生。
+ * 支持两种写法：
+ *   model: gpt-4o            （纯 modelId，provider 跟当前配置）
+ *   model: openai/gpt-4o     （provider/modelId）
+ * 如果解析不到可用模型，回退到全局 model。
+ */
+function resolveAgentModel(defModel, fallback) {
+  if (!defModel) return fallback;
+  if (defModel.includes("/")) {
+    const [provider, modelId] = defModel.split("/");
+    if (models.getModel(provider, modelId)) return { provider, modelId };
+  }
+  if (models.getModel(fallback.provider, defModel)) return { provider: fallback.provider, modelId: defModel };
+  return fallback; // 找不到就用全局
 }
 
 // ─── 每个项目确保一个 conversation（cwd 指向项目目录）──────────────────────
@@ -305,16 +352,16 @@ const server = createWebServer({
         if (apiKey === undefined || apiKey === null) apiKey = old.apiKey || "";
         await saveConfig({ provider, modelId, apiKey, baseUrl });
         const newHasKey = await refreshProvider();
-        // 重新 configure 现有会话的 model
+        // 重新 configure 现有会话的 model（用真实 provider id：model.provider）
         const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
         for (const rec of records) {
           const a = await harness.snapshot(AgentDoc, rec.id, context);
-          if (a && (a.model?.provider !== provider || a.model?.modelId !== modelId)) {
-            await harness.commit((tx) => configure(tx, rec.id, { model: { provider, modelId } }), context);
+          if (a && (a.model?.provider !== model.provider || a.model?.modelId !== model.modelId)) {
+            await harness.commit((tx) => configure(tx, rec.id, { model: { provider: model.provider, modelId: model.modelId } }), context);
           }
         }
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, hasKey: newHasKey, provider, modelId, baseUrl }));
+        res.end(JSON.stringify({ ok: true, hasKey: newHasKey, provider, modelId, baseUrl, effectiveProvider: model.provider }));
       },
     },
     // 列出项目内的 agent 定义
@@ -365,7 +412,7 @@ const server = createWebServer({
           {
             ownership: { kind: "ownerless" }, // P2 先用 ownerless，按 cwd 关联项目
             agent: {
-              model: agentDef.model ? { provider: "openai", modelId: agentDef.model } : model,
+              model: resolveAgentModel(agentDef.model, model),
               instructions: agentDef.instructions,
               cwd,
             },
@@ -373,7 +420,8 @@ const server = createWebServer({
           context,
         );
         // Conversation.createConversation 返回 Conversation，直接 submit
-        await conv.submit({ type: "input", content: task }, context);
+        const sub = await conv.submit({ type: "input", content: task }, context);
+        sub.wait(context).catch(() => {}); // 唤醒 scheduler，后台跑
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ conversationId: conv.id, project, agent, task, cwd }));
       },
@@ -420,6 +468,8 @@ const server = createWebServer({
           return;
         }
         await conv.submit({ type: "input", content: "请审查这个项目" }, context);
+        // 唤醒 scheduler
+        harness.resume();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, parentConversationId: projAlphaConvId, note: "看会话树：parent → delegate task → child agent 会话" }));
       },

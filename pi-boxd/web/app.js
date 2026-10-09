@@ -75,7 +75,16 @@ function renderConversationTree() {
 
 // ─── 转录（entries）────────────────────────────────────────────────────────
 function messageText(msg) {
-  if (!msg || !msg.content) return "";
+  if (!msg) return "";
+  // 模型错误（如额度用尽、认证失败）——直接展示 errorMessage
+  if (msg.errorMessage) return `❌ ${msg.errorMessage}`;
+  if (!msg.content || msg.content.length === 0) {
+    // 空 content 但非正常结束（error/aborted/maxTokens）也提示
+    if (msg.stopReason && !["endTurn", "stop", "toolUse"].includes(msg.stopReason)) {
+      return `[${msg.stopReason}]`;
+    }
+    return "";
+  }
   return msg.content
     .map((c) => {
       if (c.type === "text") return c.text;
@@ -161,6 +170,7 @@ document.getElementById("demo-task").onclick = async () => {
 // ─── Agent 派发表单 ───────────────────────────────────────────────────────────
 // dispatchState 存当前已加载的 agent 列表
 let dispatchAgents = [];
+let cfgProviders = []; // provider 列表（从 /api/providers 加载，弹窗打开时填）
 
 function renderDispatchForm() {
   const projectSel = document.getElementById("dispatch-project");
