@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { Type } from "@earendil-works/pi-ai";
-import { AgentDoc, configure, createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
+import { AgentDoc, configure, createRegistry, defineExtension, defineTask, defineTool, Harness } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -208,7 +208,20 @@ const DelegateAgent = defineTool({
     };
   },
 });
-const PiBoxExtension = defineExtension({ name: "pi-box", tools: [DelegateAgent] });
+// ─── anchor task：UI 派发的子会话挂到它下面，从而有 ownership 层级 ──
+// 立即 terminal 且 background（不计入会话 idle 等待）
+const AnchorTask = defineTask({
+  name: "pibox.anchor",
+  version: 1,
+  initial: () => ({ phase: "done" }),
+  phases: {
+    done: async (task, runtime, ctx) => {
+      await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: "anchor" } }), ctx);
+    },
+  },
+});
+
+const PiBoxExtension = defineExtension({ name: "pi-box", tools: [DelegateAgent], tasks: [AnchorTask] });
 registry.install(PiBoxExtension);
 
 await mkdir(DATA_DIR, { recursive: true });
@@ -448,10 +461,29 @@ const server = createWebServer({
           res.end(JSON.stringify({ error: `Agent "${agent}" 不存在（未找到 ${agentDefPath}）` }));
           return;
         }
+        // 找项目会话（cwd 匹配）——把子会话挂到它下面以形成 ownership 层级
+        const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+        let projConvId = null;
+        for (const rec of records) {
+          const a = await harness.snapshot(AgentDoc, rec.id, context);
+          if (a?.cwd === cwd) {
+            projConvId = rec.id;
+            break;
+          }
+        }
+        // 建 anchor task（归项目会话，background，立即 terminal）
+        let ownership = { kind: "ownerless" };
+        if (projConvId !== null) {
+          const anchorId = await harness.commit(
+            (tx) => tx.createTask(AnchorTask, {}, { ownership: { kind: "conversation" }, conversationId: projConvId, background: true }),
+            context,
+          );
+          ownership = { kind: "task", taskId: anchorId };
+        }
         // 创建子会话（cwd 指向项目，instructions = agent 定义正文）
         const conv = await harness.createConversation(
           {
-            ownership: { kind: "ownerless" }, // P2 先用 ownerless，按 cwd 关联项目
+            ownership,
             agent: {
               model: resolveAgentModel(agentDef.model, model),
               instructions: agentDef.instructions,
@@ -464,7 +496,7 @@ const server = createWebServer({
         const sub = await conv.submit({ type: "input", content: task }, context);
         sub.wait(context).catch(() => {}); // 唤醒 scheduler，后台跑
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ conversationId: conv.id, project, agent, task, cwd }));
+        res.end(JSON.stringify({ conversationId: conv.id, project, agent, task, cwd, parentConversationId: projConvId }));
       },
     },
     // 演示 delegate_agent 工具（仅 faux 模式）：设 4 轮脚本，提交输入进项目会话
@@ -523,5 +555,5 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`pi-boxd 已启动: http://localhost:${PORT}`);
   console.log(`项目目录: ${PROJECTS_DIR}`);
   console.log(`存储: ${join(DATA_DIR, "session.sqlite")}`);
-  console.log(`模型: ${useFaux ? "faux（离线）" : "openai（真实）"}`);
+  console.log(`模型: ${useFaux ? "faux（离线）" : `${model.provider}/${model.modelId}`}`);
 });
