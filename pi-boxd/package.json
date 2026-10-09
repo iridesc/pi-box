@@ -1,0 +1,16 @@
+{
+  "name": "pi-boxd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "pi-box 的 durable 守护进程：项目目录 → conversation（cwd 隔离），复用 pi-durable-web 页面",
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0",
+    "pi-durable-web": "github:iridesc/pi-durable-web"
+  }
+}
