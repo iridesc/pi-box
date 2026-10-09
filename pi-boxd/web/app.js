@@ -2,6 +2,7 @@
 // 把 conversation（会话树）/ task（任务图）/ ownership（缩进层级）原始渲染出来。
 let state = null;
 let selectedId = null;
+let expandedConvs = new Set(); // 已展开子会话的主会话 id
 
 async function refresh() {
   const res = await fetch("/api/state");
@@ -47,57 +48,62 @@ function lockIfNoKey() {
 function renderConversationTree() {
   const el = document.getElementById("conversation-tree");
   el.innerHTML = "";
-  const renderNode = (n, depth, nodes) => {
+  const renderNode = (n, depth) => {
+    const hasChildren = n.children.length > 0;
+    const expanded = expandedConvs.has(n.id);
     const div = document.createElement("div");
     div.className = "conv-node" + (n.id === selectedId ? " selected" : "");
     div.style.paddingLeft = depth * 16 + 8 + "px";
-    div.textContent = `#${n.id} · ${n.entries.length} entries`;
+
+    // 展开箭头（仅当有子会话）
+    const arrow = document.createElement("span");
+    arrow.className = "conv-arrow";
+    arrow.textContent = hasChildren ? (expanded ? "▼" : "▶") : "";
+    if (hasChildren) {
+      arrow.onclick = (ev) => {
+        ev.stopPropagation();
+        if (expanded) expandedConvs.delete(n.id);
+        else expandedConvs.add(n.id);
+        render();
+      };
+    }
+    div.appendChild(arrow);
+
+    // 名称：主会话（ownerless）= 项目名；子会话 = #id
+    const label = document.createElement("span");
+    label.className = "conv-label";
+    if (n.owner) {
+      label.textContent = `#${n.id}`;
+      label.title = `owned by task #${n.owner.taskId}`;
+    } else {
+      label.textContent = n.project || `会话 #${n.id}`;
+    }
+    div.appendChild(label);
+
     const tag = document.createElement("span");
     tag.className = "conv-tag";
-    tag.textContent = n.owner ? `owned (task #${n.owner.taskId})` : "top-level";
+    if (n.owner) tag.textContent = `task #${n.owner.taskId}`;
+    else if (hasChildren) tag.textContent = `${n.children.length} 子会话`;
     div.appendChild(tag);
+
     div.onclick = () => {
       selectedId = n.id;
       render();
     };
     el.appendChild(div);
-    n.children.forEach((c) => renderNode(c, depth + 1, nodes));
-  };
-  // 组内按 ownership 建树
-  const buildTree = (convs) => {
-    const nodes = new Map(convs.map((c) => [c.id, { ...c, children: [] }]));
-    const roots = [];
-    for (const n of nodes.values()) {
-      const pid = n.owner ? String(n.owner.conversationId) : null;
-      if (pid && nodes.has(pid)) nodes.get(pid).children.push(n);
-      else roots.push(n);
-    }
-    return { roots, nodes };
+    // 子节点只有展开时渲染
+    if (expanded) n.children.forEach((c) => renderNode(c, depth + 1));
   };
 
-  const conversations = state.conversations;
-  const hasProjects = conversations.some((c) => c.project);
-  if (!hasProjects) {
-    // 无 project 概念（纯 durable 页）→ 平铺
-    const { roots, nodes } = buildTree(conversations);
-    roots.forEach((r) => renderNode(r, 0, nodes));
-    return;
+  // 建树（同一 project 内的子会话归到主会话下）
+  const nodes = new Map(state.conversations.map((c) => [c.id, { ...c, children: [] }]));
+  const roots = [];
+  for (const n of nodes.values()) {
+    const pid = n.owner ? String(n.owner.conversationId) : null;
+    if (pid && nodes.has(pid)) nodes.get(pid).children.push(n);
+    else roots.push(n);
   }
-  // 按 project 分组（项目作为第一层）
-  const groups = new Map();
-  for (const c of conversations) {
-    const key = c.project || "（无项目）";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(c);
-  }
-  for (const [proj, convs] of groups) {
-    const head = document.createElement("div");
-    head.className = "project-group";
-    head.textContent = `📁 ${proj}`;
-    el.appendChild(head);
-    const { roots, nodes } = buildTree(convs);
-    roots.forEach((r) => renderNode(r, 1, nodes));
-  }
+  roots.forEach((r) => renderNode(r, 0));
 }
 
 // ─── 转录（entries）────────────────────────────────────────────────────────

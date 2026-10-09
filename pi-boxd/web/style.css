@@ -48,14 +48,6 @@ section:last-child { border-right: none; }
 .scroll { flex: 1; overflow-y: auto; padding: 8px; }
 
 /* 会话树 */
-.project-group {
-  padding: 6px 8px 4px;
-  margin-top: 4px;
-  color: #58a6ff;
-  font-size: 12px;
-  font-weight: 600;
-  border-bottom: 1px solid #21262d;
-}
 .conv-node {
   padding: 6px 8px;
   cursor: pointer;
@@ -67,6 +59,16 @@ section:last-child { border-right: none; }
 }
 .conv-node:hover { background: #1f2937; }
 .conv-node.selected { background: #1f6feb; color: #fff; }
+.conv-arrow {
+  display: inline-block;
+  width: 14px;
+  color: #8b949e;
+  cursor: pointer;
+  user-select: none;
+}
+.conv-arrow:hover { color: #58a6ff; }
+.conv-node.selected .conv-arrow { color: #c9d1d9; }
+.conv-label { font-weight: 500; }
 .conv-tag { color: #8b949e; font-size: 11px; margin-left: 6px; }
 .conv-node.selected .conv-tag { color: #c9d1d9; }
 
