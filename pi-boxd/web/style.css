@@ -19,247 +19,162 @@ header {
 }
 header h1 { font-size: 15px; margin: 0; color: #58a6ff; }
 .status { color: #8b949e; font-size: 12px; }
+#open-settings {
+  margin-left: auto;
+  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+#open-settings:hover { background: #30363d; }
 
 main {
   flex: 1;
   display: grid;
-  grid-template-columns: 280px 1fr 1fr;
+  grid-template-columns: 300px 1fr 320px;
   min-height: 0;
 }
-section {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid #21262d;
-}
+section { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid #21262d; }
 section:last-child { border-right: none; }
 
 .panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid #21262d;
-  background: #161b22;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; border-bottom: 1px solid #21262d; background: #161b22;
 }
 .panel-head h2 { font-size: 13px; margin: 0; font-weight: 600; }
 .panel-head small { color: #8b949e; font-weight: normal; font-size: 11px; }
-
-.scroll { flex: 1; overflow-y: auto; padding: 8px; }
-
-/* 对话记录：默认空状态（居中 pi-box） */
-#entries.empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #30363d;
-  font-size: 40px;
-  font-weight: 200;
-  letter-spacing: 8px;
-  user-select: none;
+.panel-head button {
+  background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+  border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer;
 }
+.panel-head button:hover { background: #30363d; }
+.panel-head button:disabled { opacity: .5; cursor: not-allowed; }
 
-/* 会话树 */
-.conv-node {
-  padding: 6px 8px;
-  cursor: pointer;
-  border-radius: 4px;
-  color: #c9d1d9;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.conv-node:hover { background: #1f2937; }
-.conv-node.selected { background: #1f6feb; color: #fff; }
-.conv-arrow {
-  display: inline-block;
-  width: 14px;
-  color: #8b949e;
-  cursor: pointer;
-  user-select: none;
-}
-.conv-arrow:hover { color: #58a6ff; }
-.conv-node.selected .conv-arrow { color: #c9d1d9; }
-.conv-label { font-weight: 500; }
-.conv-tag { color: #8b949e; font-size: 11px; margin-left: 6px; }
-.conv-node.selected .conv-tag { color: #c9d1d9; }
+.scroll { flex: 1; overflow-y: auto; padding: 6px; }
 
-/* 转录 */
-.entries-title { color: #8b949e; margin-bottom: 8px; }
-.entry {
-  border: 1px solid #21262d;
-  border-radius: 6px;
-  margin-bottom: 8px;
-  background: #0d1117;
+/* ── 左：项目树 ── */
+.tree-empty { color: #8b949e; padding: 12px; font-size: 12px; }
+.tree-project {
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px 6px; cursor: pointer; border-radius: 4px;
+  color: #c9d1d9; font-weight: 600;
 }
+.tree-project:hover { background: #1f2937; }
+.tree-item {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 6px; cursor: pointer; border-radius: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tree-item:hover { background: #1f2937; }
+.tree-item.selected { background: #1f6feb; color: #fff; }
+.tree-add { color: #58a6ff; font-size: 12px; }
+.tree-group { padding: 6px 6px 2px; color: #8b949e; font-size: 11px; margin-top: 4px; }
+.tree-arrow { display: inline-block; width: 14px; color: #8b949e; cursor: pointer; user-select: none; }
+.tree-arrow:hover { color: #58a6ff; }
+.tree-label { font-weight: 500; }
+.tree-tag { color: #8b949e; font-size: 10px; margin-left: 6px; }
+.tree-item.selected .tree-tag { color: #c9d1d9; }
+
+/* ── 中：视图 ── */
+#panel-view { display: flex; flex-direction: column; min-height: 0; }
+#view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.view-empty {
+  display: flex; align-items: center; justify-content: center;
+  color: #30363d; font-size: 40px; font-weight: 200; letter-spacing: 8px; user-select: none;
+}
+.view-head {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid #21262d; background: #161b22;
+}
+.view-title { font-weight: 600; color: #c9d1d9; }
+.view-sub { color: #8b949e; font-size: 11px; }
+.view-body { flex: 1; overflow-y: auto; padding: 10px 14px; }
+.view-input {
+  display: flex; gap: 6px; padding: 8px; border-top: 1px solid #21262d; background: #161b22;
+}
+.view-input input {
+  flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  color: #c9d1d9; padding: 6px 8px; font-family: inherit; font-size: 13px;
+}
+.view-input input:focus { outline: none; border-color: #58a6ff; }
+.view-input button {
+  background: #238636; border: 1px solid #2ea043; color: #fff;
+  border-radius: 4px; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 12px;
+}
+.view-input button:disabled { background: #21262d; border-color: #30363d; color: #484f58; cursor: not-allowed; }
+
+/* 对话条目 */
+.entry { border: 1px solid #21262d; border-radius: 6px; margin-bottom: 8px; background: #0d1117; }
 .entry-kind {
-  font-size: 11px;
-  color: #8b949e;
-  padding: 4px 8px;
-  border-bottom: 1px solid #21262d;
-  background: #161b22;
+  font-size: 11px; color: #8b949e; padding: 4px 8px;
+  border-bottom: 1px solid #21262d; background: #161b22;
 }
 .entry-msg { padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
 .entry-role-user .entry-msg { color: #79c0ff; }
 .entry-role-assistant .entry-msg { color: #c9d1d9; }
-.entry-pi-tool-result .entry-msg, .entry-role-toolResult .entry-msg { color: #7ee787; }
+.entry-role-toolResult .entry-msg { color: #7ee787; }
 
-/* 任务图 */
+/* ── 中：表单 ── */
+.view-form { padding: 14px; overflow-y: auto; flex: 1; }
+.form-label { color: #8b949e; font-size: 12px; margin: 12px 0 4px; }
+.form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.form-row label { color: #8b949e; font-size: 12px; width: 72px; flex-shrink: 0; }
+.form-row input, .form-row select {
+  flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  color: #c9d1d9; padding: 6px 10px; font-family: inherit; font-size: 13px;
+}
+.form-row input:focus, .form-row select:focus { outline: none; border-color: #58a6ff; }
+.cfg-textarea {
+  width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  color: #c9d1d9; padding: 8px 10px; font-family: inherit; font-size: 13px; resize: vertical;
+}
+.cfg-textarea:focus { outline: none; border-color: #58a6ff; }
+.checkbox-box { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; }
+.checkbox-item { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; }
+.muted { color: #8b949e; font-size: 12px; }
+.form-actions { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+.btn-primary {
+  background: #238636; border: 1px solid #2ea043; color: #fff;
+  border-radius: 4px; padding: 6px 16px; cursor: pointer; font-family: inherit; font-size: 12px;
+}
+.btn-primary:hover { background: #2ea043; }
+.btn-danger {
+  background: #21262d; border: 1px solid #f85149; color: #f85149;
+  border-radius: 4px; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 12px;
+}
+.btn-danger:hover { background: #3d1418; }
+.form-status { font-size: 12px; color: #8b949e; }
+.form-status.ok { color: #7ee787; }
+.form-status.err { color: #f85149; }
+
+/* ── 右：任务图 ── */
 .task-node {
-  padding: 5px 8px;
-  border-radius: 4px;
-  color: #c9d1d9;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding: 5px 8px; border-radius: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .task-node:hover { background: #1f2937; }
 .task-status { color: #d29922; font-size: 11px; }
 .task-kind { color: #58a6ff; }
 
-/* 输入 */
-#submit-form {
-  display: flex;
-  gap: 6px;
-  padding: 8px;
-  border-top: 1px solid #21262d;
-  background: #161b22;
-}
-#submit-input {
-  flex: 1;
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  color: #c9d1d9;
-  padding: 6px 8px;
-  font-family: inherit;
-  font-size: 13px;
-}
-#submit-input:focus { outline: none; border-color: #58a6ff; }
-button {
-  background: #21262d;
-  border: 1px solid #30363d;
-  color: #c9d1d9;
-  border-radius: 4px;
-  padding: 6px 10px;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-}
-button:hover { background: #30363d; }
-
-/* Agent 派发表单 */
-.dispatch-form {
-  padding: 8px;
-  background: #161b22;
-  border-bottom: 1px solid #21262d;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.dispatch-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.dispatch-form label {
-  color: #8b949e;
-  font-size: 12px;
-  width: 38px;
-  flex-shrink: 0;
-}
-.dispatch-form select,
-.dispatch-form input[type=text] {
-  flex: 1;
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  color: #c9d1d9;
-  padding: 5px 8px;
-  font-family: inherit;
-  font-size: 12px;
-}
-.dispatch-form select:focus,
-.dispatch-form input[type=text]:focus {
-  outline: none;
-  border-color: #58a6ff;
-}
-#dispatch-go {
-  background: #238636;
-  border-color: #2ea043;
-  color: #fff;
-  padding: 5px 14px;
-  font-size: 12px;
-}
-#dispatch-go:hover { background: #2ea043; }
-#dispatch-go:disabled { background: #21262d; border-color: #30363d; color: #484f58; cursor: not-allowed; }
-#dispatch-status { color: #8b949e; font-size: 12px; }
-
-/* 设置按钮（header 右上角） */
-#open-settings {
-  background: #21262d;
-  border: 1px solid #30363d;
-  color: #c9d1d9;
-  border-radius: 4px;
-  padding: 4px 10px;
-  font-size: 12px;
-  margin-left: auto;
-  cursor: pointer;
-}
-#open-settings:hover { background: #30363d; }
-
 /* 设置弹窗 */
 .modal {
-  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0,0,0,0.5);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 100;
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
 }
 .modal.hidden { display: none; }
 .modal-content {
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  width: 480px;
-  max-width: 90vw;
-  max-height: 90vh;
-  display: flex; flex-direction: column;
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  width: 480px; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column;
 }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid #21262d;
+  padding: 12px 16px; border-bottom: 1px solid #21262d;
 }
-.modal-head h2 { font-size: 14px; margin: 0; color: #c9d1d9; }
-.close-btn {
-  background: transparent; border: none; color: #8b949e;
-  font-size: 20px; line-height: 1; padding: 0 4px; cursor: pointer;
-}
-.close-btn:hover { color: #c9d1d9; background: transparent; }
+.modal-head h2 { font-size: 14px; margin: 0; }
+.close-btn { background: transparent; border: none; color: #8b949e; font-size: 20px; cursor: pointer; }
+.close-btn:hover { color: #c9d1d9; }
 .modal-body { padding: 16px; overflow-y: auto; }
-.modal-foot {
-  padding: 12px 16px;
-  border-top: 1px solid #21262d;
-  display: flex; justify-content: flex-end; gap: 8px;
+.modal-foot { padding: 12px 16px; border-top: 1px solid #21262d; display: flex; justify-content: flex-end; }
+.modal-foot button {
+  background: #238636; border: 1px solid #2ea043; color: #fff;
+  border-radius: 4px; padding: 6px 16px; cursor: pointer; font-family: inherit; font-size: 12px;
 }
-.modal-foot button { background: #238636; border-color: #2ea043; color: #fff; padding: 6px 16px; }
-.modal-foot button:hover { background: #2ea043; }
-.form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.form-row label { color: #8b949e; font-size: 12px; width: 80px; flex-shrink: 0; }
-.form-row select, .form-row input {
-  flex: 1; background: #0d1117; border: 1px solid #30363d;
-  border-radius: 4px; color: #c9d1d9; padding: 6px 10px;
-  font-family: inherit; font-size: 13px;
-}
-.form-row select:focus, .form-row input:focus { outline: none; border-color: #58a6ff; }
-.form-status { color: #8b949e; font-size: 12px; margin-top: 8px; min-height: 16px; }
-.form-status.success { color: #7ee787; }
-.form-status.error { color: #f85149; }
-
-/* 未配置 key 时的禁用状态 */
-button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-allowed !important; }
-.locked-hint {
-  color: #d29922; font-size: 12px; padding: 6px 8px;
-  background: #1c1a14; border-left: 3px solid #d29922;
-  border-radius: 3px; margin-bottom: 6px;
-}
+button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-allowed; }

@@ -3,17 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>pi-boxd · 项目 Agent 管理平台</title>
+  <title>pi-box · 多 Agent 平台</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
-    <h1>pi-boxd</h1>
+    <h1>pi-box</h1>
     <div id="status-bar" class="status"></div>
     <button id="open-settings" title="模型设置">⚙ 设置</button>
   </header>
 
-  <!-- 设置弹窗 -->
   <div id="settings-modal" class="modal hidden">
     <div class="modal-content">
       <div class="modal-head">
@@ -21,76 +20,35 @@
         <button id="close-settings" class="close-btn" type="button">×</button>
       </div>
       <div class="modal-body">
-        <div class="form-row">
-          <label for="cfg-provider">Provider</label>
-          <select id="cfg-provider"></select>
-        </div>
-        <div class="form-row">
-          <label for="cfg-model">Model ID</label>
-          <select id="cfg-model"></select>
-        </div>
-        <div class="form-row">
-          <label for="cfg-key">API Key</label>
-          <input id="cfg-key" type="password" placeholder="未改动时留空保留原 key" />
-        </div>
-        <div class="form-row">
-          <label for="cfg-baseurl">Base URL</label>
-          <input id="cfg-baseurl" type="text" placeholder="可选，用于 OpenAI 兼容服务" />
-        </div>
-        <div class="form-status" id="cfg-status"></div>
+        <div class="form-row"><label for="cfg-provider">Provider</label><select id="cfg-provider"></select></div>
+        <div class="form-row"><label for="cfg-model">Model ID</label><select id="cfg-model"></select></div>
+        <div class="form-row"><label for="cfg-key">API Key</label><input id="cfg-key" type="password" placeholder="未改动时留空保留原 key"></div>
+        <div class="form-row"><label for="cfg-baseurl">Base URL</label><input id="cfg-baseurl" type="text" placeholder="可选"></div>
+        <div id="cfg-status" class="form-status"></div>
       </div>
-      <div class="modal-foot">
-        <button id="save-settings" type="button">保存</button>
-      </div>
+      <div class="modal-foot"><button id="save-settings" type="button">保存</button></div>
     </div>
   </div>
+
   <main>
-    <section id="panel-conversations">
+    <section id="panel-tree">
       <div class="panel-head">
-        <h2>会话树 <small>conversation · ownership</small></h2>
-        <button id="new-project" title="新建项目（创建项目目录 + 主会话）">+ 新建项目</button>
+        <h2>项目</h2>
+        <button id="new-project" title="新建项目（建目录 + 项目助理）">+ 新建项目</button>
       </div>
-      <div id="conversation-tree" class="scroll"></div>
+      <div id="tree" class="scroll"></div>
     </section>
-    <section id="panel-entries">
-      <div class="panel-head">
-        <h2>对话记录 <small>entries（user / assistant / tool-result）</small></h2>
-      </div>
 
-      <!-- Agent 派发表单 -->
-      <div id="dispatch-form" class="dispatch-form">
-        <div class="dispatch-row">
-          <label for="dispatch-project">项目</label>
-          <select id="dispatch-project"><option value="">— 选择项目 —</option></select>
-        </div>
-        <div class="dispatch-row">
-          <label for="dispatch-agent">Agent</label>
-          <select id="dispatch-agent" disabled><option value="">— 先选项目 —</option></select>
-        </div>
-        <div class="dispatch-row">
-          <label for="dispatch-task">任务</label>
-          <input id="dispatch-task" placeholder="描述要 agent 完成的任务…" disabled>
-        </div>
-        <div class="dispatch-row">
-          <button id="dispatch-go" type="button" disabled>▶ 派发</button>
-          <span id="dispatch-status"></span>
-        </div>
-      </div>
-
-      <div id="entries" class="scroll"></div>
-      <form id="submit-form">
-        <input id="submit-input" placeholder="向当前会话 submit 一条输入…" autocomplete="off">
-        <button type="submit">发送</button>
-      </form>
+    <section id="panel-view">
+      <div id="view"></div>
     </section>
+
     <section id="panel-tasks">
-      <div class="panel-head">
-        <h2>任务图 <small>task · 状态机（live）</small></h2>
-        <button id="demo-task" title="运行 checkout→payment 慢任务，实时观察 live 任务树">▶ 运行演示任务</button>
-      </div>
+      <div class="panel-head"><h2>任务图 <small>live task</small></h2></div>
       <div id="task-graph" class="scroll"></div>
     </section>
   </main>
+
   <script src="/app.js"></script>
 </body>
 </html>
