@@ -78,20 +78,30 @@ function messageText(msg) {
   if (!msg) return "";
   // 模型错误（如额度用尽、认证失败）——直接展示 errorMessage
   if (msg.errorMessage) return `❌ ${msg.errorMessage}`;
-  if (!msg.content || msg.content.length === 0) {
-    // 空 content 但非正常结束（error/aborted/maxTokens）也提示
+  const c = msg.content;
+  // user message 的 content 是字符串
+  if (typeof c === "string") return c;
+  // 空/缺失 content：非正常结束时提示 stopReason
+  if (c === undefined || c === null || (Array.isArray(c) && c.length === 0)) {
     if (msg.stopReason && !["endTurn", "stop", "toolUse"].includes(msg.stopReason)) {
       return `[${msg.stopReason}]`;
     }
     return "";
   }
-  return msg.content
-    .map((c) => {
-      if (c.type === "text") return c.text;
-      if (c.type === "toolCall") return `🛠 ${c.name}(${JSON.stringify(c.arguments ?? {})})`;
-      return `[${c.type}]`;
-    })
-    .join("\n");
+  // assistant/tool 的 content 是数组
+  if (Array.isArray(c)) {
+    return c
+      .map((part) => {
+        if (part == null) return "";
+        if (part.type === "text") return part.text ?? "";
+        if (part.type === "thinking") return `[thinking] ${part.thinking ?? ""}`.slice(0, 500);
+        if (part.type === "toolCall") return `🛠 ${part.name}(${JSON.stringify(part.arguments ?? {})})`;
+        if (part.type === "toolResult") return `[result] ${JSON.stringify(part.content ?? part).slice(0, 500)}`;
+        return `[${part.type}]`;
+      })
+      .join("\n");
+  }
+  return String(c);
 }
 
 function renderEntries() {
