@@ -47,6 +47,18 @@ section:last-child { border-right: none; }
 
 .scroll { flex: 1; overflow-y: auto; padding: 8px; }
 
+/* 对话记录：默认空状态（居中 pi-box） */
+#entries.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #30363d;
+  font-size: 40px;
+  font-weight: 200;
+  letter-spacing: 8px;
+  user-select: none;
+}
+
 /* 会话树 */
 .conv-node {
   padding: 6px 8px;

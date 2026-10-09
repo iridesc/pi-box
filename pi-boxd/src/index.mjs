@@ -353,6 +353,40 @@ const server = createWebServer({
   createConversation: () =>
     harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model, cwd: PROJECTS_DIR } }, context),
   extraRoutes: {
+    // 项目：GET 列表 / POST 新建（建目录 + 主会话）
+    "/api/projects": {
+      methods: ["GET", "POST"],
+      async handler(req, res) {
+        if (req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ projects: await listProjects() }));
+          return;
+        }
+        // POST 新建项目
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        let { name } = JSON.parse(body || "{}");
+        if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "项目名只能含字母、数字、-、_" }));
+          return;
+        }
+        if ((await listProjects()).includes(name)) {
+          res.writeHead(409);
+          res.end(JSON.stringify({ error: `项目 "${name}" 已存在` }));
+          return;
+        }
+        const cwd = join(PROJECTS_DIR, name);
+        await mkdir(cwd, { recursive: true });
+        const conv = await harness.createConversation(
+          { ownership: { kind: "ownerless" }, agent: { model, cwd } },
+          context,
+        );
+        console.log(`[project] 新建项目 ${name} → 会话 #${conv.id}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, project: name, conversationId: conv.id }));
+      },
+    },
     // 列出可配置的 provider 列表（含真实模型列表）
     "/api/providers": {
       method: "GET",

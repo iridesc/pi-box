@@ -7,7 +7,10 @@ let expandedConvs = new Set(); // 已展开子会话的主会话 id
 async function refresh() {
   const res = await fetch("/api/state");
   state = await res.json();
-  if (!selectedId && state.conversations.length > 0) selectedId = state.conversations[0].id;
+  // 不自动选中：默认空白（居中显示 pi-box），点左侧才加载
+  if (selectedId !== null && !state.conversations.some((c) => c.id === selectedId)) {
+    selectedId = null; // 选中的会话已不存在
+  }
   render();
 }
 
@@ -31,7 +34,7 @@ function renderStatus() {
 function lockIfNoKey() {
   const noKey = !state.hasKey;
   // 新会话按钮
-  document.getElementById("new-conv").disabled = noKey;
+  document.getElementById("new-project").disabled = noKey;
   // submit 表单
   const submitForm = document.getElementById("submit-form");
   const submitInput = document.getElementById("submit-input");
@@ -138,13 +141,30 @@ function messageText(msg) {
 }
 
 function renderEntries() {
-  const conv = state.conversations.find((c) => c.id === selectedId);
   const el = document.getElementById("entries");
+  const dispatchForm = document.getElementById("dispatch-form");
+  const submitForm = document.getElementById("submit-form");
+  const conv = selectedId !== null ? state.conversations.find((c) => c.id === selectedId) : null;
+
+  if (!conv) {
+    // 默认空白：只居中展示 pi-box（隐藏派发/输入）
+    dispatchForm.style.display = "none";
+    submitForm.style.display = "none";
+    el.className = "scroll empty";
+    el.textContent = "pi-box";
+    return;
+  }
+  // 选中会话：显示派发表单 + 输入框
+  dispatchForm.style.display = "";
+  submitForm.style.display = "";
+  el.className = "scroll";
   el.innerHTML = "";
-  if (!conv) { el.textContent = "（无会话）"; return; }
   const title = document.createElement("div");
   title.className = "entries-title";
-  title.textContent = `会话 #${conv.id} 的消息（${conv.entries.length} 条）`;
+  title.textContent =
+    conv.owner !== undefined && conv.owner !== null
+      ? `子会话 #${conv.id} · task #${conv.owner.taskId}（${conv.entries.length} 条）`
+      : `${conv.project || `会话 #${conv.id}`} 的消息（${conv.entries.length} 条）`;
   el.appendChild(title);
   for (const e of conv.entries) {
     const div = document.createElement("div");
@@ -199,10 +219,20 @@ document.getElementById("submit-form").onsubmit = async (ev) => {
   });
 };
 
-document.getElementById("new-conv").onclick = async () => {
-  const res = await fetch("/api/conversations", { method: "POST" });
-  const { id } = await res.json();
-  selectedId = String(id);
+document.getElementById("new-project").onclick = async () => {
+  const name = prompt("项目名称（字母 / 数字 / - / _）：");
+  if (!name) return;
+  const res = await fetch("/api/projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    alert(data.error || "创建失败");
+    return;
+  }
+  selectedId = String(data.conversationId);
   refresh();
 };
 
