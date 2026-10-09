@@ -51,19 +51,23 @@ async function saveConfig(cfg) {
 }
 
 // Provider 列表（仅元数据，供前端下拉）
+// api: "openai" = openai-compatible（含 openai/deepseek/groq/openrouter/xai/mistral/moonshotai）
+//      "anthropic" = anthropic-messages 协议（含 anthropic/minimax/minimax-cn）
 const PROVIDER_LIST = [
-  { id: "openai", name: "OpenAI", defaultModel: "gpt-4o", defaultBaseUrl: "https://api.openai.com/v1" },
-  { id: "deepseek", name: "DeepSeek", defaultModel: "deepseek-chat", defaultBaseUrl: "https://api.deepseek.com/v1" },
-  { id: "anthropic", name: "Anthropic", defaultModel: "claude-3-5-sonnet-latest", defaultBaseUrl: "https://api.anthropic.com" },
-  { id: "moonshotai", name: "Moonshot (Kimi)", defaultModel: "moonshot-v1-8k", defaultBaseUrl: "https://api.moonshot.cn/v1" },
-  { id: "google", name: "Google Gemini", defaultModel: "gemini-2.0-flash-exp", defaultBaseUrl: "" },
-  { id: "groq", name: "Groq", defaultModel: "llama-3.1-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1" },
-  { id: "openrouter", name: "OpenRouter", defaultModel: "openai/gpt-4o", defaultBaseUrl: "https://openrouter.ai/api/v1" },
-  { id: "mistral", name: "Mistral", defaultModel: "mistral-large-latest", defaultBaseUrl: "https://api.mistral.ai/v1" },
-  { id: "xai", name: "xAI (Grok)", defaultModel: "grok-2-latest", defaultBaseUrl: "https://api.x.ai/v1" },
+  { id: "openai", name: "OpenAI", api: "openai", defaultModel: "gpt-4o", defaultBaseUrl: "https://api.openai.com/v1" },
+  { id: "deepseek", name: "DeepSeek", api: "openai", defaultModel: "deepseek-chat", defaultBaseUrl: "https://api.deepseek.com/v1" },
+  { id: "moonshotai", name: "Moonshot (Kimi)", api: "openai", defaultModel: "moonshot-v1-8k", defaultBaseUrl: "https://api.moonshot.cn/v1" },
+  { id: "google", name: "Google Gemini", api: "openai", defaultModel: "gemini-2.0-flash-exp", defaultBaseUrl: "" },
+  { id: "groq", name: "Groq", api: "openai", defaultModel: "llama-3.1-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1" },
+  { id: "openrouter", name: "OpenRouter", api: "openai", defaultModel: "openai/gpt-4o", defaultBaseUrl: "https://openrouter.ai/api/v1" },
+  { id: "mistral", name: "Mistral", api: "openai", defaultModel: "mistral-large-latest", defaultBaseUrl: "https://api.mistral.ai/v1" },
+  { id: "xai", name: "xAI (Grok)", api: "openai", defaultModel: "grok-2-latest", defaultBaseUrl: "https://api.x.ai/v1" },
+  { id: "anthropic", name: "Anthropic Claude", api: "anthropic", defaultModel: "claude-3-5-sonnet-latest", defaultBaseUrl: "https://api.anthropic.com" },
+  { id: "minimax", name: "MiniMax (国际)", api: "anthropic", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimax.io/anthropic" },
+  { id: "minimax-cn", name: "MiniMax (中国)", api: "anthropic", defaultModel: "MiniMax-M2.7", defaultBaseUrl: "https://api.minimaxi.com/anthropic" },
 ];
 
-// 根据 config 初始化 provider：有 key 则用 openai（或兼容协议），无 key 则 faux
+// 根据 config 初始化 provider：有 key 则按 provider 的 api 协议选 factory，无 key 则 faux
 async function initProvider() {
   const cfg = await loadConfig();
   // 清理现有
@@ -71,11 +75,16 @@ async function initProvider() {
   if (cfg.apiKey) {
     useFaux = false;
     model = { provider: cfg.provider, modelId: cfg.modelId };
-    // openai-compatible：统一用 openaiProvider
-    const p = openaiProvider();
-    if (cfg.baseUrl) {
-      p.baseUrl = cfg.baseUrl;
+    // 查 provider 元数据选 factory
+    const meta = PROVIDER_LIST.find((p) => p.id === cfg.provider);
+    let p;
+    if (meta?.api === "anthropic") {
+      p = (await import("@earendil-works/pi-ai/providers/anthropic")).anthropicProvider();
+    } else {
+      // openai-compatible 统一走 openaiProvider
+      p = openaiProvider();
     }
+    if (cfg.baseUrl) p.baseUrl = cfg.baseUrl;
     models.setProvider(p);
   } else {
     useFaux = true;
