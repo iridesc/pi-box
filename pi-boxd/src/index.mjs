@@ -454,19 +454,64 @@ async function ensureProjectConversations() {
   }
 }
 
+// ─── 配置变更 → 同步到运行态 ────────────────────────────────────────────
+// durable 的 instructions/model 是持久化在会话上的，改文件不会自动更新已存在的会话。
+// 保存 agent/assistant 后调用这些函数重新 configure。
+
+/** 刷新某项目的主会话（助理）：instructions + model */
+async function syncProjectAssistant(projectName) {
+  const cwd = join(PROJECTS_DIR, projectName);
+  const assistant = await loadAssistant(projectName);
+  const agents = await listAgents(projectName);
+  const instructions = assistantInstructions(projectName, assistant, agents);
+  const assistantModel = resolveAgentModel(assistant.model, model);
+  const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+  let n = 0;
+  for (const rec of records) {
+    if (rec.owner !== null && rec.owner !== undefined) continue; // 只看主会话
+    const a = await harness.snapshot(AgentDoc, rec.id, context);
+    if (a?.cwd !== cwd) continue;
+    await harness.commit((tx) => configure(tx, rec.id, { instructions, model: assistantModel }), context);
+    n++;
+  }
+  if (n > 0) console.log(`[sync] 刷新项目助理会话（${projectName}）：${n} 个`);
+}
+
+/** 刷新某项目里已存在的、名为 agentName 的子 agent 会话（instructions + model） */
+async function syncSubagentInstances(projectName, agentName) {
+  const def = await loadAgentDef(projectName, agentName);
+  if (!def) return;
+  const cwd = join(PROJECTS_DIR, projectName);
+  const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+  for (const rec of records) {
+    if (rec.owner !== null && rec.owner !== undefined) continue; // 只看主会话
+    const a = await harness.snapshot(AgentDoc, rec.id, context);
+    if (a?.cwd !== cwd) continue;
+    const st = await harness.snapshot(Subagents, rec.id, context);
+    const found = st?.agents?.[agentName];
+    if (!found) continue;
+    await harness.commit(
+      (tx) => configure(tx, found.conversationId, { instructions: def.instructions, model: resolveAgentModel(def.model, model) }),
+      context,
+    );
+    console.log(`[sync] 刷新子 agent ${agentName} 会话 #${found.conversationId}`);
+  }
+}
+
 // ─── 快照扩展 ─────────────────────────────────────────────────────────────
 async function boxSnapshot() {
   const snap = await snapshot(harness, context);
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
-  const cwdById = new Map();
+  const infoById = new Map();
   for (const rec of records) {
     const agent = await harness.snapshot(AgentDoc, rec.id, context);
-    if (agent?.cwd) cwdById.set(String(rec.id), agent.cwd);
+    if (agent) infoById.set(String(rec.id), { cwd: agent.cwd, instructions: agent.instructions });
   }
   const conversations = snap.conversations.map((c) => {
-    const cwd = cwdById.get(c.id) ?? null;
+    const info = infoById.get(c.id) ?? {};
+    const cwd = info.cwd ?? null;
     const project = cwd && cwd.startsWith(PROJECTS_DIR + "/") ? basename(cwd) : null;
-    return { ...c, cwd, project };
+    return { ...c, cwd, project, instructions: info.instructions ?? null };
   });
   const projects = await listProjects();
   const agentsByProject = {};
@@ -626,6 +671,12 @@ const server = createWebServer({
         const file = agentFilePath(project, name, scope);
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, serializeAgentDef({ model: m, tools, instructions }), "utf-8");
+        // 同步到运行态（已存在的主会话/子会话）
+        const targets = scope === "global" ? await listProjects() : [project];
+        for (const p of targets) {
+          await syncProjectAssistant(p);
+          await syncSubagentInstances(p, name);
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, name, scope, file }));
       },
@@ -645,6 +696,8 @@ const server = createWebServer({
         } catch {
           /* 不存在也算成功 */
         }
+        const targets = scope === "global" ? await listProjects() : [project];
+        for (const p of targets) await syncProjectAssistant(p);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
       },
@@ -674,6 +727,7 @@ const server = createWebServer({
         const file = join(PROJECTS_DIR, project, ".pi", "assistant.md");
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, serializeAgentDef({ model: m, agents, instructions }), "utf-8");
+        await syncProjectAssistant(project);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, file }));
       },
