@@ -1,9 +1,10 @@
 // pi-boxd：pi-box 的 durable 守护进程。
 // 打开一个 Harness（SQLite 落盘），每个「项目目录」对应一个 conversation（cwd 指向项目根），
 // 文件工具（read/write/edit/bash）通过 env(cwd) 在各自项目目录里执行 —— 项目隔离的软边界。
-// 复用 pi-durable-web 的 core（snapshot + HTTP/SSE）与页面。
-import { mkdir, readdir } from "node:fs/promises";
-import { basename, join } from "node:path";
+// 复用 pi-durable-web 的 core（snapshot + HTTP/SSE），用自己的 web 目录（含 agent 派发 UI）。
+import { mkdir, readdir, readFile } from "node:fs/promises";
+import { basename, join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -21,6 +22,13 @@ const WORKSPACE = process.env.PI_BOX_WORKSPACE ?? "/workspace";
 const PROJECTS_DIR = join(WORKSPACE, "projects");
 const DATA_DIR = process.env.PI_BOX_DATA_DIR ?? join(WORKSPACE, ".pi-boxd");
 const PORT = Number(process.env.PORT ?? 8787);
+// 静态页面目录（pi-boxd 自有 web，含 agent 派发 UI）
+// 优先用 PI_BOXD_WEB_DIR 环境变量（推荐传绝对路径）；未设则从脚本位置推算。
+const _srcDir = dirname(fileURLToPath(import.meta.url)); // .../pi-boxd/src/
+const _piBoxdDir = basename(_srcDir) === "src" ? dirname(_srcDir) : _srcDir;
+const WEB_DIR = process.env.PI_BOXD_WEB_DIR
+  ? resolve(process.env.PI_BOXD_WEB_DIR)
+  : join(_piBoxdDir, "web"); // .../pi-boxd/web/
 
 // ─── 模型：无 key 用 faux（离线），有则 openai ──────────────────────────────
 const models = createModels();
@@ -45,11 +53,61 @@ const harness = await Harness.open(
   context,
 );
 
-// ─── 项目扫描：projects/<name>/ 目录 ────────────────────────────────────────
+// ─── 项目扫描 ──────────────────────────────────────────────────────────────
 async function listProjects() {
   try {
     const entries = await readdir(PROJECTS_DIR, { withFileTypes: true });
     return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch {
+    return [];
+  }
+}
+
+// ─── Agent 定义解析 ────────────────────────────────────────────────────────
+/**
+ * 解析 .md 文件的 frontmatter + 正文。
+ * frontmatter 示例：
+ *   model: openai/gpt-6-sol
+ *   tools: [read, write, bash]
+ * ---
+ * 正文是 instructions。
+ */
+function parseAgentDef(md) {
+  const m = md.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { model: null, tools: null, instructions: md.trim() };
+  const fm = {};
+  for (const line of m[1].split("\n")) {
+    const kv = line.match(/^(\w+):\s*(.+)$/);
+    if (kv) fm[kv[1].trim()] = kv[2].trim();
+  }
+  // tools: [read, write] → ["read", "write"]
+  let tools = null;
+  if (fm.tools) {
+    const arr = fm.tools.match(/\[([^\]]+)\]/);
+    tools = arr ? arr[1].split(",").map((t) => t.trim()) : null;
+  }
+  return {
+    model: fm.model || null,
+    tools,
+    instructions: m[2].trim(),
+  };
+}
+
+/** 列出项目内的 agent 定义 */
+async function listAgents(projectName) {
+  const agentDir = join(PROJECTS_DIR, projectName, ".pi", "agents");
+  try {
+    const files = await readdir(agentDir);
+    const mdFiles = files.filter((f) => f.endsWith(".md"));
+    const agents = await Promise.all(
+      mdFiles.map(async (f) => {
+        const name = f.replace(/\.md$/, "");
+        const content = await readFile(join(agentDir, f), "utf-8");
+        const { model: agentModel, tools, instructions } = parseAgentDef(content);
+        return { name, model: agentModel, tools, instructions: instructions.slice(0, 100) };
+      }),
+    );
+    return agents;
   } catch {
     return [];
   }
@@ -74,11 +132,9 @@ async function ensureProjectConversations() {
   }
 }
 
-// ─── 快照扩展：给会话加 cwd/project 字段 ────────────────────────────────────
+// ─── 快照扩展：给会话加 cwd/project ───────────────────────────────────────
 async function boxSnapshot() {
   const snap = await snapshot(harness, context);
-  // AgentDoc 是 conversation 级 doc，需要原始 ConversationId（数字），
-  // 而 snapshot() 里已把 id 转成了 String —— 这里重新枚举拿原始 id 读 cwd。
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
   const cwdById = new Map();
   for (const rec of records) {
@@ -93,7 +149,7 @@ async function boxSnapshot() {
   return { ...snap, conversations, model, projects: await listProjects() };
 }
 
-// ─── 起服务 ────────────────────────────────────────────────────────────────
+// ─── 启动服务 ─────────────────────────────────────────────────────────────
 await ensureProjectConversations();
 const server = createWebServer({
   harness,
@@ -101,6 +157,65 @@ const server = createWebServer({
   getSnapshot: boxSnapshot,
   createConversation: () =>
     harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model, cwd: PROJECTS_DIR } }, context),
+  extraRoutes: {
+    // 列出项目内的 agent 定义
+    "/api/agents": {
+      method: "GET",
+      async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const project = url.searchParams.get("project");
+        if (!project) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "缺少 project 参数" }));
+          return;
+        }
+        const agents = await listAgents(project);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ project, agents }));
+      },
+    },
+    // 派发 agent 任务
+    "/api/delegate": {
+      method: "POST",
+      async handler(req, res) {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        let { project, agent, task } = JSON.parse(body || "{}");
+        if (!project || !agent || !task) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "缺少 project/agent/task 参数" }));
+          return;
+        }
+        const cwd = join(PROJECTS_DIR, project);
+        const agentDefPath = join(cwd, ".pi", "agents", `${agent}.md`);
+        let agentDef;
+        try {
+          agentDef = parseAgentDef(await readFile(agentDefPath, "utf-8"));
+        } catch {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: `Agent "${agent}" 不存在（未找到 ${agentDefPath}）` }));
+          return;
+        }
+        // 创建子会话（cwd 指向项目，instructions = agent 定义正文）
+        const conv = await harness.createConversation(
+          {
+            ownership: { kind: "ownerless" }, // P2 先用 ownerless，按 cwd 关联项目
+            agent: {
+              model: agentDef.model ? { provider: "openai", modelId: agentDef.model } : model,
+              instructions: agentDef.instructions,
+              cwd,
+            },
+          },
+          context,
+        );
+        // Conversation.createConversation 返回 Conversation，直接 submit
+        await conv.submit({ type: "input", content: task }, context);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ conversationId: conv.id, project, agent, task, cwd }));
+      },
+    },
+  },
+  webDir: WEB_DIR,
 });
 
 server.listen(PORT, "0.0.0.0", () => {
