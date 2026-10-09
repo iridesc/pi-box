@@ -20,8 +20,27 @@ function render() {
 
 function renderStatus() {
   const m = state.model;
-  document.getElementById("status-bar").textContent =
-    `模型 ${m.provider}/${m.modelId} · 会话 ${state.conversations.length} · live 任务 ${Object.keys(state.taskGraph.tasks).length} · 落盘 data/session.sqlite`;
+  const noKey = !state.hasKey;
+  const noKeyText = noKey ? " · ⚠ 未配置 API Key" : "";
+  document.getElementById("status-bar").innerHTML =
+    `模型 <b style="color:#58a6ff">${m.provider}/${m.modelId}</b> · 会话 ${state.conversations.length} · live 任务 ${Object.keys(state.taskGraph.tasks).length}${noKeyText}`;
+  lockIfNoKey();
+}
+
+function lockIfNoKey() {
+  const noKey = !state.hasKey;
+  // 新会话按钮
+  document.getElementById("new-conv").disabled = noKey;
+  // submit 表单
+  const submitForm = document.getElementById("submit-form");
+  const submitInput = document.getElementById("submit-input");
+  submitInput.disabled = noKey;
+  submitForm.querySelector("button").disabled = noKey;
+  // 派发表单
+  const dTask = document.getElementById("dispatch-task");
+  const dGo = document.getElementById("dispatch-go");
+  if (dTask) dTask.disabled = noKey;
+  if (dGo) dGo.disabled = noKey || !document.getElementById("dispatch-agent").value;
 }
 
 // ─── 会话树（ownership 层级）───────────────────────────────────────────────
@@ -211,6 +230,79 @@ function renderDispatchForm() {
     }
   };
 }
+
+// ─── 设置弹窗 ───────────────────────────────────────────────────────────────────────
+async function openSettings() {
+  // 加载 provider 列表
+  if (cfgProviders.length === 0) {
+    const r = await fetch("/api/providers");
+    const d = await r.json();
+    cfgProviders = d.providers;
+    const sel = document.getElementById("cfg-provider");
+    sel.innerHTML = "";
+    for (const p of cfgProviders) {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = p.name;
+      sel.appendChild(o);
+    }
+    sel.onchange = () => {
+      const meta = cfgProviders.find((p) => p.id === sel.value);
+      if (meta) {
+        document.getElementById("cfg-model").value = meta.defaultModel;
+        document.getElementById("cfg-baseurl").value = meta.defaultBaseUrl || "";
+      }
+    };
+  }
+  // 加载当前配置
+  const r = await fetch("/api/settings");
+  const cfg = await r.json();
+  document.getElementById("cfg-provider").value = cfg.provider;
+  document.getElementById("cfg-model").value = cfg.modelId;
+  document.getElementById("cfg-baseurl").value = cfg.baseUrl || "";
+  document.getElementById("cfg-key").value = "";
+  document.getElementById("cfg-key").placeholder = cfg.hasKey ? "未改动时留空保留原 key" : "填入你的 API Key";
+  document.getElementById("cfg-status").textContent = "";
+  document.getElementById("settings-modal").classList.remove("hidden");
+}
+
+function closeSettings() {
+  document.getElementById("settings-modal").classList.add("hidden");
+}
+
+document.getElementById("open-settings").onclick = openSettings;
+document.getElementById("close-settings").onclick = closeSettings;
+document.getElementById("settings-modal").onclick = (ev) => {
+  if (ev.target.id === "settings-modal") closeSettings();
+};
+document.getElementById("save-settings").onclick = async () => {
+  const status = document.getElementById("cfg-status");
+  status.className = "form-status";
+  status.textContent = "保存中…";
+  const payload = {
+    provider: document.getElementById("cfg-provider").value,
+    modelId: document.getElementById("cfg-model").value,
+    apiKey: document.getElementById("cfg-key").value || undefined,
+    baseUrl: document.getElementById("cfg-baseurl").value,
+  };
+  const r = await fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (r.ok) {
+    status.className = "form-status success";
+    status.textContent = `✅ 已保存 · ${data.provider}/${data.modelId} · hasKey=${data.hasKey}`;
+    setTimeout(() => {
+      closeSettings();
+      refresh();
+    }, 600);
+  } else {
+    status.className = "form-status error";
+    status.textContent = `❌ ${data.error || "保存失败"}`;
+  }
+};
 
 // ─── SSE 实时刷新 ──────────────────────────────────────────────────────────
 const es = new EventSource("/api/events");

@@ -10,7 +10,40 @@
   <header>
     <h1>pi-boxd</h1>
     <div id="status-bar" class="status"></div>
+    <button id="open-settings" title="模型设置">⚙ 设置</button>
   </header>
+
+  <!-- 设置弹窗 -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-head">
+        <h2>模型设置</h2>
+        <button id="close-settings" class="close-btn" type="button">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label for="cfg-provider">Provider</label>
+          <select id="cfg-provider"></select>
+        </div>
+        <div class="form-row">
+          <label for="cfg-model">Model ID</label>
+          <input id="cfg-model" type="text" placeholder="例如 gpt-4o" />
+        </div>
+        <div class="form-row">
+          <label for="cfg-key">API Key</label>
+          <input id="cfg-key" type="password" placeholder="未改动时留空保留原 key" />
+        </div>
+        <div class="form-row">
+          <label for="cfg-baseurl">Base URL</label>
+          <input id="cfg-baseurl" type="text" placeholder="可选，用于 OpenAI 兼容服务" />
+        </div>
+        <div class="form-status" id="cfg-status"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="save-settings" type="button">保存</button>
+      </div>
+    </div>
+  </div>
   <main>
     <section id="panel-conversations">
       <div class="panel-head">

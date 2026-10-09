@@ -2,7 +2,7 @@
 // 打开一个 Harness（SQLite 落盘），每个「项目目录」对应一个 conversation（cwd 指向项目根），
 // 文件工具（read/write/edit/bash）通过 env(cwd) 在各自项目目录里执行 —— 项目隔离的软边界。
 // 复用 pi-durable-web 的 core（snapshot + HTTP/SSE），用自己的 web 目录（含 agent 派发 UI）。
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,17 +31,66 @@ const WEB_DIR = process.env.PI_BOXD_WEB_DIR
   ? resolve(process.env.PI_BOXD_WEB_DIR)
   : join(_piBoxdDir, "web"); // .../pi-boxd/web/
 
-// ─── 模型：无 key 用 faux（离线），有则 openai ──────────────────────────────
+// ─── 模型：有 key 用 openai（兼容 OpenAI 协议，含可配 baseUrl 走其他 provider），无 key 用 faux（离线） ──
 const models = createModels();
-let model = { provider: "openai", modelId: "gpt-6-sol" };
-const useFaux = process.env.OPENAI_API_KEY === undefined;
-const faux = useFaux ? fauxProvider() : null;
-if (faux) {
-  models.setProvider(faux.provider);
-  model = { provider: "faux", modelId: "faux-1" };
-} else {
-  models.setProvider(openaiProvider());
+let model = { provider: "openai", modelId: "gpt-4o" };
+let useFaux = true;
+let faux = null;
+const configPath = join(DATA_DIR, "config.json");
+
+// 读取配置（默认空）
+async function loadConfig() {
+  try {
+    return JSON.parse(await readFile(configPath, "utf-8"));
+  } catch {
+    return { provider: "openai", modelId: "gpt-4o", apiKey: "", baseUrl: "" };
+  }
 }
+async function saveConfig(cfg) {
+  await writeFile(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+}
+
+// Provider 列表（仅元数据，供前端下拉）
+const PROVIDER_LIST = [
+  { id: "openai", name: "OpenAI", defaultModel: "gpt-4o", defaultBaseUrl: "https://api.openai.com/v1" },
+  { id: "deepseek", name: "DeepSeek", defaultModel: "deepseek-chat", defaultBaseUrl: "https://api.deepseek.com/v1" },
+  { id: "anthropic", name: "Anthropic", defaultModel: "claude-3-5-sonnet-latest", defaultBaseUrl: "https://api.anthropic.com" },
+  { id: "moonshotai", name: "Moonshot (Kimi)", defaultModel: "moonshot-v1-8k", defaultBaseUrl: "https://api.moonshot.cn/v1" },
+  { id: "google", name: "Google Gemini", defaultModel: "gemini-2.0-flash-exp", defaultBaseUrl: "" },
+  { id: "groq", name: "Groq", defaultModel: "llama-3.1-70b-versatile", defaultBaseUrl: "https://api.groq.com/openai/v1" },
+  { id: "openrouter", name: "OpenRouter", defaultModel: "openai/gpt-4o", defaultBaseUrl: "https://openrouter.ai/api/v1" },
+  { id: "mistral", name: "Mistral", defaultModel: "mistral-large-latest", defaultBaseUrl: "https://api.mistral.ai/v1" },
+  { id: "xai", name: "xAI (Grok)", defaultModel: "grok-2-latest", defaultBaseUrl: "https://api.x.ai/v1" },
+];
+
+// 根据 config 初始化 provider：有 key 则用 openai（或兼容协议），无 key 则 faux
+async function initProvider() {
+  const cfg = await loadConfig();
+  // 清理现有
+  for (const p of models.getProviders()) models.deleteProvider(p.id);
+  if (cfg.apiKey) {
+    useFaux = false;
+    model = { provider: cfg.provider, modelId: cfg.modelId };
+    // openai-compatible：统一用 openaiProvider
+    const p = openaiProvider();
+    if (cfg.baseUrl) {
+      p.baseUrl = cfg.baseUrl;
+    }
+    models.setProvider(p);
+  } else {
+    useFaux = true;
+    faux = fauxProvider();
+    model = { provider: "faux", modelId: "faux-1" };
+    models.setProvider(faux.provider);
+  }
+  return !!cfg.apiKey;
+}
+let hasKey = false;
+async function refreshProvider() {
+  hasKey = await initProvider();
+  return hasKey;
+}
+await refreshProvider();
 
 // ─── Harness：文件工具 + env(cwd) 项目隔离 ──────────────────────────────────
 const registry = createRegistry();
@@ -195,7 +244,7 @@ async function boxSnapshot() {
     const project = cwd && cwd.startsWith(PROJECTS_DIR + "/") ? basename(cwd) : null;
     return { ...c, cwd, project };
   });
-  return { ...snap, conversations, model, projects: await listProjects() };
+  return { ...snap, conversations, model, hasKey, projects: await listProjects() };
 }
 
 // ─── 启动服务 ─────────────────────────────────────────────────────────────
@@ -207,6 +256,58 @@ const server = createWebServer({
   createConversation: () =>
     harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model, cwd: PROJECTS_DIR } }, context),
   extraRoutes: {
+    // 列出可配置的 provider 列表
+    "/api/providers": {
+      method: "GET",
+      async handler(req, res) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ providers: PROVIDER_LIST }));
+      },
+    },
+    // 配置读/写（GET 读，POST 写）—— extraRoutes 支持单 method 或方法列表
+    "/api/settings": {
+      methods: ["GET", "POST"],
+      async handler(req, res) {
+        if (req.method === "GET") {
+          const cfg = await loadConfig();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            provider: cfg.provider,
+            modelId: cfg.modelId,
+            baseUrl: cfg.baseUrl,
+            hasKey: !!cfg.apiKey,
+          }));
+          return;
+        }
+        // POST
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        let { provider, modelId, apiKey, baseUrl } = JSON.parse(body || "{}");
+        if (!provider) provider = "openai";
+        if (!modelId) {
+          const meta = PROVIDER_LIST.find((p) => p.id === provider);
+          modelId = meta?.defaultModel || "gpt-4o";
+        }
+        if (baseUrl === undefined) {
+          const meta = PROVIDER_LIST.find((p) => p.id === provider);
+          baseUrl = meta?.defaultBaseUrl || "";
+        }
+        const old = await loadConfig();
+        if (apiKey === undefined || apiKey === null) apiKey = old.apiKey || "";
+        await saveConfig({ provider, modelId, apiKey, baseUrl });
+        const newHasKey = await refreshProvider();
+        // 重新 configure 现有会话的 model
+        const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+        for (const rec of records) {
+          const a = await harness.snapshot(AgentDoc, rec.id, context);
+          if (a && (a.model?.provider !== provider || a.model?.modelId !== modelId)) {
+            await harness.commit((tx) => configure(tx, rec.id, { model: { provider, modelId } }), context);
+          }
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, hasKey: newHasKey, provider, modelId, baseUrl }));
+      },
+    },
     // 列出项目内的 agent 定义
     "/api/agents": {
       method: "GET",
@@ -233,6 +334,11 @@ const server = createWebServer({
         if (!project || !agent || !task) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "缺少 project/agent/task 参数" }));
+          return;
+        }
+        if (!hasKey) {
+          res.writeHead(403);
+          res.end(JSON.stringify({ error: "未配置模型 API Key，请点页面右上角⚙设置" }));
           return;
         }
         const cwd = join(PROJECTS_DIR, project);
