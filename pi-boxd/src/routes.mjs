@@ -1,6 +1,7 @@
 // HTTP 路由（6 个 extraRoutes）
 import { mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
+import { AgentDoc, configure } from "@earendil-works/pi-durable";
 import { readBody, loadConfig, saveConfig } from "./io.mjs";
 import { PROJECTS_DIR } from "./paths.mjs";
 import { refreshProvider, models, currentModel } from "./model.mjs";
@@ -10,7 +11,7 @@ import { syncAfterConfigChange } from "./harness.mjs";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
-export function buildExtraRoutes(harness) {
+export function buildExtraRoutes(harness, context) {
   return {
     // 项目：GET 列表 / POST 新建
     "/api/projects": {
