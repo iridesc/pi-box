@@ -4,3 +4,7 @@ workspace/
 
 # 本地环境变量
 .env
+/package-lock.json
+
+# Node.js 依赖（所有子项目）
+node_modules/

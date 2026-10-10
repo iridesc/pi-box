@@ -4,20 +4,20 @@ services:
     container_name: pi-box
     restart: unless-stopped
     ports:
-      # 只暴露到本机回环，容器外不可达
-      - "127.0.0.1:8000:30141"
+      # pi-boxd 管理台：127.0.0.1:8790 → 容器 8790
+      - "127.0.0.1:8790:8790"
     volumes:
-      # 工作区：用户项目 + .cron/ 任务配置，全部在此
+      # 工作区：用户项目（每个子目录 = 一个项目）+ .cron/ 任务配置
       - ./workspace:/workspace
-      # pi 数据：凭据(auth.json)、设置、session，网页登录一次 cron 直接复用
-      - ./agent-data:/home/agent/.pi
+      # pi-boxd 持久数据：会话/任务（SQLite）、模型配置、全局 agent 库
+      - ./agent-data:/home/agent/.pi-boxd
     environment:
       - TZ=${TZ:-Asia/Shanghai}
-      # 网页访问密码（可选，建议设置）
-      - PI_WEB_PASSWORD=${PI_WEB_PASSWORD:-}
-      # 通过反向代理（Caddy/Nginx）以域名访问时，必须列出信任的域名，
-      # 否则 pi-web 的 Host 头校验会返回 403 "Untrusted request"（逗号分隔多个）
-      - PI_WEB_ALLOWED_HOSTS=${PI_WEB_ALLOWED_HOSTS:-}
+      # pi-boxd 配置
+      - PI_BOX_WORKSPACE=/workspace
+      - PI_BOXD_DATA_DIR=/home/agent/.pi-boxd
+      - PI_BOXD_WEB_DIR=/home/pi-boxd/app/web
+      - PORT=8790
     env_file:
       - path: .env
         required: false
