@@ -18,8 +18,10 @@ import {
   assistantInstructions,
   resolveAgentModel,
   loadAgentDef,
+  resolveAgentTools,
+  AVAILABLE_TOOL_NAMES,
 } from "./agents.mjs";
-import { makeSubagentTool, Subagents } from "./extension.mjs";
+import { makeSubagentTool, PiBoxTasks, Subagents } from "./extension.mjs";
 
 const context = BACKGROUND_CONTEXT;
 export { context };
@@ -34,9 +36,9 @@ export async function createHarness() {
   registry.install(CodingTools);
 
   // 先建一个占位扩展，工具里通过 getter 拿到它（解决循环引用）
-  let piBoxExt = defineExtension({ name: "pi-box", tools: [], tasks: [] });
+  let piBoxExt = defineExtension({ name: "pi-box", tools: [], tasks: PiBoxTasks });
   const SubagentTool = makeSubagentTool(() => piBoxExt);
-  piBoxExt = defineExtension({ name: "pi-box", tools: [SubagentTool], tasks: [] });
+  piBoxExt = defineExtension({ name: "pi-box", tools: [SubagentTool], tasks: PiBoxTasks });
   registry.install(piBoxExt);
 
   const harness = await Harness.open(
@@ -59,6 +61,7 @@ export async function ensureProjectConversations(harness) {
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
   const cwdToId = new Map();
   for (const rec of records) {
+    if (rec.owner !== null && rec.owner !== undefined) continue;
     const agent = await harness.snapshot(AgentDoc, rec.id, context);
     if (agent?.cwd) cwdToId.set(agent.cwd, rec.id);
   }
@@ -78,6 +81,8 @@ export async function ensureProjectConversations(harness) {
     cwdToId.set(cwd, conv.id);
     console.log(`[project] 新建项目会话 #${conv.id} → ${name}`);
   }
+  // 文件是配置源；每次启动都对账，修复上次写文件后、configure 前崩溃造成的漂移。
+  await syncAllConfig(harness);
 }
 
 /** 同步：durable 的 instructions/model 持久化在会话上，改文件不会自动更新。保存配置后调用。 */
@@ -112,7 +117,11 @@ async function syncSubagentInstances(harness, projectName, agentName) {
     const found = st?.agents?.[agentName];
     if (!found) continue;
     await harness.commit(
-      (tx) => configure(tx, found.conversationId, { instructions: def.instructions, model: resolveAgentModel(def.model) }),
+      (tx) => configure(tx, found.conversationId, {
+        instructions: def.instructions,
+        model: resolveAgentModel(def.model),
+        tools: resolveAgentTools(def.tools),
+      }),
       context,
     );
     console.log(`[sync] 刷新子 agent ${agentName} 会话 #${found.conversationId}`);
@@ -125,6 +134,21 @@ export async function syncAfterConfigChange(harness, { scope, projectName, agent
   for (const p of projects) {
     await syncProjectAssistant(harness, p);
     if (agentName) await syncSubagentInstances(harness, p, agentName);
+  }
+}
+
+/** 对账所有项目助理和已经创建的子 agent；启动及全局模型变更后调用。 */
+export async function syncAllConfig(harness) {
+  for (const projectName of await listProjects()) {
+    await syncProjectAssistant(harness, projectName);
+    for (const agent of await listAgents(projectName)) {
+      try {
+        await syncSubagentInstances(harness, projectName, agent.name);
+      } catch (error) {
+        // 单个历史配置有误不应阻止守护进程启动；下一次保存时 API 会拒绝非法工具名。
+        console.error(`[sync] 跳过无效 agent 配置 ${projectName}/${agent.name}: ${error.message}`);
+      }
+    }
   }
 }
 
@@ -150,5 +174,14 @@ export async function boxSnapshot(harness) {
     agentsByProject[p] = await listAgents(p);
     assistantByProject[p] = await loadAssistant(p);
   }
-  return { ...snap, conversations, model: currentModel, hasKey: getHasKey(), projects, agentsByProject, assistantByProject };
+  return {
+    ...snap,
+    conversations,
+    model: currentModel,
+    hasKey: getHasKey(),
+    projects,
+    agentsByProject,
+    assistantByProject,
+    availableTools: AVAILABLE_TOOL_NAMES,
+  };
 }

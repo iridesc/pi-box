@@ -2,7 +2,7 @@
 // 暴露给需要"知道当前模型"的地方（如 agent 定义里写死 model 的 fallback）
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { loadConfig } from "./io.mjs";
+import { loadConfig, activeProviderConfig } from "./io.mjs";
 import { PROVIDERS, makeAuthContext } from "./providers.mjs";
 
 const models = createModels({ authContext: makeAuthContext() });
@@ -18,7 +18,7 @@ export { models, model as currentModel };
 
 /** 初始化 provider（读 config.json）。有 key 用真实 provider，无 key 用 faux。返回是否配置了 key。 */
 export async function initProvider() {
-  const cfg = await loadConfig();
+  const cfg = activeProviderConfig(await loadConfig());
   for (const p of models.getProviders()) models.deleteProvider(p.id);
   if (cfg.apiKey) {
     const def = PROVIDERS[cfg.provider] ?? PROVIDERS.openai;
@@ -53,6 +53,38 @@ export async function initProvider() {
     hasKey = false;
   }
   return hasKey;
+}
+
+/** 用未保存或已保存的单个厂商配置发起最小真实请求。 */
+export async function testProviderConnection({ provider, modelId, apiKey, baseUrl }) {
+  const def = PROVIDERS[provider];
+  if (!def) throw new Error(`未知 Provider：${provider}`);
+  if (!apiKey) throw new Error("请先填写或保存 API Key");
+  const testModels = createModels({
+    authContext: {
+      async env(name) {
+        if (name === def.keyEnv || (def.keyEnv === "ANTHROPIC_API_KEY" && name === "ANTHROPIC_AUTH_TOKEN")) return apiKey;
+        return undefined;
+      },
+      async fileExists() { return false; },
+    },
+  });
+  const p = await def.load();
+  if (baseUrl) {
+    p.baseUrl = baseUrl;
+    for (const m of typeof p.getAllModels === "function" ? p.getAllModels() : []) m.baseUrl = baseUrl;
+  }
+  testModels.setProvider(p);
+  const available = (await p.getModels()).map((m) => m.id);
+  const selected = modelId || available[0] || def.defaultModel;
+  const candidate = testModels.getModel(p.id, selected);
+  if (!candidate) throw new Error(`模型不存在：${selected}`);
+  const started = Date.now();
+  const reply = await testModels.completeSimple(candidate, {
+    messages: [{ role: "user", content: "Reply with OK only.", timestamp: Date.now() }],
+  });
+  if (reply.stopReason === "error") throw new Error(reply.errorMessage || "模型请求失败");
+  return { ok: true, provider: p.id, modelId: selected, latencyMs: Date.now() - started };
 }
 
 export async function refreshProvider() {

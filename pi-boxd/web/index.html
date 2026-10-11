@@ -21,12 +21,30 @@
       </div>
       <div class="modal-body">
         <div class="form-row"><label for="cfg-provider">Provider</label><select id="cfg-provider"></select></div>
-        <div class="form-row"><label for="cfg-model">Model ID</label><select id="cfg-model"></select></div>
+        <div class="form-row"><label for="cfg-model">Model ID</label><select id="cfg-model"></select><button id="fetch-models" class="btn-secondary" type="button">获取列表</button></div>
         <div class="form-row"><label for="cfg-key">API Key</label><input id="cfg-key" type="password" placeholder="未改动时留空保留原 key"></div>
         <div class="form-row"><label for="cfg-baseurl">Base URL</label><input id="cfg-baseurl" type="text" placeholder="可选"></div>
         <div id="cfg-status" class="form-status"></div>
       </div>
-      <div class="modal-foot"><button id="save-settings" type="button">保存</button></div>
+      <div class="modal-foot">
+        <span class="modal-hint">每个厂商的配置会分别保存在持久目录</span>
+        <button id="test-settings" class="btn-secondary" type="button">测试连接</button>
+        <button id="save-settings" type="button">保存并启用</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="agent-tools-modal" class="modal hidden">
+    <div class="modal-content modal-small">
+      <div class="modal-head">
+        <h2>选择 Agent 工具</h2>
+        <button id="close-agent-tools" class="close-btn" type="button">×</button>
+      </div>
+      <div id="agent-tools-options" class="modal-body checkbox-box"></div>
+      <div class="modal-foot">
+        <button id="cancel-agent-tools" class="btn-secondary" type="button">取消</button>
+        <button id="confirm-agent-tools" type="button">确定</button>
+      </div>
     </div>
   </div>
 

@@ -1,15 +1,16 @@
 // HTTP 路由（6 个 extraRoutes）
-import { mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { mkdir, rename } from "node:fs/promises";
+import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
 import { readBody, loadConfig, saveConfig } from "./io.mjs";
 import { PROJECTS_DIR } from "./paths.mjs";
-import { refreshProvider, models, currentModel } from "./model.mjs";
+import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, loadAgentDef, loadAssistant, saveAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel } from "./agents.mjs";
-import { syncAfterConfigChange } from "./harness.mjs";
+import { listProjects, listAgents, loadAssistant, saveAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
+import { syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
 
 export function buildExtraRoutes(harness, context) {
   return {
@@ -49,17 +50,94 @@ export function buildExtraRoutes(harness, context) {
         res.end(JSON.stringify({ ok: true, project: name, conversationId: conv.id }));
       },
     },
-    // provider 列表（含真实模型）
+    // 项目重命名：目录与所有相关会话 cwd 一起更新
+    "/api/projects/rename": {
+      method: "POST",
+      async handler(req, res) {
+        const { oldName, newName } = await readBody(req);
+        if (!oldName || !newName || !NAME_RE.test(newName)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "项目名只能含字母、数字、-、_" }));
+          return;
+        }
+        const projects = await listProjects();
+        if (!projects.includes(oldName)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `项目 \"${oldName}\" 不存在` }));
+          return;
+        }
+        if (oldName !== newName && projects.includes(newName)) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `项目 \"${newName}\" 已存在` }));
+          return;
+        }
+        if (oldName === newName) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, project: newName, updatedConversations: 0 }));
+          return;
+        }
+        const oldCwd = join(PROJECTS_DIR, oldName);
+        const newCwd = join(PROJECTS_DIR, newName);
+        await rename(oldCwd, newCwd);
+        try {
+          const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+          const affected = [];
+          for (const record of records) {
+            const agent = await harness.snapshot(AgentDoc, record.id, context);
+            if (agent?.cwd === oldCwd) affected.push(record.id);
+          }
+          await harness.commit(async (tx) => {
+            for (const id of affected) await configure(tx, id, { cwd: newCwd });
+          }, context);
+          await syncAfterConfigChange(harness, { scope: "project", projectName: newName, agentName: null });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, project: newName, updatedConversations: affected.length }));
+        } catch (error) {
+          await rename(newCwd, oldCwd).catch(() => {});
+          throw error;
+        }
+      },
+    },
+    // provider 元数据
     "/api/providers": {
       method: "GET",
       async handler(req, res) {
-        const modelsByProvider = await getAllProviderModels();
-        const providers = PROVIDER_LIST.map((p) => {
-          const ms = modelsByProvider[p.id] ?? [];
-          return { ...p, models: ms, defaultModel: ms[0] ?? p.defaultModel };
-        });
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ providers }));
+        res.end(JSON.stringify({ providers: PROVIDER_LIST }));
+      },
+    },
+    // 按需获取单个厂商的模型目录
+    "/api/models": {
+      method: "POST",
+      async handler(req, res) {
+        const { provider } = await readBody(req);
+        const meta = PROVIDER_LIST.find((p) => p.id === provider);
+        if (!meta) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `未知 Provider：${provider}` }));
+          return;
+        }
+        const all = await getAllProviderModels();
+        const modelIds = all[provider] ?? [];
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ provider, models: modelIds, source: "provider-catalog" }));
+      },
+    },
+    // 用当前表单或已保存密钥发一个最小真实请求
+    "/api/settings/test": {
+      method: "POST",
+      async handler(req, res) {
+        const input = await readBody(req);
+        const cfg = await loadConfig();
+        const saved = cfg.providers?.[input.provider] ?? {};
+        try {
+          const result = await testProviderConnection({ ...saved, ...input, apiKey: input.apiKey || saved.apiKey });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: error.message }));
+        }
       },
     },
     // 模型设置
@@ -68,8 +146,15 @@ export function buildExtraRoutes(harness, context) {
       async handler(req, res) {
         if (req.method === "GET") {
           const cfg = await loadConfig();
+          const providers = Object.fromEntries(
+            Object.entries(cfg.providers ?? {}).map(([id, value]) => [id, {
+              modelId: value.modelId ?? "",
+              baseUrl: value.baseUrl ?? "",
+              hasKey: !!value.apiKey,
+            }]),
+          );
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ provider: cfg.provider, modelId: cfg.modelId, baseUrl: cfg.baseUrl, hasKey: !!cfg.apiKey }));
+          res.end(JSON.stringify({ activeProvider: cfg.activeProvider, providers }));
           return;
         }
         let { provider, modelId, apiKey, baseUrl } = await readBody(req);
@@ -85,17 +170,18 @@ export function buildExtraRoutes(harness, context) {
           return;
         }
         const old = await loadConfig();
-        if (apiKey === undefined || apiKey === null) apiKey = old.apiKey || "";
-        await saveConfig({ provider, modelId, apiKey, baseUrl });
+        const previous = old.providers?.[provider] ?? {};
+        // 兼容前端掩码：星号绝不能被当作真实密钥保存。
+        if (apiKey === undefined || apiKey === null || apiKey === "" || /^\*+$/.test(apiKey)) apiKey = previous.apiKey || "";
+        const next = {
+          version: 2,
+          activeProvider: provider,
+          providers: { ...(old.providers ?? {}), [provider]: { modelId, apiKey, baseUrl } },
+        };
+        await saveConfig(next);
         const newHasKey = await refreshProvider();
-        // 重配所有会话的 model
-        const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
-        for (const rec of records) {
-          const a = await harness.snapshot(AgentDoc, rec.id, context);
-          if (a && a.model?.provider !== currentModel.provider) {
-            await harness.commit((tx) => configure(tx, rec.id, { model: { provider: currentModel.provider, modelId: currentModel.modelId } }), context);
-          }
-        }
+        // 按各项目/agent 定义重新解析，而不是把所有会话粗暴覆盖成全局模型。
+        await syncAllConfig(harness);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, hasKey: newHasKey, provider, modelId, baseUrl, effectiveProvider: currentModel.provider }));
       },
@@ -117,14 +203,26 @@ export function buildExtraRoutes(harness, context) {
           return;
         }
         const { project, name, scope = "global", model: m, tools, instructions } = await readBody(req);
-        if (!name || !NAME_RE.test(name)) {
+        if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
-          res.end(JSON.stringify({ error: "agent 名只能含字母、数字、-、_" }));
+          res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
           return;
         }
         if (scope === "project" && !project) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "项目级 agent 需要 project 参数" }));
+          return;
+        }
+        if (!instructions?.trim()) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "提示词不能为空" }));
+          return;
+        }
+        try {
+          resolveAgentTools(tools);
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
           return;
         }
         const file = await saveAgentFile(project, name, scope, { model: m, tools, instructions });

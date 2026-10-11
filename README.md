@@ -1,14 +1,15 @@
-# pi-box：容器内常驻 Pi + pi-web + cron 周期任务
+# pi-box：持久化多 Agent 管理台 + cron 周期任务
 
-零改动 pi 与 pi-web 本体：pi-web 提供 Web 自然语言界面，容器内 cron 驱动周期任务，两者共享同一份凭据与同一份工作区规则。
+`pi-boxd` 基于 `pi-durable` 提供按项目隔离的持久会话、后台子 Agent 和 Web 管理台；容器内 cron 继续驱动周期任务。会话、任务和模型配置在容器重启后恢复。
 
 ## 目录结构
 
 ```
 pi-box/
-├── Dockerfile            # 预装 pi CLI + pi-web + cron
-├── docker-compose.yml    # 挂载 workspace 与 agent-data，端口 8000
-├── entrypoint.sh         # 导出环境变量 + 安装系统提示词 + 启动 cron + pi-web
+├── Dockerfile            # 预装 pi CLI + pi-boxd + cron
+├── docker-compose.yml    # 挂载 workspace 与 agent-data，端口 8790
+├── entrypoint.sh         # 导出环境变量 + 安装系统提示词 + 启动 cron + pi-boxd
+├── pi-boxd/              # durable 守护进程、HTTP API 与 Web 管理台
 ├── bin/pi-job            # cron 任务包装：非交互跑一次 pi，日志落盘
 ├── system-prompt/
 │   └── SYSTEM.md         # 通用系统提示词模板（构建进镜像，首启自动安装）
@@ -24,7 +25,7 @@ pi-box/
 
 ## 系统提示词在哪儿配置
 
-pi-web 会话信息面板的「系统提示词」由 pi 按以下优先级组装：
+cron 中的 pi CLI 按以下优先级组装系统提示词；pi-boxd 项目助理和 Agent 则分别使用项目配置文件：
 
 | 配置 | 位置 | 作用 |
 |------|------|------|
@@ -34,7 +35,7 @@ pi-web 会话信息面板的「系统提示词」由 pi 按以下优先级组装
 | `APPEND_SYSTEM.md` | `.pi/APPEND_SYSTEM.md` 或 `~/.pi/agent/APPEND_SYSTEM.md` | **追加**到基础提示词之后 |
 | CLI 参数 | `--system-prompt` / `--append-system-prompt` | 单次运行覆盖/追加 |
 
-**通用提示词的安装机制**：镜像内预置 `system-prompt/SYSTEM.md` 模板，容器首启时由 entrypoint 自动安装到全局 `~/.pi/agent/SYSTEM.md`（全局路径对 pi-web 会话与 cron 任务同时生效）。若宿主机 `agent-data/agent/SYSTEM.md` 已存在则跳过安装——**想自定义提示词时，在宿主机放一个同名文件即可覆盖**。
+**通用提示词的安装机制**：镜像内预置 `system-prompt/SYSTEM.md` 模板，容器首启时由 entrypoint 自动安装到全局 `~/.pi/agent/SYSTEM.md`，供 cron 中的 pi CLI 使用。若对应文件已存在则跳过安装。
 
 **定时任务能力（cron-jobs skill）**：周期任务的增删改查不写在系统提示词里，而是做成 skill（镜像内置，首启安装到 `~/.pi/agent/skills/cron-jobs/`）。skill 采用渐进披露：系统提示词只注入一行描述，agent 在用户要求配置定时任务时才加载完整指令，并通过 `cron-job.sh` 工具操作（list/add/remove/reload，自动校验 ID 重复并重载 crontab）。
 
@@ -44,30 +45,17 @@ pi-web 会话信息面板的「系统提示词」由 pi 按以下优先级组装
 
 ```bash
 cd pi-box
-cp .env.example .env     # 设置 PI_WEB_PASSWORD（可选）
+cp .env.example .env     # 可选：设置时区及任务环境变量
 podman compose up -d --build
 ```
 
-打开 http://127.0.0.1:8000（用户名 `pi` + 密码），在 Models 面板登录模型提供商 —— 登录后 cron 任务自动复用凭据。系统默认为**通用智能助手**（非编码定位），提示词由镜像内置模板自动安装，见上文「系统提示词在哪儿配置」。
+打开 http://127.0.0.1:8790，在设置中选择模型提供商、模型并填写 API Key。没有 Key 时服务以 faux 离线模型启动，只允许查看和配置，不执行真实模型请求。
 
-> **首次启动自动引导**：entrypoint 会在容器启动时检测 `/workspace` 是否已有会话，没有则自动创建一个引导会话（发一条最小 prompt 让模型回复后落盘）。这样 pi-web 打开后 `/workspace` 已是被信任的项目目录，侧边栏"新建对话"按钮直接可用（pi-web 的"新建对话"依赖已选中的项目目录，而目录只有在存在落盘会话后才被信任）。
+`/workspace` 下每个非隐藏一级目录都是一个项目。项目助理配置保存在 `<项目>/.pi/assistant.md`；项目 Agent 保存在 `<项目>/.pi/agents/*.md`；全局共享 Agent 保存在 `/workspace/.pi-box/agents/*.md`。项目助理可通过 `subagent` 工具启动持久后台子会话，子 Agent 的回复会自动回流主会话。
 
-### 通过反向代理 / 域名访问（Caddy/Nginx）
+> entrypoint 仍会创建一个旧 pi CLI 引导会话，仅用于兼容已有工具链；pi-boxd 的项目发现和 Durable 会话不依赖它。
 
-pi-web 内置了 **Host 头校验**（middleware）：只信任 `localhost` / IP 直连，以及 `PI_WEB_ALLOWED_HOSTS`（或 `PI_WEB_HOSTNAME`）环境变量中列出的域名。
-
-**现象**：用 Caddy/Nginx 反代后通过域名访问（如 `https://pibox.irid.cc`），返回 `403 Untrusted request`，但容器内直连 `127.0.0.1:8000` 正常。
-
-**解决**：在 `.env` 里配置信任的域名，重启容器：
-
-```bash
-# .env
-PI_WEB_ALLOWED_HOSTS=pibox.irid.cc,another.example.com   # 多个域名逗号分隔
-
-podman compose up -d   # 或 docker compose up -d
-```
-
-注意：域名反代 + HTTPS 证书签发（如 Caddy 自动 Let's Encrypt）与 `PI_WEB_PASSWORD` 的 Basic Auth 互不影响，密码保护依然生效。
+> 当前 compose 只把管理台绑定到 `127.0.0.1`。若通过反向代理对外开放，请在代理层配置 HTTPS 和身份认证。
 
 ### 配置周期任务（两种方式）
 
@@ -78,7 +66,7 @@ podman compose up -d   # 或 docker compose up -d
 - **纯脚本任务**（不需要模型）：直接用命令，如 `bash /workspace/.cron/scripts/check.sh`
   `pi-job --id <任务ID> 'bash /workspace/.cron/scripts/check.sh'`
 
-**方式一：网页自然语言**。在 pi-web 里直接说：
+**方式一：网页自然语言**。在 pi-boxd 项目对话中直接说：
 > 每天早上 9 点总结 /workspace/logs 昨天的日志
 > 把刚才那个任务改成每 30 分钟一次
 > 加一个每 5 分钟执行的脚本任务，跑 /workspace/.cron/scripts/check.sh
@@ -125,7 +113,7 @@ podman exec pi-box pi-job log <任务ID>     # 查看某任务最近日志（默
 ### 常用命令
 
 ```bash
-podman compose logs -f pi      # 容器日志（pi-web / cron）
+podman compose logs -f pi      # 容器日志（pi-boxd / cron）
 podman compose restart         # 重启（cron 任务自动恢复）
 podman compose down            # 停止（保留数据卷目录）
 ```
@@ -134,6 +122,6 @@ podman compose down            # 停止（保留数据卷目录）
 
 - **rootless 权限模型**：rootless podman 中容器内 root = 宿主机当前用户，所以挂载目录读写无需处理属主。rootful Docker 下则要加非 root 用户并 `chown`。
 - **边界是软硬结合的**：提示词（AGENTS.md）是软约束，硬边界靠容器 + 只挂载 `/workspace` + 网络隔离实现。需要更强隔离可加 `--cap-drop=ALL` 或对 workspace 部分只读挂载。
-- **凭据共享**：pi-web 与 cron 共用 `~/.pi/agent`（auth.json / settings.json），网页登录一次两处生效；cron 的 session 单独放在 `/workspace/.cron/sessions`，避免与 pi-web 的 session 锁冲突。
+- **凭据隔离**：pi-boxd 模型配置保存在 `/home/agent/.pi-boxd/config.json`；cron 中的 pi CLI 使用 `~/.pi/agent`。cron 的 session 单独放在 `/workspace/.cron/sessions`。
 - **restart 策略**：rootless podman 默认不自动拉起容器（restart: unless-stopped 依赖 systemd）。长期常驻可用 `podman generate systemd --new --name pi-box` 生成 systemd unit，或 `podman-compose up -d` 后手动维护。
 - **时区**：cron 按 `TZ` 环境变量执行，默认 `Asia/Shanghai`，在 `.env` 里改。

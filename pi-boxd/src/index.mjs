@@ -16,6 +16,9 @@ const { harness, context } = await createHarness();
 // 为每个项目建主会话
 await ensureProjectConversations(harness);
 
+// 主动恢复上次进程遗留的 generation/tool/reporter 等持久任务。
+harness.resume();
+
 // 启动 HTTP 服务
 const server = createWebServer({
   harness,

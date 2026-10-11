@@ -2,8 +2,8 @@
 // 主 agent 用 subagent 工具 spawn 出命名的子 agent conversation，Reporter 把答案自动回流主会话。
 import { Type } from "@earendil-works/pi-ai";
 import { AssistantEntry, LiveDoc, configure, defineDoc, defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
-import { loadAgentDef, resolveAgentModel, answerText } from "./agents.mjs";
-import { currentModel } from "./model.mjs";
+import { basename } from "node:path";
+import { loadAgentDef, resolveAgentModel, resolveAgentTools, answerText } from "./agents.mjs";
 
 // 主会话用 document 记录"子 agent 名 → 会话 id"
 export const Subagents = defineDoc({
@@ -16,7 +16,7 @@ export const Subagents = defineDoc({
 });
 
 // Anchor：背景 task，立即 terminal；子 agent 归它所有，从而不阻塞主会话的 idle/Esc
-const AnchorTask = defineTask({
+export const AnchorTask = defineTask({
   name: "pibox.anchor",
   version: 1,
   initial: () => ({ phase: "done" }),
@@ -28,7 +28,7 @@ const AnchorTask = defineTask({
 });
 
 // Reporter：投递一条消息给子 agent，等答案，把答案回流给主会话
-const Reporter = defineTask({
+export const ReporterTask = defineTask({
   name: "pibox.reporter",
   version: 1,
   initial: () => ({ phase: "deliver" }),
@@ -59,10 +59,19 @@ const Reporter = defineTask({
         const main = await runtime.conversation(runtime.conversationId, ctx);
         await main.submit({ type: "input", content: report, whenBusy: "followUp", requestId: `pibox-report:${reporter.id}` }, ctx);
       }
-      await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), ctx);
+      await runtime.commit(async (tx) => {
+        const state = await tx.doc(Subagents, runtime.conversationId);
+        delete state.reporters?.[String(reporter.id)];
+        return { status: "terminal", outcome: { status: "completed", result: null } };
+      }, ctx);
     },
   },
-  abort: (_t, runtime, ctx) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), ctx),
+  abort: (reporter, runtime, ctx) =>
+    runtime.commit(async (tx) => {
+      const state = await tx.doc(Subagents, runtime.conversationId);
+      delete state.reporters?.[String(reporter.id)];
+      return { status: "terminal", outcome: { status: "aborted" } };
+    }, ctx),
 });
 
 /** 构造 subagent 工具（用 getter 解决与 PiBoxExtension 的循环引用）。调用时再拿 PiBoxExtension 引用。 */
@@ -123,6 +132,7 @@ export function makeSubagentTool(getPiBoxExtension) {
           await configure(tx, child.id, {
             model: resolveAgentModel(def.model),
             instructions: def.instructions,
+            tools: resolveAgentTools(def.tools),
             extensions: { remove: [getPiBoxExtension()] },
             cwd,
           });
@@ -131,7 +141,8 @@ export function makeSubagentTool(getPiBoxExtension) {
         const conversationId = s.agents[name].conversationId;
         const input = { name, conversationId, message, followUp: action === "send" && followUp === true };
         s.reporters = s.reporters ?? {};
-        s.reporters[api.taskId] = await tx.createTask(Reporter, input, background);
+        const reporterId = await tx.createTask(ReporterTask, input, background);
+        s.reporters[String(reporterId)] = reporterId;
         return action === "send" ? `已发送给 ${name}` : `已启动 ${name}`;
       }, ctx);
       const current = (await api.snapshot(Subagents, api.conversationId, ctx))?.agents[name];
@@ -139,3 +150,6 @@ export function makeSubagentTool(getPiBoxExtension) {
     },
   });
 }
+
+/** 必须注册，重启时 scheduler 才能按持久化 kind 恢复任务。 */
+export const PiBoxTasks = [AnchorTask, ReporterTask];
