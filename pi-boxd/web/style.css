@@ -183,6 +183,7 @@ section:last-child { border-right: none; }
   width: 480px; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column;
 }
 .modal-small { width: 380px; }
+.modal-settings { width: 760px; }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 16px; border-bottom: 1px solid #21262d;
@@ -190,10 +191,146 @@ section:last-child { border-right: none; }
 .modal-head h2 { font-size: 14px; margin: 0; }
 .close-btn { background: transparent; border: none; color: #8b949e; font-size: 20px; cursor: pointer; }
 .close-btn:hover { color: #c9d1d9; }
-.modal-body { padding: 16px; overflow-y: auto; }
+.modal-body { padding: 16px; overflow-y: auto; min-height: 0; }
+.modal-settings-body { flex: 1 1 auto; }
 .modal-foot { padding: 12px 16px; border-top: 1px solid #21262d; display: flex; justify-content: flex-end; }
 .modal-foot button {
   background: #238636; border: 1px solid #2ea043; color: #fff;
   border-radius: 4px; padding: 6px 16px; cursor: pointer; font-family: inherit; font-size: 12px;
 }
 button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── 项目树：子 Agent 分隔小标题（与 tree-level-1 同行级） ── */
+.tree-sep {
+  padding: 6px 12px 4px 28px;          /* 与 tree-level-1 同缩进 */
+  font-size: 11px;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-top: 1px solid #21262d;
+  margin-top: 4px;
+}
+
+/* ── Agent 状态圆点 ── */
+.agent-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin: 0 6px 0 4px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.agent-dot-idle { background: #58a6ff; }              /* 蓝 */
+.agent-dot-running {
+  background: #3fb950;                               /* 绿 */
+  animation: agent-pulse 1s ease-in-out infinite;
+}
+.agent-dot-waiting-tool { background: #d29922; }     /* 黄 */
+.agent-dot-pending { background: #6e7681; }          /* 灰 */
+.agent-dot-error { background: #f85149; }             /* 红 */
+.agent-dot-unknown { background: #30363d; }          /* 深灰（未启动） */
+
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.7); }
+  50%      { opacity: 0.45; box-shadow: 0 0 0 5px rgba(63, 185, 80, 0); }
+}
+
+/* ── SSE 状态指示器（顶部状态栏右侧） ── */
+.sse-indicator {
+  font-size: 12px;
+  margin-right: 8px;
+  cursor: default;
+  user-select: none;
+}
+.sse-indicator.sse-ok { color: #3fb950; }
+.sse-indicator.sse-reconnecting { color: #d29922; animation: sse-blink 1.2s ease-in-out infinite; }
+@keyframes sse-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+/* ── 系统设置弹窗：两栏布局（左侧导航 + 右侧内容） ── */
+.modal-settings { max-width: 92vw; }
+.modal-settings-body { padding: 0 !important; display: flex; min-height: 480px; }
+.drawer-nav {
+  width: 160px; flex-shrink: 0; padding: 12px 8px;
+  border-right: 1px solid #21262d; background: #0d1117;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.drawer-nav-item {
+  background: transparent; border: none; color: #8b949e;
+  text-align: left; padding: 8px 12px; border-radius: 4px;
+  cursor: pointer; font-size: 13px; font-family: inherit;
+}
+.drawer-nav-item:hover { background: #1f2937; color: #c9d1d9; }
+.drawer-nav-item.active { background: #1f6feb; color: #fff; }
+.drawer-content { flex: 1; min-width: 0; overflow-y: auto; padding: 16px 20px; }
+.drawer-tab.hidden { display: none; }
+.drawer-loading { color: #8b949e; padding: 20px; }
+.drawer-empty { padding: 20px; text-align: center; }
+.drawer-section { margin-bottom: 24px; }
+.drawer-section h3 { font-size: 13px; color: #8b949e; margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.drawer-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.drawer-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border: 1px solid #21262d; border-radius: 6px;
+  margin-bottom: 8px; background: #161b22;
+}
+.drawer-row-main { flex: 1; min-width: 0; }
+.drawer-row-title { font-size: 13px; color: #c9d1d9; }
+.drawer-row-desc { font-size: 12px; margin-top: 2px; word-break: break-all; }
+.drawer-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: 12px; }
+.drawer-tag-builtin { color: #d29922; }
+.drawer-tag-user { color: #58a6ff; }
+.drawer-danger { color: #f85149 !important; }
+.kv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.kv-table td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+.kv-table td.k { color: #8b949e; width: 140px; }
+.kv-table td.v { color: #c9d1d9; font-family: ui-monospace, monospace; }
+.kv-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
+.tag { padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+.tag-ok { background: rgba(63,185,80,0.15); color: #3fb950; }
+.tag-warn { background: rgba(210,153,34,0.15); color: #d29922; }
+
+/* 模型 Tab 内的表单行：在 drawer-content 里变紧凑 */
+.drawer-content .form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.drawer-content .form-row label { width: 90px; flex-shrink: 0; color: #8b949e; font-size: 12px; }
+.drawer-content .form-row input, .drawer-content .form-row select {
+  flex: 1; min-width: 0; background: #0d1117; color: #c9d1d9;
+  border: 1px solid #30363d; border-radius: 4px; padding: 6px 10px;
+  font-family: inherit; font-size: 12px;
+}
+.drawer-content .form-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 16px; }
+.drawer-content .modal-hint { margin-right: auto; color: #6e7681; font-size: 11px; }
+
+/* ── MCP 子表单（弹层） ── */
+.drawer-submodal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200;
+  display: flex; align-items: center; justify-content: center;
+}
+.drawer-submodal {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 20px 24px; width: 520px; max-width: 90vw; max-height: 90vh;
+  overflow-y: auto;
+}
+.drawer-submodal h3 { margin: 0 0 16px; font-size: 14px; color: #c9d1d9; }
+.drawer-submodal .form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.drawer-submodal .form-row label { width: 100px; flex-shrink: 0; color: #8b949e; font-size: 12px; }
+.drawer-submodal .form-row input, .drawer-submodal .form-row select {
+  flex: 1; min-width: 0; background: #0d1117; color: #c9d1d9;
+  border: 1px solid #30363d; border-radius: 4px; padding: 6px 10px;
+  font-family: inherit; font-size: 12px;
+}
+.drawer-submodal .form-row.form-row-stack { align-items: flex-start; flex-direction: column; gap: 4px; }
+.drawer-submodal .form-row.form-row-stack label { width: auto; }
+.drawer-submodal .form-row.form-row-stack input,
+.drawer-submodal .form-row.form-row-stack textarea {
+  width: 100%; min-width: 0; resize: vertical; font-family: ui-monospace, monospace;
+}
+.drawer-submodal .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+/* ── 主题与密度切换 ── */
+body.theme-light { background: #f6f8fa; color: #1f2328; }
+body.density-compact .tree-item { padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
+

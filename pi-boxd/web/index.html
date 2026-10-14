@@ -10,26 +10,41 @@
   <header>
     <h1>pi-box</h1>
     <div id="status-bar" class="status"></div>
-    <button id="open-settings" title="模型设置">⚙ 设置</button>
+    <span id="sse-indicator" class="sse-indicator sse-ok" title="SSE 已连接">🟢</span>
+    <button id="open-settings" title="系统设置（模型 / Skills / MCP / 系统）">⚙ 设置</button>
   </header>
 
-  <div id="settings-modal" class="modal hidden">
-    <div class="modal-content">
+  <div id="settings-modal" class="modal hidden" aria-label="系统设置">
+    <div class="modal-content modal-settings">
       <div class="modal-head">
-        <h2>模型设置</h2>
+        <h2>系统设置</h2>
         <button id="close-settings" class="close-btn" type="button">×</button>
       </div>
-      <div class="modal-body">
-        <div class="form-row"><label for="cfg-provider">Provider</label><select id="cfg-provider"></select></div>
-        <div class="form-row"><label for="cfg-model">Model ID</label><select id="cfg-model"></select><button id="fetch-models" class="btn-secondary" type="button">获取列表</button></div>
-        <div class="form-row"><label for="cfg-key">API Key</label><input id="cfg-key" type="password" placeholder="未改动时留空保留原 key"></div>
-        <div class="form-row"><label for="cfg-baseurl">Base URL</label><input id="cfg-baseurl" type="text" placeholder="可选"></div>
-        <div id="cfg-status" class="form-status"></div>
-      </div>
-      <div class="modal-foot">
-        <span class="modal-hint">每个厂商的配置会分别保存在持久目录</span>
-        <button id="test-settings" class="btn-secondary" type="button">测试连接</button>
-        <button id="save-settings" type="button">保存并启用</button>
+      <div class="modal-body modal-settings-body">
+        <nav id="drawer-nav" class="drawer-nav">
+          <button class="drawer-nav-item active" data-tab="models" type="button">🤖 模型</button>
+          <button class="drawer-nav-item" data-tab="skills" type="button">📚 Skills</button>
+          <button class="drawer-nav-item" data-tab="mcp" type="button">🔌 MCP</button>
+          <button class="drawer-nav-item" data-tab="system" type="button">⚙ 系统</button>
+        </nav>
+        <section id="drawer-content" class="drawer-content">
+          <!-- 模型 Tab 复用原设置表单（去掉原 modal-head） -->
+          <div id="tab-models" class="drawer-tab">
+            <div class="form-row"><label for="cfg-provider">Provider</label><select id="cfg-provider"></select></div>
+            <div class="form-row"><label for="cfg-model">Model ID</label><select id="cfg-model"></select><button id="fetch-models" class="btn-secondary" type="button">获取列表</button></div>
+            <div class="form-row"><label for="cfg-key">API Key</label><input id="cfg-key" type="password" placeholder="未改动时留空保留原 key"></div>
+            <div class="form-row"><label for="cfg-baseurl">Base URL</label><input id="cfg-baseurl" type="text" placeholder="可选"></div>
+            <div id="cfg-status" class="form-status"></div>
+            <div class="form-actions">
+              <span class="modal-hint">每个厂商的配置会分别保存在持久目录</span>
+              <button id="test-settings" class="btn-secondary" type="button">测试连接</button>
+              <button id="save-settings" type="button">保存并启用</button>
+            </div>
+          </div>
+          <div id="tab-skills" class="drawer-tab hidden"></div>
+          <div id="tab-mcp" class="drawer-tab hidden"></div>
+          <div id="tab-system" class="drawer-tab hidden"></div>
+        </section>
       </div>
     </div>
   </div>

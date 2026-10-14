@@ -7,6 +7,7 @@ let state = null;
 let selected = null;
 let expandedProjects = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
+let agentsStatus = {}; // project -> { name: { status, conversationId } }，实时
 let cfgProviders = [];
 let cfgSettings = { activeProvider: "openai", providers: {} };
 const MASKED_API_KEY = "********";
@@ -16,6 +17,42 @@ function el(tag, className, text) {
   if (className) e.className = className;
   if (text !== undefined) e.textContent = text;
   return e;
+}
+
+/** agent 状态 → 中文提示词（用于圆点 tooltip / flash hint）。 */
+function agentStatusLabel(status) {
+  return {
+    idle: "空闲",
+    running: "运行中",
+    "waiting-tool": "等待工具结果",
+    pending: "待启动",
+    error: "上次运行出错",
+    unknown: "未启动",
+  }[status] ?? status;
+}
+
+/** 未启动 agent 节点的轻量提示，不占用任何 modal。 */
+function flashHint(node, msg) {
+  const old = node.style.boxShadow;
+  node.style.transition = "box-shadow 0.2s";
+  node.style.boxShadow = "inset 3px 0 0 #d29922";
+  node.title = msg;
+  setTimeout(() => { node.style.boxShadow = old; }, 1200);
+}
+
+/** 更新右上角 SSE 连接指示器。 */
+function updateSseIndicator(state) {
+  const elx = document.getElementById("sse-indicator");
+  if (!elx) return;
+  if (state === "reconnecting") {
+    elx.className = "sse-indicator sse-reconnecting";
+    elx.textContent = "🟡 重连中…";
+    elx.title = "SSE 正在重新连接";
+  } else {
+    elx.className = "sse-indicator sse-ok";
+    elx.textContent = "🟢";
+    elx.title = "SSE 已连接";
+  }
 }
 
 async function refresh() {
@@ -57,11 +94,7 @@ function renderTree() {
     arrow.onclick = (ev) => {
       ev.stopPropagation();
       if (open) expandedProjects.delete(proj);
-      else {
-        expandedProjects.add(proj);
-        // 项目首次展开时，默认展开子 Agent 分组。
-        expandedProjects.add(`agents-${proj}`);
-      }
+      else expandedProjects.add(proj);
       render();
     };
     row.appendChild(arrow);
@@ -105,43 +138,54 @@ function renderTree() {
     };
     root.appendChild(aNode);
 
-    // 子 agent 组
+    // 子 agent：直接挂在项目下，不再有折叠组（需求：随时看到圆点状态）
     const agents = agentsCache[proj] ?? [];
-    const agentsKey = `agents-${proj}`;
-    const agentsOpen = expandedProjects.has(agentsKey);
-    const agentsGroup = el("div", "tree-item tree-section tree-level-1");
-    agentsGroup.appendChild(el("span", "tree-arrow", agentsOpen ? "▼" : "▶"));
-    agentsGroup.appendChild(el("span", "tree-label", `📁 子 Agent（${agents.length}）`));
-    agentsGroup.onclick = () => {
-      if (agentsOpen) expandedProjects.delete(agentsKey);
-      else expandedProjects.add(agentsKey);
-      render();
-    };
-    root.appendChild(agentsGroup);
-    if (agentsOpen) {
-      for (const a of agents) {
-        const n = el("div", "tree-item tree-level-2");
-        const isSel = selected?.type === "agent" && selected.project === proj && selected.name === a.name;
-        if (isSel) n.classList.add("selected");
-        n.appendChild(el("span", "tree-arrow", ""));
-        n.appendChild(el("span", "tree-label", `📄 ${a.name}`));
-        const agentSettings = el("button", "tree-settings", "⚙");
-        agentSettings.type = "button";
-        agentSettings.title = "Agent 设置";
-        agentSettings.setAttribute("aria-label", `设置 Agent ${a.name}`);
-        agentSettings.onclick = (ev) => {
-          ev.stopPropagation();
-          selected = { type: "agent", project: proj, name: a.name };
-          render();
-        };
-        n.appendChild(agentSettings);
-        n.appendChild(el("span", "tree-tag", a.scope === "project" ? "项目" : "全局"));
-        n.onclick = () => {
-          selected = { type: "agent", project: proj, name: a.name };
-          render();
-        };
-        root.appendChild(n);
-      }
+    const projStatus = agentsStatus[proj] ?? {};
+    // 分隔小标题
+    if (agents.length > 0) {
+      const sep = el("div", "tree-sep", "子 Agent");
+      root.appendChild(sep);
+    }
+    for (const a of agents) {
+      const n = el("div", "tree-item tree-level-2");
+      const isSel = selected?.type === "conversation" && selected.id === projStatus[a.name]?.conversationId;
+      const isCfgSel = selected?.type === "agent" && selected.project === proj && selected.name === a.name;
+      if (isSel || isCfgSel) n.classList.add("selected");
+
+      // 圆点
+      const status = projStatus[a.name]?.status ?? "unknown";
+      const dot = el("span", `agent-dot agent-dot-${status}`);
+      dot.title = `状态：${agentStatusLabel(status)}`;
+      n.appendChild(dot);
+      n.appendChild(el("span", "tree-arrow", ""));
+      n.appendChild(el("span", "tree-label", `🤖 ${a.name}`));
+
+      // 配置入口：name 后的 ⚙ 小按钮
+      const agentSettings = el("button", "tree-settings", "⚙");
+      agentSettings.type = "button";
+      agentSettings.title = "Agent 配置";
+      agentSettings.setAttribute("aria-label", `配置 Agent ${a.name}`);
+      agentSettings.onclick = (ev) => {
+        ev.stopPropagation();
+        selected = { type: "agent", project: proj, name: a.name };
+        render();
+      };
+      n.appendChild(agentSettings);
+      n.appendChild(el("span", "tree-tag", a.scope === "project" ? "项目" : "全局"));
+
+      // 单击名字：切到子 agent 聊天框（未启动则提示）
+      n.onclick = () => {
+        const s = projStatus[a.name];
+        if (!s || !s.conversationId) {
+          flashHint(n, "该 agent 尚未启动，需主助理派任务时才会被创建");
+          return;
+        }
+        selected = { type: "conversation", project: proj, id: s.conversationId, isAgent: a.name };
+        render();
+      };
+      root.appendChild(n);
+    }
+    if (agents.length > 0) {
       const add = el("div", "tree-item tree-add tree-level-2");
       add.appendChild(el("span", "tree-arrow", ""));
       add.appendChild(el("span", "tree-label", "＋ 新建 Agent"));
@@ -213,11 +257,10 @@ function renderProjectForm(view) {
       status.textContent = `❌ ${data.error || "重命名失败"}`;
       return;
     }
-    const agentsWasOpen = expandedProjects.has(`agents-${oldName}`);
+    // agents-* 标记已废弃（子 Agent 始终展开），仅迁移项目本身。
     expandedProjects.delete(oldName);
     expandedProjects.delete(`agents-${oldName}`);
     expandedProjects.add(newName);
-    if (agentsWasOpen) expandedProjects.add(`agents-${newName}`);
     selected = { type: "project", project: newName };
     await refresh();
   };
@@ -258,9 +301,20 @@ function renderConversation(view) {
     view.textContent = "（会话已不存在）";
     return;
   }
+  const isAgentView = selected.isAgent !== undefined; // 从子 agent 节点点进来
+  const title = isAgentView
+    ? `🤖 子 Agent · ${selected.isAgent}（会话 #${conv.id}）`
+    : conv.owner
+      ? `子会话 #${conv.id}`
+      : `${conv.project} · 主对话`;
+  const sub = isAgentView
+    ? `由项目 ${conv.project} 助理派发 · task #${conv.owner?.taskId ?? "—"}`
+    : conv.owner
+      ? `owned by task #${conv.owner.taskId}`
+      : "项目助理";
   const head = el("div", "view-head");
-  head.appendChild(el("span", "view-title", conv.owner ? `子会话 #${conv.id}` : `${conv.project} · 主对话`));
-  head.appendChild(el("span", "view-sub", conv.owner ? `owned by task #${conv.owner.taskId}` : "项目助理"));
+  head.appendChild(el("span", "view-title", title));
+  head.appendChild(el("span", "view-sub", sub));
   view.appendChild(head);
 
   const body = el("div", "view-body");
@@ -280,7 +334,7 @@ function renderConversation(view) {
   const form = document.createElement("form");
   form.className = "view-input";
   const input = document.createElement("input");
-  input.placeholder = "和项目助理对话…";
+  input.placeholder = isAgentView ? `和子 Agent ${selected.isAgent} 对话…` : "和项目助理对话…";
   input.autocomplete = "off";
   input.disabled = !state.hasKey;
   const btn = el("button", "", "发送");
@@ -586,7 +640,7 @@ document.getElementById("new-project").onclick = async () => {
     return;
   }
   expandedProjects.add(name);
-  expandedProjects.add(`agents-${name}`);
+  // 子 Agent 永远展开，无需 agents-${name} 标记。
   selected = { type: "conversation", project: name, id: String(data.conversationId) };
   refresh();
 };
@@ -635,6 +689,24 @@ function loadProviderForm(provider) {
 }
 
 async function openSettings() {
+  await openSettingsModal("models");
+}
+function closeSettings() {
+  document.getElementById("settings-modal").classList.add("hidden");
+}
+document.getElementById("open-settings").onclick = openSettings;
+document.getElementById("close-settings").onclick = closeSettings;
+document.getElementById("settings-modal").onclick = (ev) => {
+  if (ev.target.id === "settings-modal") closeSettings();
+};
+
+// ─── 系统设置弹窗（两栏：左侧导航 + 右侧内容） ────────────────────────────────────────
+let settingsLoadedTabs = new Set();
+
+async function openSettingsModal(tab) {
+  document.getElementById("settings-modal").classList.remove("hidden");
+  await switchSettingsTab(tab);
+  // 模型 Tab 预热数据
   if (cfgProviders.length === 0) {
     const d = await (await fetch("/api/providers")).json();
     cfgProviders = d.providers;
@@ -655,16 +727,310 @@ async function openSettings() {
   }
   document.getElementById("cfg-provider").value = cfgSettings.activeProvider || cfgProviders[0]?.id;
   loadProviderForm(document.getElementById("cfg-provider").value);
-  document.getElementById("settings-modal").classList.remove("hidden");
 }
-function closeSettings() {
-  document.getElementById("settings-modal").classList.add("hidden");
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !document.getElementById("settings-modal").classList.contains("hidden")) closeSettings();
+});
+
+async function switchSettingsTab(tab) {
+  for (const btn of document.querySelectorAll(".drawer-nav-item")) {
+    btn.classList.toggle("active", btn.dataset.tab === tab);
+  }
+  for (const id of ["tab-models", "tab-skills", "tab-mcp", "tab-system"]) {
+    document.getElementById(id).classList.toggle("hidden", id !== `tab-${tab}`);
+  }
+  if (tab === "models") return;
+  const panel = document.getElementById(`tab-${tab}`);
+  if (!settingsLoadedTabs.has(tab)) {
+    settingsLoadedTabs.add(tab);
+    if (tab === "skills") await renderDrawerSkills(panel);
+    if (tab === "mcp") await renderDrawerMcp(panel);
+    if (tab === "system") await renderDrawerSystem(panel);
+  }
 }
-document.getElementById("open-settings").onclick = openSettings;
-document.getElementById("close-settings").onclick = closeSettings;
-document.getElementById("settings-modal").onclick = (ev) => {
-  if (ev.target.id === "settings-modal") closeSettings();
-};
+for (const btn of document.querySelectorAll(".drawer-nav-item")) {
+  btn.addEventListener("click", () => switchSettingsTab(btn.dataset.tab));
+}
+
+// ── Skills Tab ──
+async function renderDrawerSkills(panel) {
+  panel.innerHTML = `<div class="drawer-loading">加载中…</div>`;
+  const render = async () => {
+    const { skills } = await (await fetch("/api/skills")).json();
+    panel.innerHTML = "";
+    const head = el("div", "drawer-section-head");
+    head.appendChild(el("h3", "", "📚 Skills"));
+    head.appendChild(el("div", "muted", `${skills.length} 个（内置只读，用户可启停）`));
+    panel.appendChild(head);
+    for (const s of skills) {
+      const row = el("div", "drawer-row");
+      const left = el("div", "drawer-row-main");
+      const title = el("div", "drawer-row-title");
+      title.textContent = `${s.source === "builtin" ? "🔒 " : ""}${s.name}`;
+      left.appendChild(title);
+      const desc = el("div", "muted drawer-row-desc");
+      desc.textContent = s.description || "（无描述）";
+      left.appendChild(desc);
+      const tag = el("span", `tree-tag drawer-tag-${s.source}`);
+      tag.textContent = s.source === "builtin" ? "内置" : "用户";
+      left.appendChild(tag);
+      row.appendChild(left);
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = s.enabled;
+      toggle.disabled = s.source === "builtin" && !s.wasBuiltin; // 内置且未被用户覆盖 → 只读
+      toggle.onchange = async () => {
+        await fetch("/api/skills/toggle", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: s.name, enabled: toggle.checked }),
+        });
+        settingsLoadedTabs.delete("skills"); render();
+      };
+      row.appendChild(toggle);
+      panel.appendChild(row);
+    }
+  };
+  await render();
+}
+
+// ── MCP Tab ──
+async function renderDrawerMcp(panel) {
+  panel.innerHTML = `<div class="drawer-loading">加载中…</div>`;
+  const render = async () => {
+    const cfg = await (await fetch("/api/mcp")).json();
+    const servers = Object.entries(cfg.mcpServers ?? {});
+    panel.innerHTML = "";
+    const head = el("div", "drawer-section-head");
+    head.appendChild(el("h3", "", "🔌 MCP Servers"));
+    const addBtn = el("button", "btn-secondary", "＋ 新增");
+    addBtn.onclick = () => openMcpForm(null, render);
+    head.appendChild(addBtn);
+    panel.appendChild(head);
+    if (servers.length === 0) {
+      panel.appendChild(el("div", "muted drawer-empty", "（还没有配置 MCP server）"));
+      return;
+    }
+    for (const [name, config] of servers) {
+      const row = el("div", "drawer-row");
+      const left = el("div", "drawer-row-main");
+      const title = el("div", "drawer-row-title");
+      const type = config.url ? "http" : (config.command ? "stdio" : "?");
+      title.textContent = `${name}  ·  ${type}${config.enabled === false ? " · 已禁用" : ""}`;
+      left.appendChild(title);
+      const desc = el("div", "muted drawer-row-desc");
+      desc.textContent = config.description || (type === "stdio" ? config.command : config.url) || "（无描述）";
+      left.appendChild(desc);
+      row.appendChild(left);
+      const acts = el("div", "drawer-row-actions");
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = config.enabled !== false;
+      toggle.title = "启停";
+      toggle.onchange = async () => {
+        await fetch("/api/mcp", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, config: { ...config, enabled: toggle.checked } }),
+        });
+        settingsLoadedTabs.delete("mcp"); render();
+      };
+      acts.appendChild(toggle);
+      const edit = el("button", "tree-settings", "✎");
+      edit.title = "编辑";
+      edit.onclick = () => openMcpForm({ name, config }, render);
+      acts.appendChild(edit);
+      const del = el("button", "tree-settings drawer-danger", "🗑");
+      del.title = "删除";
+      del.onclick = async () => {
+        if (!confirm(`确认删除 MCP server "${name}"？`)) return;
+        await fetch("/api/mcp", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, delete: true }),
+        });
+        settingsLoadedTabs.delete("mcp"); render();
+      };
+      acts.appendChild(del);
+      row.appendChild(acts);
+      panel.appendChild(row);
+    }
+  };
+  await render();
+}
+
+function openMcpForm(existing, onSaved) {
+  const isNew = !existing;
+  const initName = existing?.name ?? "";
+  const initCfg = existing?.config ?? { command: "", args: [], env: {}, enabled: true, exposure: "codemode" };
+  const overlay = el("div", "drawer-submodal-backdrop");
+  const form = el("div", "drawer-submodal");
+  form.innerHTML = `
+    <h3>${isNew ? "新增" : "编辑"} MCP server</h3>
+    <div class="form-row"><label>name</label><input id="mcf-name" type="text" value="${initName}" ${isNew ? "" : "disabled"} placeholder="字母 / 数字 / _ / -"></div>
+    <div class="form-row"><label>type</label>
+      <select id="mcf-type">
+        <option value="stdio" ${!initCfg.url ? "selected" : ""}>stdio</option>
+        <option value="http" ${initCfg.url ? "selected" : ""}>http</option>
+      </select>
+    </div>
+    <div id="mcf-stdio">
+      <div class="form-row"><label>command</label><input id="mcf-cmd" type="text" value="${initCfg.command ?? ""}" placeholder="例如 npx -y @modelcontextprotocol/server-filesystem"></div>
+      <div class="form-row form-row-stack"><label>args</label><textarea id="mcf-args" rows="2" placeholder="每行一个参数">${(initCfg.args ?? []).join("\n")}</textarea></div>
+      <div class="form-row form-row-stack"><label>env (K=V 每行一组)</label><textarea id="mcf-env" rows="3" placeholder="API_KEY=xxx\nLOG_LEVEL=info">${Object.entries(initCfg.env ?? {}).map(([k,v]) => `${k}=${v}`).join("\n")}</textarea></div>
+    </div>
+    <div id="mcf-http" class="hidden">
+      <div class="form-row"><label>url</label><input id="mcf-url" type="text" value="${initCfg.url ?? ""}" placeholder="https://..."></div>
+      <div class="form-row form-row-stack"><label>headers (K=V 每行一组)</label><textarea id="mcf-headers" rows="3" placeholder="Authorization=Bearer xxx\nX-Custom=value">${Object.entries(initCfg.headers ?? {}).map(([k,v]) => `${k}=${v}`).join("\n")}</textarea></div>
+    </div>
+    <div class="form-row form-row-stack"><label>description</label><textarea id="mcf-desc" rows="2" placeholder="一句话说明这个 server 的作用">${initCfg.description ?? ""}</textarea></div>
+    <div class="form-row"><label>exposure</label>
+      <select id="mcf-exposure">
+        <option value="codemode" ${initCfg.exposure === "codemode" || !initCfg.exposure ? "selected" : ""}>codemode</option>
+        <option value="deferred" ${initCfg.exposure === "deferred" ? "selected" : ""}>deferred</option>
+        <option value="direct" ${initCfg.exposure === "direct" ? "selected" : ""}>direct</option>
+        <option value="hidden" ${initCfg.exposure === "hidden" ? "selected" : ""}>hidden</option>
+      </select>
+    </div>
+    <div class="form-row"><label>timeout (秒)</label><input id="mcf-timeout" type="number" value="${initCfg.timeout ?? ""}" placeholder="默认 60"></div>
+    <div class="form-row"><label>enabled</label><input id="mcf-enabled" type="checkbox" ${initCfg.enabled !== false ? "checked" : ""}></div>
+    <div id="mcf-status" class="form-status"></div>
+    <div class="form-actions">
+      <button id="mcf-cancel" class="btn-secondary" type="button">取消</button>
+      <button id="mcf-save" class="btn-primary" type="button">保存</button>
+    </div>
+  `;
+  overlay.appendChild(form);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  form.querySelector("#mcf-cancel").onclick = close;
+  overlay.onclick = (ev) => { if (ev.target === overlay) close(); };
+  const typeSel = form.querySelector("#mcf-type");
+  const sync = () => {
+    form.querySelector("#mcf-stdio").classList.toggle("hidden", typeSel.value !== "stdio");
+    form.querySelector("#mcf-http").classList.toggle("hidden", typeSel.value !== "http");
+  };
+  typeSel.onchange = sync; sync();
+  const parseKV = (s) => {
+    const out = {};
+    for (const line of (s ?? "").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const i = trimmed.indexOf("=");
+      if (i > 0) out[trimmed.slice(0, i).trim()] = trimmed.slice(i + 1);
+    }
+    return out;
+  };
+  form.querySelector("#mcf-save").onclick = async () => {
+    const status = form.querySelector("#mcf-status");
+    status.className = "form-status"; status.textContent = "保存中…";
+    const name = form.querySelector("#mcf-name").value.trim();
+    const type = typeSel.value;
+    const cfg = {
+      enabled: form.querySelector("#mcf-enabled").checked,
+      description: form.querySelector("#mcf-desc").value || undefined,
+      exposure: form.querySelector("#mcf-exposure").value,
+      timeout: Number(form.querySelector("#mcf-timeout").value) || undefined,
+    };
+    if (type === "stdio") {
+      cfg.command = form.querySelector("#mcf-cmd").value.trim();
+      const args = form.querySelector("#mcf-args").value
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+      if (args.length) cfg.args = args;
+      const env = parseKV(form.querySelector("#mcf-env").value);
+      if (Object.keys(env).length) cfg.env = env;
+    } else {
+      cfg.url = form.querySelector("#mcf-url").value.trim();
+      const headers = parseKV(form.querySelector("#mcf-headers").value);
+      if (Object.keys(headers).length) cfg.headers = headers;
+    }
+    const r = await fetch("/api/mcp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, config: cfg }),
+    });
+    const data = await r.json();
+    if (!r.ok) { status.className = "form-status err"; status.textContent = `❌ ${data.error || "保存失败"}`; return; }
+    close();
+    settingsLoadedTabs.delete("mcp"); await onSaved();
+  };
+}
+
+// ── 系统 Tab ──
+async function renderDrawerSystem(panel) {
+  const sys = await (await fetch("/api/system")).json();
+  const prefs = await (await fetch("/api/prefs")).json();
+  panel.innerHTML = "";
+  // 容器信息
+  const sec1 = el("div", "drawer-section");
+  sec1.appendChild(el("h3", "", "📦 容器"));
+  const info = el("table", "kv-table");
+  for (const [k, v] of Object.entries(sys.container)) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "k", k));
+    tr.appendChild(el("td", "v", String(v)));
+    info.appendChild(tr);
+  }
+  sec1.appendChild(info);
+  panel.appendChild(sec1);
+  // 路径
+  const sec2 = el("div", "drawer-section");
+  sec2.appendChild(el("h3", "", "📁 路径"));
+  const paths = el("table", "kv-table");
+  for (const [k, v] of Object.entries(sys.paths)) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "k", k));
+    tr.appendChild(el("td", "v", v));
+    paths.appendChild(tr);
+  }
+  sec2.appendChild(paths);
+  panel.appendChild(sec2);
+  // 凭据总览
+  const sec3 = el("div", "drawer-section");
+  sec3.appendChild(el("h3", "", "🔐 凭据总览"));
+  for (const p of sys.providers) {
+    const row = el("div", "kv-row");
+    row.appendChild(el("span", "", `${p.label} (${p.id})`));
+    const tag = el("span", p.configured ? "tag tag-ok" : "tag tag-warn");
+    tag.textContent = p.configured ? "已配置" : "未配置";
+    row.appendChild(tag);
+    sec3.appendChild(row);
+  }
+  panel.appendChild(sec3);
+  // 偏好
+  const sec4 = el("div", "drawer-section");
+  sec4.appendChild(el("h3", "", "🎨 偏好"));
+  const densityRow = el("div", "form-row");
+  densityRow.appendChild(el("label", "", "密度"));
+  const densitySel = document.createElement("select");
+  for (const v of ["comfortable", "compact"]) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v === "comfortable" ? "舒适" : "紧凑";
+    if (v === prefs.density) o.selected = true;
+    densitySel.appendChild(o);
+  }
+  densitySel.onchange = async () => {
+    await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ density: densitySel.value }) });
+    document.body.classList.toggle("density-compact", densitySel.value === "compact");
+  };
+  densityRow.appendChild(densitySel);
+  sec4.appendChild(densityRow);
+  const themeRow = el("div", "form-row");
+  themeRow.appendChild(el("label", "", "主题"));
+  const themeSel = document.createElement("select");
+  for (const v of ["dark", "light"]) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v === "dark" ? "深色" : "浅色";
+    if (v === prefs.theme) o.selected = true;
+    themeSel.appendChild(o);
+  }
+  themeSel.onchange = async () => {
+    await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ theme: themeSel.value }) });
+    document.body.classList.toggle("theme-light", themeSel.value === "light");
+  };
+  themeRow.appendChild(themeSel);
+  sec4.appendChild(themeRow);
+  panel.appendChild(sec4);
+  // 应用偏好
+  document.body.classList.toggle("density-compact", prefs.density === "compact");
+  document.body.classList.toggle("theme-light", prefs.theme === "light");
+}
 const cfgKeyInput = document.getElementById("cfg-key");
 cfgKeyInput.onfocus = () => {
   if (cfgKeyInput.dataset.masked === "true") {
@@ -734,7 +1100,14 @@ const es = new EventSource("/api/events");
 es.onmessage = (ev) => {
   state = JSON.parse(ev.data);
   agentsCache = state.agentsByProject ?? {};
+  agentsStatus = state.agentsStatus ?? {};
   render();
+  updateSseIndicator("ok");
 };
+es.onerror = () => {
+  // EventSource 自带重连；只更新指示器状态
+  updateSseIndicator("reconnecting");
+};
+es.onopen = () => updateSseIndicator("ok");
 
 refresh();

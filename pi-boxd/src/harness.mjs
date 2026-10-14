@@ -1,7 +1,7 @@
 // Harness 创建 + 项目主会话管理 + 配置同步 + 快照
 import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { createRegistry, defineExtension, Harness, configure } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, Harness, configure, LiveDoc } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -152,7 +152,17 @@ export async function syncAllConfig(harness) {
   }
 }
 
-/** 完整快照：会话 + cwd/project + agentsByProject + assistantByProject + 全局 model */
+/** 把 LiveState 折叠成前端可消费的 agent 状态字符串。 */
+function deriveAgentStatus(live) {
+  if (!live?.run) return "idle";
+  const tools = live.tools ?? [];
+  // 有工具正在跑（产生输出 / 等待 IO）→ running；其它工具都已结束但至少存在 → waiting-tool。
+  if (tools.some((t) => t.status === "running")) return "running";
+  if (tools.length > 0) return "waiting-tool";
+  return "running";
+}
+
+/** 完整快照：会话 + cwd/project + agentsByProject + assistantByProject + agentsStatus + 全局 model */
 export async function boxSnapshot(harness) {
   const snap = await snapshot(harness, context);
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
@@ -170,9 +180,28 @@ export async function boxSnapshot(harness) {
   const projects = await listProjects();
   const agentsByProject = {};
   const assistantByProject = {};
+  const agentsStatus = {}; // { [project]: { [name]: { status, conversationId } } }
   for (const p of projects) {
     agentsByProject[p] = await listAgents(p);
     assistantByProject[p] = await loadAssistant(p);
+    agentsStatus[p] = {};
+    // 主会话：找到该项目主会话（ownerless 且 cwd 是该项目）。
+    const mainConv = conversations.find((c) => c.project === p && !c.owner);
+    if (!mainConv) continue;
+    // snapshot() 返回的 id 是字符串，但 durable API 需要 number。
+    const subDoc = await harness.snapshot(Subagents, Number(mainConv.id), context);
+    const spawned = subDoc?.agents ?? {};
+    for (const name of Object.keys(spawned)) {
+      const childId = Number(spawned[name].conversationId);
+      let status = "idle";
+      try {
+        const live = await harness.snapshot(LiveDoc, childId, context);
+        status = deriveAgentStatus(live);
+      } catch {
+        // 子会话可能还没持久化；保持 idle
+      }
+      agentsStatus[p][name] = { status, conversationId: String(childId) };
+    }
   }
   return {
     ...snap,
@@ -182,6 +211,7 @@ export async function boxSnapshot(harness) {
     projects,
     agentsByProject,
     assistantByProject,
+    agentsStatus,
     availableTools: AVAILABLE_TOOL_NAMES,
   };
 }

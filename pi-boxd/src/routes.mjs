@@ -1,13 +1,14 @@
 // HTTP 路由（6 个 extraRoutes）
-import { mkdir, rename } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
-import { readBody, loadConfig, saveConfig } from "./io.mjs";
-import { PROJECTS_DIR } from "./paths.mjs";
+import { readBody, loadConfig, saveConfig, loadMcpConfig, saveMcpConfig, listSkills, setSkillEnabled, loadPrefs, savePrefs } from "./io.mjs";
+import { PROJECTS_DIR, DATA_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
 import { listProjects, listAgents, loadAssistant, saveAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
 import { syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
+import { validateMcpServerConfig } from "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
@@ -273,6 +274,104 @@ export function buildExtraRoutes(harness, context) {
         await syncAfterConfigChange(harness, { scope: "project", projectName: project, agentName: null });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, file }));
+      },
+    },
+    // ── MCP server 配置（读取 / 增改 / 删除 / 启停） ────────────────────────
+    "/api/mcp": {
+      methods: ["GET", "POST"],
+      async handler(req, res) {
+        if (req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify(await loadMcpConfig()));
+        }
+        const { name, config, delete: del } = await readBody(req);
+        const all = await loadMcpConfig();
+        if (del) {
+          if (!name) {
+            res.writeHead(400); return res.end(JSON.stringify({ error: "缺少 name" }));
+          }
+          if (!all.mcpServers[name]) {
+            res.writeHead(404); return res.end(JSON.stringify({ error: `不存在 MCP server "${name}"` }));
+          }
+          delete all.mcpServers[name];
+          await saveMcpConfig(all);
+          return res.end(JSON.stringify({ ok: true, deleted: name }));
+        }
+        if (!name || !config) {
+          res.writeHead(400); return res.end(JSON.stringify({ error: "缺少 name 或 config" }));
+        }
+        const validated = validateMcpServerConfig(name, config);
+        if (typeof validated === "string") {
+          res.writeHead(400); return res.end(JSON.stringify({ error: validated }));
+        }
+        all.mcpServers[name] = validated;
+        await saveMcpConfig(all);
+        return res.end(JSON.stringify({ ok: true, name, config: validated }));
+      },
+    },
+    // ── Skill 列表与启停 ─────────────────────────────────────────────────
+    "/api/skills": {
+      method: "GET",
+      async handler(req, res) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ skills: await listSkills() }));
+      },
+    },
+    "/api/skills/toggle": {
+      method: "POST",
+      async handler(req, res) {
+        const { name, enabled } = await readBody(req);
+        if (!name) { res.writeHead(400); return res.end(JSON.stringify({ error: "缺少 name" })); }
+        await setSkillEnabled(name, !!enabled);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, name, enabled: !!enabled }));
+      },
+    },
+    // ── UI 偏好 ─────────────────────────────────────────────────────────
+    "/api/prefs": {
+      methods: ["GET", "POST"],
+      async handler(req, res) {
+        if (req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify(await loadPrefs()));
+        }
+        const incoming = await readBody(req);
+        const current = await loadPrefs();
+        const merged = { ...current, ...incoming };
+        await savePrefs(merged);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(merged));
+      },
+    },
+    // ── 系统信息（容器 / workspace / 凭据总览） ───────────────────────────────
+    "/api/system": {
+      method: "GET",
+      async handler(req, res) {
+        const cfg = await loadConfig();
+        const providers = PROVIDER_LIST.map((p) => ({
+          id: p.id,
+          label: p.label,
+          configured: !!cfg.providers?.[p.id]?.apiKey,
+        }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          container: {
+            image: process.env.PI_BOX_IMAGE ?? "localhost/pi-box_pi:latest",
+            hostname: process.env.HOSTNAME ?? "—",
+            node: process.version,
+            platform: `${process.platform}/${process.arch}`,
+            uptimeSec: Math.floor(process.uptime()),
+            tz: process.env.TZ ?? "UTC",
+          },
+          paths: {
+            workspace: PROJECTS_DIR,
+            dataDir: DATA_DIR,
+            globalAgents: join(PROJECTS_DIR, ".pi-box", "agents"),
+            userSkills: "/home/agent/.pi/agent/skills",
+            mcp: "/home/agent/.pi/agent/mcp.json",
+          },
+          providers,
+        }));
       },
     },
   };
