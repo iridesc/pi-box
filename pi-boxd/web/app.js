@@ -141,10 +141,22 @@ function renderTree() {
     // 子 agent：直接挂在项目下，不再有折叠组（需求：随时看到圆点状态）
     const agents = agentsCache[proj] ?? [];
     const projStatus = agentsStatus[proj] ?? {};
-    // 分隔小标题
-    if (agents.length > 0) {
-      const sep = el("div", "tree-sep", "子 Agent");
-      root.appendChild(sep);
+    // 子 Agent 区域与新建入口始终存在，空项目也必须能创建第一个 Agent。
+    const sep = el("div", "tree-sep");
+    sep.appendChild(el("span", "tree-sep-label", "子 Agent"));
+    const addAgent = el("button", "tree-sep-add", "＋");
+    addAgent.type = "button";
+    addAgent.title = "新建 Agent";
+    addAgent.setAttribute("aria-label", `在 ${proj} 中新建 Agent`);
+    addAgent.onclick = (event) => {
+      event.stopPropagation();
+      selected = { type: "agent", project: proj, name: null, isNew: true };
+      render();
+    };
+    sep.appendChild(addAgent);
+    root.appendChild(sep);
+    if (agents.length === 0) {
+      root.appendChild(el("div", "tree-agent-empty tree-level-2", "暂无 Agent"));
     }
     for (const a of agents) {
       const n = el("div", "tree-item tree-level-2");
@@ -158,7 +170,10 @@ function renderTree() {
       dot.title = `状态：${agentStatusLabel(status)}`;
       n.appendChild(dot);
       n.appendChild(el("span", "tree-arrow", ""));
-      n.appendChild(el("span", "tree-label", `🤖 ${a.name}`));
+      const avatar = el("span", `agent-avatar agent-avatar-${a.scope}`, "🤖");
+      avatar.title = a.scope === "global" ? "全局 Agent" : "项目 Agent";
+      n.appendChild(avatar);
+      n.appendChild(el("span", "tree-label", a.name));
 
       // 配置入口：name 后的 ⚙ 小按钮
       const agentSettings = el("button", "tree-settings", "⚙");
@@ -167,6 +182,10 @@ function renderTree() {
       agentSettings.setAttribute("aria-label", `配置 Agent ${a.name}`);
       agentSettings.onclick = (ev) => {
         ev.stopPropagation();
+        if (a.scope === "global") {
+          openSettingsModal("agents");
+          return;
+        }
         selected = { type: "agent", project: proj, name: a.name };
         render();
       };
@@ -185,17 +204,6 @@ function renderTree() {
       };
       root.appendChild(n);
     }
-    if (agents.length > 0) {
-      const add = el("div", "tree-item tree-add tree-level-2");
-      add.appendChild(el("span", "tree-arrow", ""));
-      add.appendChild(el("span", "tree-label", "＋ 新建 Agent"));
-      add.onclick = () => {
-        selected = { type: "agent", project: proj, name: null, isNew: true };
-        render();
-      };
-      root.appendChild(add);
-    }
-
   }
 }
 
@@ -366,8 +374,7 @@ function formRow(label, control) {
 function renderAssistantForm(view) {
   const proj = selected.project;
   const asst = state.assistantByProject?.[proj] ?? { agents: [], instructions: "", model: null };
-  const agents = agentsCache[proj] ?? [];
-  const noKey = !state.hasKey;
+  const catalog = state.agentCatalogByProject?.[proj] ?? { project: [], global: [] };
 
   const head = el("div", "view-head");
   head.appendChild(el("span", "view-title", `🤖 ${proj} · 项目助理`));
@@ -384,20 +391,36 @@ function renderAssistantForm(view) {
   form.appendChild(el("div", "form-label", "提示词"));
   form.appendChild(ta);
 
-  // 可派发的子 agent
+  // 项目 Agent 创建后始终启用；全局 Agent 由助理显式授权。
   form.appendChild(el("div", "form-label", "可派发的子 agent"));
   const box = el("div", "checkbox-box");
-  if (agents.length === 0) {
-    box.appendChild(el("div", "muted", "（本项目还没有子 agent，先在左侧「子 agent」里新建）"));
+  if (catalog.project.length === 0 && catalog.global.length === 0) {
+    box.appendChild(el("div", "muted", "（还没有 Agent；可在项目中新建，或在系统设置中创建全局 Agent）"));
   }
-  for (const a of agents) {
+  if (catalog.project.length > 0) box.appendChild(el("div", "agent-choice-heading", "项目 Agent（始终启用）"));
+  for (const a of catalog.project) {
     const lab = el("label", "checkbox-item");
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.value = a.name;
+    cb.checked = true;
+    cb.disabled = true;
+    cb.dataset.scope = "project";
+    lab.appendChild(cb);
+    lab.appendChild(el("span", "", `${a.name}（项目内置，不可关闭）`));
+    box.appendChild(lab);
+  }
+  if (catalog.global.length > 0) box.appendChild(el("div", "agent-choice-heading", "全局 Agent（按需启用）"));
+  for (const a of catalog.global) {
+    const lab = el("label", "checkbox-item global-agent-choice");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = a.name;
+    cb.dataset.scope = "global";
     cb.checked = asst.agents?.includes(a.name) ?? false;
     lab.appendChild(cb);
-    lab.appendChild(el("span", "", `${a.name}（${a.scope === "project" ? "项目" : "全局"}）`));
+    lab.appendChild(el("span", "agent-avatar agent-avatar-global", "🤖"));
+    lab.appendChild(el("span", "", `${a.name}（全局）`));
     box.appendChild(lab);
   }
   form.appendChild(box);
@@ -405,7 +428,7 @@ function renderAssistantForm(view) {
   const status = el("div", "form-status", "");
   const save = el("button", "btn-primary", "保存助理配置");
   save.onclick = async () => {
-    const checked = [...box.querySelectorAll("input[type=checkbox]:checked")].map((c) => c.value);
+    const checked = [...box.querySelectorAll('input[data-scope="global"]:checked')].map((c) => c.value);
     const res = await fetch("/api/assistant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -502,16 +525,8 @@ function renderAgentForm(view) {
   nameInput.disabled = !isNew;
   form.appendChild(formRow("名称", nameInput));
 
-  const scopeSel = document.createElement("select");
-  for (const [v, t] of [["global", "全局库（所有项目共享）"], ["project", `项目专属（${proj}）`]]) {
-    const o = document.createElement("option");
-    o.value = v;
-    o.textContent = t;
-    scopeSel.appendChild(o);
-  }
-  scopeSel.value = existing?.scope === "project" ? "project" : "global";
-  scopeSel.disabled = !isNew;
-  form.appendChild(formRow("存放位置", scopeSel));
+  const scopeLabel = el("div", "fixed-field", `项目专属（${proj}，创建后始终启用）`);
+  form.appendChild(formRow("存放位置", scopeLabel));
 
   const modelSelect = document.createElement("select");
   populateAgentModelSelect(modelSelect, existing?.model ?? "");
@@ -570,7 +585,7 @@ function renderAgentForm(view) {
       body: JSON.stringify({
         project: proj,
         name,
-        scope: scopeSel.value,
+        scope: "project",
         model: modelSelect.value || null,
         tools,
         instructions,
@@ -595,7 +610,7 @@ function renderAgentForm(view) {
       await fetch("/api/agents/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project: proj, name: selected.name, scope: scopeSel.value }),
+        body: JSON.stringify({ project: proj, name: selected.name, scope: "project" }),
       });
       selected = null;
       await refresh();
@@ -736,13 +751,14 @@ async function switchSettingsTab(tab) {
   for (const btn of document.querySelectorAll(".drawer-nav-item")) {
     btn.classList.toggle("active", btn.dataset.tab === tab);
   }
-  for (const id of ["tab-models", "tab-skills", "tab-mcp", "tab-system"]) {
+  for (const id of ["tab-models", "tab-agents", "tab-skills", "tab-mcp", "tab-system"]) {
     document.getElementById(id).classList.toggle("hidden", id !== `tab-${tab}`);
   }
   if (tab === "models") return;
   const panel = document.getElementById(`tab-${tab}`);
   if (!settingsLoadedTabs.has(tab)) {
     settingsLoadedTabs.add(tab);
+    if (tab === "agents") await renderDrawerAgents(panel);
     if (tab === "skills") await renderDrawerSkills(panel);
     if (tab === "mcp") await renderDrawerMcp(panel);
     if (tab === "system") await renderDrawerSystem(panel);
@@ -750,6 +766,145 @@ async function switchSettingsTab(tab) {
 }
 for (const btn of document.querySelectorAll(".drawer-nav-item")) {
   btn.addEventListener("click", () => switchSettingsTab(btn.dataset.tab));
+}
+
+// ── 全局 Agents Tab ──
+async function renderDrawerAgents(panel) {
+  panel.innerHTML = `<div class="drawer-loading">加载中…</div>`;
+  const { agents } = await (await fetch("/api/global-agents")).json();
+  panel.innerHTML = "";
+  const head = el("div", "drawer-section-head");
+  const titleBox = el("div");
+  titleBox.appendChild(el("h3", "", "🌐 全局 Agents"));
+  titleBox.appendChild(el("div", "muted", "全局 Agent 是可复用模板，只有被项目助理勾选后才会启用。"));
+  head.appendChild(titleBox);
+  const add = el("button", "btn-secondary", "＋ 新建全局 Agent");
+  add.type = "button";
+  add.onclick = () => openGlobalAgentEditor(null, () => renderDrawerAgents(panel));
+  head.appendChild(add);
+  panel.appendChild(head);
+  if (agents.length === 0) {
+    panel.appendChild(el("div", "muted drawer-empty", "（还没有全局 Agent）"));
+    return;
+  }
+  for (const agent of agents) {
+    const row = el("div", "drawer-row");
+    const left = el("div", "drawer-row-main");
+    const rowTitle = el("div", "drawer-row-title");
+    rowTitle.appendChild(el("span", "agent-avatar agent-avatar-global", "🤖"));
+    rowTitle.appendChild(el("span", "", agent.name));
+    left.appendChild(rowTitle);
+    left.appendChild(el("div", "muted drawer-row-desc", agent.instructions || "（无描述）"));
+    row.appendChild(left);
+    const actions = el("div", "drawer-row-actions");
+    const edit = el("button", "tree-settings", "✎");
+    edit.type = "button";
+    edit.title = `编辑全局 Agent ${agent.name}`;
+    edit.onclick = () => openGlobalAgentEditor(agent, () => renderDrawerAgents(panel));
+    actions.appendChild(edit);
+    const del = el("button", "tree-settings drawer-danger", "🗑");
+    del.type = "button";
+    del.title = `删除全局 Agent ${agent.name}`;
+    del.onclick = async () => {
+      if (!confirm(`确认删除全局 Agent "${agent.name}"？`)) return;
+      const response = await fetch("/api/agents/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: agent.name, scope: "global" }),
+      });
+      if (!response.ok) return alert((await response.json()).error || "删除失败");
+      await refresh();
+      await renderDrawerAgents(panel);
+    };
+    actions.appendChild(del);
+    row.appendChild(actions);
+    panel.appendChild(row);
+  }
+}
+
+function openGlobalAgentEditor(existing, onSaved) {
+  const isNew = !existing;
+  const overlay = el("div", "drawer-submodal-backdrop");
+  const modal = el("div", "drawer-submodal global-agent-editor");
+  modal.appendChild(el("h3", "", isNew ? "新建全局 Agent" : `编辑全局 Agent · ${existing.name}`));
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "Agent 名（支持中文、字母、数字、-、_）";
+  nameInput.value = existing?.name ?? "";
+  nameInput.disabled = !isNew;
+  modal.appendChild(formRow("名称", nameInput));
+  const modelSelect = document.createElement("select");
+  populateAgentModelSelect(modelSelect, existing?.model ?? "");
+  modal.appendChild(formRow("模型", modelSelect));
+  let selectedTools = new Set(existing ? (existing.tools ?? state.availableTools ?? []) : ["read", "bash"]);
+  const toolsField = el("div", "field-with-button");
+  const toolsSummary = document.createElement("input");
+  toolsSummary.type = "text";
+  toolsSummary.readOnly = true;
+  const updateSummary = () => {
+    toolsSummary.value = [...selectedTools].join(", ");
+    toolsSummary.placeholder = "未选择工具";
+  };
+  updateSummary();
+  const choose = el("button", "btn-secondary", "选择…");
+  choose.type = "button";
+  choose.onclick = () => openAgentToolsPicker(selectedTools, (next) => {
+    selectedTools = next;
+    updateSummary();
+  });
+  toolsField.appendChild(toolsSummary);
+  toolsField.appendChild(choose);
+  modal.appendChild(formRow("工具", toolsField));
+  modal.appendChild(el("div", "form-label", "提示词（instructions）"));
+  const instructions = document.createElement("textarea");
+  instructions.className = "cfg-textarea";
+  instructions.rows = 8;
+  instructions.value = existing?.instructions || "你是一个专注、可靠的全局 Agent。请根据收到的任务完成工作，并返回简洁、准确的结果。";
+  modal.appendChild(instructions);
+  const status = el("div", "form-status");
+  modal.appendChild(status);
+  const actions = el("div", "form-actions");
+  const cancel = el("button", "btn-secondary", "取消");
+  cancel.type = "button";
+  const save = el("button", "btn-primary", "保存");
+  save.type = "button";
+  actions.appendChild(cancel);
+  actions.appendChild(save);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  cancel.onclick = close;
+  overlay.onclick = (event) => { if (event.target === overlay) close(); };
+  save.onclick = async () => {
+    const name = nameInput.value.trim();
+    const prompt = instructions.value.trim();
+    if (!name) {
+      status.className = "form-status err";
+      status.textContent = "❌ 需要名称";
+      return;
+    }
+    if (!prompt) {
+      status.className = "form-status err";
+      status.textContent = "❌ 提示词不能为空";
+      return;
+    }
+    save.disabled = true;
+    const response = await fetch("/api/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, scope: "global", model: modelSelect.value || null, tools: [...selectedTools], instructions: prompt }),
+    });
+    save.disabled = false;
+    if (!response.ok) {
+      status.className = "form-status err";
+      status.textContent = `❌ ${(await response.json()).error || "保存失败"}`;
+      return;
+    }
+    close();
+    await refresh();
+    await onSaved();
+  };
 }
 
 // ── Skills Tab ──

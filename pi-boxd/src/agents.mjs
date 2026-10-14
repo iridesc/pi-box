@@ -77,31 +77,66 @@ export async function loadAgentDef(projectName, agentName) {
   return null;
 }
 
-/** 列出项目可用 agent：全局库 + 项目覆盖（同名项目优先） */
-export async function listAgents(projectName) {
-  const names = new Map(); // name -> protoScope
+async function listAgentsInDir(dir, scope, projectName) {
+  const names = [];
   try {
-    for (const f of await readdir(GLOBAL_AGENTS_DIR)) if (f.endsWith(".md")) names.set(f.replace(/\.md$/, ""), "global");
+    for (const f of await readdir(dir)) if (f.endsWith(".md")) names.push(f.replace(/\.md$/, ""));
   } catch {
-    /* 无全局库 */
-  }
-  try {
-    for (const f of await readdir(join(PROJECTS_DIR, projectName, ".pi", "agents"))) if (f.endsWith(".md")) names.set(f.replace(/\.md$/, ""), "project");
-  } catch {
-    /* 无项目 agent */
+    return [];
   }
   const out = [];
-  for (const [name, protoScope] of names) {
-    const def = await loadAgentDef(projectName, name);
+  for (const name of names) {
+    const source = join(dir, `${name}.md`);
+    const def = parseAgentDef(await readFile(source, "utf-8"));
     out.push({
       name,
-      scope: def?.scope ?? protoScope,
-      model: def?.model ?? null,
-      tools: def?.tools ?? null,
-      instructions: def?.instructions ?? "",
+      source,
+      scope,
+      model: def.model ?? null,
+      tools: def.tools ?? null,
+      instructions: def.instructions ?? "",
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 全局 Agent 模板库；不会自动出现在任何项目中。 */
+export async function listGlobalAgents() {
+  return listAgentsInDir(GLOBAL_AGENTS_DIR, "global", null);
+}
+
+/** 项目自身的 Agent；创建后始终启用。 */
+export async function listProjectAgents(projectName) {
+  return listAgentsInDir(join(PROJECTS_DIR, projectName, ".pi", "agents"), "project", projectName);
+}
+
+/** 助理实际可派发的 Agent = 全部项目 Agent + 助理显式选择的全局 Agent。 */
+export async function listAgents(projectName) {
+  const projectAgents = await listProjectAgents(projectName);
+  const projectNames = new Set(projectAgents.map((agent) => agent.name));
+  const assistant = await loadAssistant(projectName);
+  const enabledGlobals = new Set(assistant.agents ?? []);
+  const globalAgents = (await listGlobalAgents()).filter(
+    (agent) => enabledGlobals.has(agent.name) && !projectNames.has(agent.name),
+  );
+  return [...projectAgents, ...globalAgents].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 助理配置页所需的完整目录，区分项目内置与全局可选项。 */
+export async function listAgentCatalog(projectName) {
+  return {
+    project: await listProjectAgents(projectName),
+    global: await listGlobalAgents(),
+  };
+}
+
+/** 后端派发时再次检查授权，避免仅靠前端隐藏全局 Agent。 */
+export async function loadEnabledAgentDef(projectName, agentName) {
+  const projectAgent = (await listProjectAgents(projectName)).find((agent) => agent.name === agentName);
+  if (projectAgent) return projectAgent;
+  const assistant = await loadAssistant(projectName);
+  if (!(assistant.agents ?? []).includes(agentName)) return null;
+  return (await listGlobalAgents()).find((agent) => agent.name === agentName) ?? null;
 }
 
 /** 读项目助理定义（.pi/assistant.md） */
@@ -121,9 +156,7 @@ export function assistantInstructions(projectName, assistant, agents) {
     assistant.instructions?.trim() ||
       `你是项目「${projectName}」的助理。理解用户意图，必要时用 subagent 工具把任务派发给合适的子 agent，并汇总结果。`,
   ];
-  const available = assistant.agents?.length
-    ? assistant.agents.filter((n) => agents.some((a) => a.name === n))
-    : agents.map((a) => a.name);
+  const available = agents.map((a) => a.name);
   if (available.length > 0) {
     const lines = available.map((n) => {
       const a = agents.find((x) => x.name === n);

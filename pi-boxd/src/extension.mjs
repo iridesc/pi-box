@@ -3,7 +3,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { AssistantEntry, LiveDoc, configure, defineDoc, defineExtension, defineTask, defineTool } from "@earendil-works/pi-durable";
 import { basename } from "node:path";
-import { loadAgentDef, resolveAgentModel, resolveAgentTools, answerText } from "./agents.mjs";
+import { loadEnabledAgentDef, resolveAgentModel, resolveAgentTools, answerText } from "./agents.mjs";
 
 // 主会话用 document 记录"子 agent 名 → 会话 id"
 export const Subagents = defineDoc({
@@ -109,6 +109,12 @@ export function makeSubagentTool(getPiBoxExtension) {
         return reply(lines.length === 0 ? "（没有子 agent）" : lines.join("\n"));
       }
       if (!name) return reply(`${action} 需要 name`);
+      const enabledDef = action === "spawn" || action === "send"
+        ? await loadEnabledAgentDef(projectName, name)
+        : null;
+      if ((action === "spawn" || action === "send") && !enabledDef) {
+        return reply(`Agent "${name}" 未在当前项目启用`);
+      }
       const agent = Object.hasOwn(state.agents, name) ? state.agents[name] : undefined;
       if (action !== "spawn" && agent === undefined) return reply(`没有名为 ${name} 的子 agent`);
 
@@ -124,8 +130,7 @@ export function makeSubagentTool(getPiBoxExtension) {
         const background = { ownership: { kind: "conversation" }, background: true };
         if (action === "spawn") {
           if (Object.hasOwn(s.agents, name)) return `${name} 已存在，用 send`;
-          const def = await loadAgentDef(projectName, name);
-          if (!def) return `未找到 agent 定义 "${name}"（查过项目 .pi/agents/ 与全局库）`;
+          const def = enabledDef;
           const anchor = await tx.createTask(AnchorTask, null, background);
           const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
           // 子 agent 从主 agent 复制，再 configure 成该 agent 的角色；移除 pi-box 扩展防递归

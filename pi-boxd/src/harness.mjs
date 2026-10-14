@@ -14,6 +14,8 @@ import { models, currentModel, getUseFaux, getHasKey } from "./model.mjs";
 import {
   listProjects,
   listAgents,
+  listAgentCatalog,
+  listGlobalAgents,
   loadAssistant,
   assistantInstructions,
   resolveAgentModel,
@@ -179,10 +181,12 @@ export async function boxSnapshot(harness) {
   });
   const projects = await listProjects();
   const agentsByProject = {};
+  const agentCatalogByProject = {};
   const assistantByProject = {};
   const agentsStatus = {}; // { [project]: { [name]: { status, conversationId } } }
   for (const p of projects) {
     agentsByProject[p] = await listAgents(p);
+    agentCatalogByProject[p] = await listAgentCatalog(p);
     assistantByProject[p] = await loadAssistant(p);
     agentsStatus[p] = {};
     // 主会话：找到该项目主会话（ownerless 且 cwd 是该项目）。
@@ -210,6 +214,8 @@ export async function boxSnapshot(harness) {
     hasKey: getHasKey(),
     projects,
     agentsByProject,
+    agentCatalogByProject,
+    globalAgents: await listGlobalAgents(),
     assistantByProject,
     agentsStatus,
     availableTools: AVAILABLE_TOOL_NAMES,

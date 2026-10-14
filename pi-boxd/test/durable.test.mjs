@@ -11,7 +11,16 @@ await mkdir(process.env.PI_BOX_WORKSPACE, { recursive: true });
 
 const { initProvider } = await import("../src/model.mjs");
 const { loadConfig, saveConfig } = await import("../src/io.mjs");
-const { resolveAgentTools, parseAgentDef, serializeAgentDef } = await import("../src/agents.mjs");
+const {
+  resolveAgentTools,
+  parseAgentDef,
+  serializeAgentDef,
+  saveAgentFile,
+  saveAssistantFile,
+  listAgents,
+  listAgentCatalog,
+  loadEnabledAgentDef,
+} = await import("../src/agents.mjs");
 const { PiBoxTasks } = await import("../src/extension.mjs");
 const { createHarness } = await import("../src/harness.mjs");
 
@@ -35,6 +44,24 @@ test("agent tool names resolve to registered tool definitions", () => {
 test("an explicitly empty agent tool selection survives serialization", () => {
   const markdown = serializeAgentDef({ model: null, tools: [], instructions: "Do the work." });
   assert.deepEqual(parseAgentDef(markdown).tools, []);
+});
+
+test("project agents are always enabled while global agents require assistant selection", async () => {
+  const project = "catalog-test";
+  await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
+  await saveAgentFile(project, "项目助手", "project", { tools: ["read"], instructions: "project" });
+  await saveAgentFile(null, "全局助手", "global", { tools: ["read"], instructions: "global" });
+  await saveAssistantFile(project, { agents: [], instructions: "main" });
+
+  const catalog = await listAgentCatalog(project);
+  assert.deepEqual(catalog.project.map((agent) => agent.name), ["项目助手"]);
+  assert.deepEqual(catalog.global.map((agent) => agent.name), ["全局助手"]);
+  assert.deepEqual((await listAgents(project)).map((agent) => agent.name), ["项目助手"]);
+  assert.equal(await loadEnabledAgentDef(project, "全局助手"), null);
+
+  await saveAssistantFile(project, { agents: ["全局助手"], instructions: "main" });
+  assert.deepEqual((await listAgents(project)).map((agent) => agent.name), ["全局助手", "项目助手"]);
+  assert.equal((await loadEnabledAgentDef(project, "全局助手")).scope, "global");
 });
 
 test("legacy model config migrates and multiple providers persist without exposing a shared slot", async () => {

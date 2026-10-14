@@ -82,6 +82,15 @@ section:last-child { border-right: none; }
 .tree-item.selected .tree-settings, .tree-project.selected .tree-settings { color: #fff; }
 .tree-tag { color: #8b949e; font-size: 10px; margin-left: 6px; }
 .tree-item.selected .tree-tag { color: #c9d1d9; }
+.agent-avatar {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%; font-size: 13px; flex: 0 0 auto;
+}
+.agent-avatar-project { background: rgba(46, 160, 67, .18); box-shadow: inset 0 0 0 1px rgba(46, 160, 67, .55); }
+.agent-avatar-global { background: rgba(163, 113, 247, .2); box-shadow: inset 0 0 0 1px rgba(163, 113, 247, .65); }
+.agent-choice-heading { margin: 8px 0 3px; color: #8b949e; font-size: 11px; font-weight: 600; }
+.global-agent-choice { min-height: 28px; }
+.fixed-field { flex: 1; color: #c9d1d9; padding: 6px 10px; border: 1px solid #30363d; border-radius: 4px; background: #161b22; }
 
 /* ── 中：视图 ── */
 #panel-view { display: flex; flex-direction: column; min-height: 0; }
@@ -202,6 +211,9 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 
 /* ── 项目树：子 Agent 分隔小标题（与 tree-level-1 同行级） ── */
 .tree-sep {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 6px 12px 4px 28px;          /* 与 tree-level-1 同缩进 */
   font-size: 11px;
   color: #8b949e;
@@ -210,6 +222,13 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
   border-top: 1px solid #21262d;
   margin-top: 4px;
 }
+.tree-sep-add {
+  width: 22px; height: 20px; padding: 0;
+  border: 0; border-radius: 3px; background: transparent; color: #58a6ff;
+  cursor: pointer; font: inherit; font-size: 15px; line-height: 20px;
+}
+.tree-sep-add:hover { background: #30363d; color: #79c0ff; }
+.tree-agent-empty { color: #6e7681; font-size: 11px; padding-top: 3px; padding-bottom: 3px; }
 
 /* ── Agent 状态圆点 ── */
 .agent-dot {
@@ -278,7 +297,7 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
   margin-bottom: 8px; background: #161b22;
 }
 .drawer-row-main { flex: 1; min-width: 0; }
-.drawer-row-title { font-size: 13px; color: #c9d1d9; }
+.drawer-row-title { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #c9d1d9; }
 .drawer-row-desc { font-size: 12px; margin-top: 2px; word-break: break-all; }
 .drawer-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: 12px; }
 .drawer-tag-builtin { color: #d29922; }
@@ -314,6 +333,7 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
   padding: 20px 24px; width: 520px; max-width: 90vw; max-height: 90vh;
   overflow-y: auto;
 }
+.global-agent-editor { width: 620px; }
 .drawer-submodal h3 { margin: 0 0 16px; font-size: 14px; color: #c9d1d9; }
 .drawer-submodal .form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .drawer-submodal .form-row label { width: 100px; flex-shrink: 0; color: #8b949e; font-size: 12px; }
@@ -333,4 +353,3 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 /* ── 主题与密度切换 ── */
 body.theme-light { background: #f6f8fa; color: #1f2328; }
 body.density-compact .tree-item { padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
-

@@ -6,7 +6,7 @@ import { readBody, loadConfig, saveConfig, loadMcpConfig, saveMcpConfig, listSki
 import { PROJECTS_DIR, DATA_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, loadAssistant, saveAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
+import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
 import { syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { validateMcpServerConfig } from "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js";
 
@@ -203,7 +203,7 @@ export function buildExtraRoutes(harness, context) {
           res.end(JSON.stringify({ project, agents: await listAgents(project) }));
           return;
         }
-        const { project, name, scope = "global", model: m, tools, instructions } = await readBody(req);
+        const { project, name, scope = "project", model: m, tools, instructions } = await readBody(req);
         if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
@@ -232,11 +232,33 @@ export function buildExtraRoutes(harness, context) {
         res.end(JSON.stringify({ ok: true, name, scope, file }));
       },
     },
+    // 全局 Agent 独立目录（系统设置中的管理页使用）。
+    "/api/global-agents": {
+      method: "GET",
+      async handler(req, res) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ agents: await listGlobalAgents() }));
+      },
+    },
+    // 项目 Agent 与全局候选分层返回，供助理授权页使用。
+    "/api/agents/catalog": {
+      method: "GET",
+      async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const project = url.searchParams.get("project");
+        if (!project) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "缺少 project 参数" }));
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(await listAgentCatalog(project)));
+      },
+    },
     // agent 删除
     "/api/agents/delete": {
       method: "POST",
       async handler(req, res) {
-        const { project, name, scope = "global" } = await readBody(req);
+        const { project, name, scope = "project" } = await readBody(req);
         if (!name) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "缺少 name" }));
@@ -270,7 +292,9 @@ export function buildExtraRoutes(harness, context) {
           res.end(JSON.stringify({ error: "缺少 project" }));
           return;
         }
-        const file = await saveAssistantFile(project, { model: m, agents, instructions });
+        const globalNames = new Set((await listGlobalAgents()).map((agent) => agent.name));
+        const selectedGlobals = Array.isArray(agents) ? agents.filter((name) => globalNames.has(name)) : [];
+        const file = await saveAssistantFile(project, { model: m, agents: selectedGlobals, instructions });
         await syncAfterConfigChange(harness, { scope: "project", projectName: project, agentName: null });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, file }));
