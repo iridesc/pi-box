@@ -268,13 +268,7 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 }
 .tree-sep-add:hover { background: #30363d; color: #79c0ff; }
 .tree-agent-empty { color: #6e7681; font-size: 11px; padding-top: 3px; padding-bottom: 3px; }
-.tree-schedule-head .tree-sep-label { cursor: pointer; }
-.tree-schedule-head.selected, .tree-schedule-head:hover { color: #79c0ff; background: #161b22; }
-.schedule-dot { width: 8px; height: 8px; border-radius: 50%; background: #484f58; margin: 0 6px 0 4px; flex: 0 0 auto; }
-.schedule-dot-on { background: #3fb950; box-shadow: 0 0 5px rgba(63, 185, 80, .45); }
-
 /* ── 项目定时任务 ── */
-.schedule-head-action { margin-left: auto; }
 .schedule-intro { margin-bottom: 14px; }
 .schedule-list { display: flex; flex-direction: column; gap: 10px; }
 .schedule-empty { padding: 30px; text-align: center; color: #6e7681; border: 1px dashed #30363d; border-radius: 6px; }
@@ -287,6 +281,13 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 .schedule-timezone { margin-top: 3px; font-size: 11px; }
 .schedule-prompt { margin: 8px 0; white-space: pre-wrap; color: #c9d1d9; }
 .schedule-actions { display: flex; gap: 8px; margin-top: 10px; }
+.project-schedules { margin-top: 22px; padding-top: 4px; border-top: 1px solid #30363d; }
+.project-schedules-summary { display: flex; align-items: center; gap: 8px; padding: 12px 0; color: #e6edf3; cursor: pointer; list-style-position: inside; }
+.project-schedules-title { font-weight: 600; }
+.project-schedules-count { min-width: 20px; padding: 1px 6px; border-radius: 10px; text-align: center; color: #8b949e; background: #21262d; font-size: 11px; }
+.project-schedules-add { margin-left: auto; }
+.project-schedules > .schedule-intro { margin: 0 0 12px 22px; }
+.project-schedule-list { margin-left: 22px; padding-bottom: 8px; }
 .schedule-editor-modal { width: 560px; }
 .schedule-editor-modal .schedule-enabled { margin: 8px 0; }
 .schedule-rule-fields { padding: 10px 12px 2px; margin: 0 0 10px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }

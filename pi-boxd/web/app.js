@@ -6,6 +6,7 @@ let state = null;
 // selected = { type: "conversation"|"assistant"|"agent", project, id?, name? }
 let selected = null;
 let expandedProjects = new Set();
+let expandedProjectSchedules = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
 let agentsStatus = {}; // project -> { name: { status, conversationId } }，实时
 let schedulesCache = {}; // project -> schedule 列表
@@ -200,44 +201,6 @@ function renderTree() {
       root.appendChild(n);
     }
 
-    // 项目级定时任务：和助理、子 Agent 同属项目一级能力。
-    const scheduleSep = el("div", "tree-sep tree-schedule-head");
-    const scheduleLabel = el("span", "tree-sep-label", "定时任务");
-    scheduleLabel.onclick = () => {
-      selected = { type: "schedules", project: proj };
-      render();
-    };
-    scheduleSep.appendChild(scheduleLabel);
-    const addSchedule = el("button", "tree-sep-add", "＋");
-    addSchedule.type = "button";
-    addSchedule.title = "新建定时任务";
-    addSchedule.onclick = (event) => {
-      event.stopPropagation();
-      openScheduleEditor(proj);
-    };
-    scheduleSep.appendChild(addSchedule);
-    if (selected?.type === "schedules" && selected.project === proj) scheduleSep.classList.add("selected");
-    root.appendChild(scheduleSep);
-    const schedules = schedulesCache[proj] ?? [];
-    if (schedules.length === 0) root.appendChild(el("div", "tree-agent-empty tree-level-2", "暂无定时任务"));
-    for (const schedule of schedules) {
-      const node = el("div", "tree-item tree-level-2");
-      node.appendChild(el("span", schedule.enabled ? "schedule-dot schedule-dot-on" : "schedule-dot", ""));
-      node.appendChild(el("span", "tree-label", `⏱ ${schedule.name}`));
-      const settings = el("button", "tree-settings", "⚙");
-      settings.type = "button";
-      settings.title = "编辑定时任务";
-      settings.onclick = (event) => {
-        event.stopPropagation();
-        openScheduleEditor(proj, schedule);
-      };
-      node.appendChild(settings);
-      node.onclick = () => {
-        selected = { type: "schedules", project: proj, scheduleId: schedule.id };
-        render();
-      };
-      root.appendChild(node);
-    }
   }
 }
 
@@ -254,7 +217,6 @@ function renderView() {
   if (selected.type === "project") return renderProjectForm(view);
   if (selected.type === "conversation") return renderConversation(view);
   if (selected.type === "assistant") return renderAssistantForm(view);
-  if (selected.type === "schedules") return renderSchedules(view);
 }
 
 function formatDateTime(value) {
@@ -275,55 +237,39 @@ async function reloadSchedules(project) {
   return data;
 }
 
-async function renderSchedules(view) {
-  const project = selected.project;
-  const head = el("div", "view-head");
-  head.appendChild(el("span", "view-title", `⏱ ${project} · 定时任务`));
-  const add = el("button", "btn-primary schedule-head-action", "＋ 新建定时任务");
-  add.onclick = () => openScheduleEditor(project);
-  head.appendChild(add);
-  view.appendChild(head);
-
-  const body = el("div", "view-form schedule-list");
-  body.appendChild(el("div", "muted schedule-intro", "到点后向项目助理提交一次任务；助理可以调用项目中全部已启用的子 Agent。"));
-  view.appendChild(body);
-  try {
-    const data = await reloadSchedules(project);
-    body.querySelectorAll(".schedule-card, .schedule-empty").forEach((node) => node.remove());
-    if (data.schedules.length === 0) {
-      body.appendChild(el("div", "schedule-empty", "还没有定时任务。点击“新建定时任务”开始配置。"));
-      return;
-    }
-    for (const schedule of data.schedules) {
-      const card = el("div", "schedule-card");
-      if (selected.scheduleId === schedule.id) card.classList.add("selected");
-      const title = el("div", "schedule-card-title");
-      title.appendChild(el("span", schedule.enabled ? "schedule-badge enabled" : "schedule-badge", schedule.enabled ? "已启用" : "已停用"));
-      title.appendChild(el("strong", "", schedule.name));
-      card.appendChild(title);
-      card.appendChild(el("div", "schedule-cron", schedule.description || "自定义时间规则"));
-      card.appendChild(el("div", "muted schedule-timezone", `时区：${timezoneLabel(schedule.timezone)}（${schedule.timezone}）`));
-      card.appendChild(el("div", "schedule-prompt", schedule.prompt));
-      card.appendChild(el("div", "muted", `上次触发：${formatDateTime(schedule.lastRunAt)}　下次执行：${formatDateTime(schedule.nextRunAt)}`));
-      const actions = el("div", "schedule-actions");
-      const run = el("button", "btn-secondary", "立即运行");
-      run.onclick = async () => {
-        run.disabled = true;
-        run.textContent = "提交中…";
-        const response = await fetch("/api/schedules/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, id: schedule.id }) });
-        const result = await response.json();
-        run.disabled = false;
-        run.textContent = response.ok ? "已提交给助理" : `失败：${result.error || "未知错误"}`;
-        if (response.ok) setTimeout(() => render(), 800);
-      };
-      const edit = el("button", "btn-secondary", "编辑");
-      edit.onclick = () => openScheduleEditor(project, schedule);
-      actions.append(run, edit);
-      card.appendChild(actions);
-      body.appendChild(card);
-    }
-  } catch (error) {
-    body.appendChild(el("div", "form-status err", `❌ ${error.message}`));
+function fillScheduleList(body, project, schedules) {
+  body.replaceChildren();
+  if (schedules.length === 0) {
+    body.appendChild(el("div", "schedule-empty", "还没有定时任务。点击“新建定时任务”开始配置。"));
+    return;
+  }
+  for (const schedule of schedules) {
+    const card = el("div", "schedule-card");
+    if (selected?.scheduleId === schedule.id) card.classList.add("selected");
+    const title = el("div", "schedule-card-title");
+    title.appendChild(el("span", schedule.enabled ? "schedule-badge enabled" : "schedule-badge", schedule.enabled ? "已启用" : "已停用"));
+    title.appendChild(el("strong", "", schedule.name));
+    card.appendChild(title);
+    card.appendChild(el("div", "schedule-cron", schedule.description || "自定义时间规则"));
+    card.appendChild(el("div", "muted schedule-timezone", `时区：${timezoneLabel(schedule.timezone)}（${schedule.timezone}）`));
+    card.appendChild(el("div", "schedule-prompt", schedule.prompt));
+    card.appendChild(el("div", "muted", `上次触发：${formatDateTime(schedule.lastRunAt)}　下次执行：${formatDateTime(schedule.nextRunAt)}`));
+    const actions = el("div", "schedule-actions");
+    const run = el("button", "btn-secondary", "立即运行");
+    run.onclick = async () => {
+      run.disabled = true;
+      run.textContent = "提交中…";
+      const response = await fetch("/api/schedules/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, id: schedule.id }) });
+      const result = await response.json();
+      run.disabled = false;
+      run.textContent = response.ok ? "已提交给助理" : `失败：${result.error || "未知错误"}`;
+      if (response.ok) setTimeout(() => render(), 800);
+    };
+    const edit = el("button", "btn-secondary", "编辑");
+    edit.onclick = () => openScheduleEditor(project, schedule);
+    actions.append(run, edit);
+    card.appendChild(actions);
+    body.appendChild(card);
   }
 }
 
@@ -456,6 +402,8 @@ function openScheduleEditor(project, existing = null) {
       const response = await fetch("/api/schedules/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, id: existing.id }) });
       if (!response.ok) return status.textContent = `❌ ${(await response.json()).error}`;
       overlay.remove();
+      selected = { type: "project", project };
+      expandedProjectSchedules.add(project);
       await reloadSchedules(project);
       render();
     };
@@ -480,7 +428,8 @@ function openScheduleEditor(project, existing = null) {
       return;
     }
     overlay.remove();
-    selected = { type: "schedules", project, scheduleId: result.schedule.id };
+    selected = { type: "project", project, scheduleId: result.schedule.id };
+    expandedProjectSchedules.add(project);
     await reloadSchedules(project);
     render();
   };
@@ -549,7 +498,42 @@ function renderProjectForm(view) {
   bar.appendChild(remove);
   bar.appendChild(status);
   form.appendChild(bar);
+
+  const scheduleSection = el("details", "project-schedules");
+  scheduleSection.open = expandedProjectSchedules.has(oldName);
+  scheduleSection.ontoggle = () => {
+    if (scheduleSection.open) expandedProjectSchedules.add(oldName);
+    else expandedProjectSchedules.delete(oldName);
+  };
+  const summary = el("summary", "project-schedules-summary");
+  const summaryTitle = el("span", "project-schedules-title", "定时任务");
+  const count = el("span", "project-schedules-count", String((schedulesCache[oldName] ?? []).length));
+  const addSchedule = el("button", "btn-primary project-schedules-add", "＋ 新建定时任务");
+  addSchedule.type = "button";
+  addSchedule.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    expandedProjectSchedules.add(oldName);
+    scheduleSection.open = true;
+    openScheduleEditor(oldName);
+  };
+  summary.append(summaryTitle, count, addSchedule);
+  scheduleSection.appendChild(summary);
+  scheduleSection.appendChild(el("div", "muted schedule-intro", "到点后向项目助理提交一次任务；助理可以调用项目中全部已启用的子 Agent。"));
+  const scheduleList = el("div", "schedule-list project-schedule-list");
+  fillScheduleList(scheduleList, oldName, schedulesCache[oldName] ?? []);
+  scheduleSection.appendChild(scheduleList);
+  form.appendChild(scheduleSection);
   view.appendChild(form);
+
+  reloadSchedules(oldName).then((data) => {
+    if (selected?.type !== "project" || selected.project !== oldName || !scheduleList.isConnected) return;
+    count.textContent = String(data.schedules.length);
+    fillScheduleList(scheduleList, oldName, data.schedules);
+  }).catch((error) => {
+    if (!scheduleList.isConnected) return;
+    scheduleList.replaceChildren(el("div", "form-status err", `❌ ${error.message}`));
+  });
 }
 
 function openProjectDeleteDialog(project) {
