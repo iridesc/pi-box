@@ -126,7 +126,7 @@ async function syncProjectAssistant(harness, projectName) {
   if (n > 0) console.log(`[sync] 刷新项目助理会话（${projectName}）：${n} 个`);
 }
 
-async function syncSubagentInstances(harness, projectName, agentName) {
+export async function syncSubagentInstances(harness, projectName, agentName, { resetContext = false } = {}) {
   const def = await loadAgentDef(projectName, agentName);
   if (!def) return;
   const cwd = join(PROJECTS_DIR, projectName);
@@ -146,7 +146,14 @@ async function syncSubagentInstances(harness, projectName, agentName) {
       }),
       context,
     );
-    console.log(`[sync] 刷新子 agent ${agentName} 会话 #${found.conversationId}`);
+    if (resetContext) {
+      const conversation = await harness.conversation(found.conversationId, context);
+      if (!conversation) throw new Error(`找不到子 agent ${agentName} 的会话 #${found.conversationId}`);
+      // Durable reset 只切换活跃模型上下文；历史条目仍保留供页面查看。
+      // 如果会话正在执行，reset 会在当前运行边界安全落位，下一项任务使用新配置。
+      await conversation.reset(undefined, context);
+    }
+    console.log(`[sync] 刷新子 agent ${agentName} 会话 #${found.conversationId}${resetContext ? "，已重置活跃上下文" : ""}`);
   }
 }
 
@@ -157,7 +164,7 @@ export async function syncAfterConfigChange(harness, { scope, projectName, agent
     await syncProjectAssistant(harness, p);
     if (agentName) {
       try {
-        await syncSubagentInstances(harness, p, agentName);
+        await syncSubagentInstances(harness, p, agentName, { resetContext: true });
       } catch (error) {
         // 配置先落盘；暂时不可达的 MCP 恢复后会在 reload/startup 时重新同步。
         console.error(`[sync] 暂未刷新子 agent ${p}/${agentName}: ${error.message}`);

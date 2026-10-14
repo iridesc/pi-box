@@ -25,7 +25,7 @@ const {
   loadEnabledAgentDef,
 } = await import("../src/agents.mjs");
 const { makeSubagentTool, PiBoxTasks } = await import("../src/extension.mjs");
-const { createHarness } = await import("../src/harness.mjs");
+const { createHarness, syncSubagentInstances } = await import("../src/harness.mjs");
 const { createDurableMcpTools, validatePublicMcpConfig } = await import("../src/mcp-bridge.mjs");
 const { compileScheduleRule, deleteSchedule, listSchedules, nextScheduleRun, scheduleDescription, triggerSchedule, upsertSchedule, validateScheduleInput } = await import("../src/schedules.mjs");
 const { verifyBasicAuthorization } = await import("../src/auth.mjs");
@@ -164,6 +164,37 @@ test("spawn reuses a renamed persistent subagent and returns visible durable out
     input: { name, conversationId: 58, message: "执行今天的生产计划", followUp: true },
   }]);
   assert.equal(state.reporters["901"], 901);
+});
+
+test("saving a subagent can reset active context without deleting its persistent conversation", async () => {
+  const project = "agent-context-reset-test";
+  const name = "新版提示词Agent";
+  const cwd = join(process.env.PI_BOX_WORKSPACE, project);
+  await mkdir(cwd, { recursive: true });
+  await saveAgentFile(project, name, "project", { tools: ["read"], instructions: "只遵循新版提示词" });
+  let commitCount = 0;
+  let snapshotCount = 0;
+  const resets = [];
+  const harness = {
+    commit: async () => {
+      commitCount += 1;
+      return commitCount === 1 ? { items: [{ id: 44, owner: null }] } : undefined;
+    },
+    snapshot: async () => {
+      snapshotCount += 1;
+      return snapshotCount === 1 ? { cwd } : { agents: { [name]: { conversationId: 58, reported: [] } } };
+    },
+    conversation: async (id) => ({ reset: async (handoff) => resets.push({ id, handoff }) }),
+  };
+  await syncSubagentInstances(harness, project, name, { resetContext: true });
+  assert.equal(commitCount, 2, "先扫描主会话，再持久化新 Agent 配置");
+  assert.deepEqual(resets, [{ id: 58, handoff: undefined }]);
+
+  commitCount = 0;
+  snapshotCount = 0;
+  resets.length = 0;
+  await syncSubagentInstances(harness, project, name);
+  assert.deepEqual(resets, [], "启动对账只同步配置，不应重复重置上下文");
 });
 
 test("legacy model config migrates and multiple providers persist without exposing a shared slot", async () => {
