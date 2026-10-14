@@ -24,7 +24,7 @@ const {
   listAgentCatalog,
   loadEnabledAgentDef,
 } = await import("../src/agents.mjs");
-const { PiBoxTasks } = await import("../src/extension.mjs");
+const { makeSubagentTool, PiBoxTasks } = await import("../src/extension.mjs");
 const { createHarness } = await import("../src/harness.mjs");
 const { createDurableMcpTools, validatePublicMcpConfig } = await import("../src/mcp-bridge.mjs");
 const { compileScheduleRule, deleteSchedule, listSchedules, nextScheduleRun, scheduleDescription, triggerSchedule, upsertSchedule, validateScheduleInput } = await import("../src/schedules.mjs");
@@ -133,6 +133,37 @@ test("agent definitions can be renamed and global assistant references follow", 
   await renameAgentFile(null, "旧全局Agent", "新全局Agent", "global");
   assert.deepEqual((await loadAssistant(project)).agents, ["新全局Agent"]);
   assert.ok((await listAgents(project)).some((agent) => agent.name === "新全局Agent"));
+});
+
+test("spawn reuses a renamed persistent subagent and returns visible durable output", async () => {
+  const project = "renamed-dispatch-test";
+  const name = "生产计划制定助理";
+  await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
+  await saveAgentFile(project, name, "project", { tools: ["read"], instructions: "制定生产计划" });
+  const state = { agents: { [name]: { conversationId: 58, reported: [] } }, reporters: {} };
+  const created = [];
+  const api = {
+    conversationId: 44,
+    env: { cwd: join(process.env.PI_BOX_WORKSPACE, project) },
+    snapshot: async () => state,
+    commit: async (change) => change({
+      doc: async () => state,
+      createTask: async (definition, input) => {
+        created.push({ definition: definition.definition?.name, input });
+        return 901;
+      },
+      createConversation: async () => { throw new Error("已有 Agent 不应重新创建会话"); },
+    }),
+  };
+  const tool = makeSubagentTool(() => ({}));
+  const result = await tool.execute({ action: "spawn", name, message: "执行今天的生产计划" }, api, {});
+  assert.deepEqual(result.output, [{ type: "text", text: `已复用 ${name} 的会话并发送任务` }]);
+  assert.deepEqual(result.details, { name, conversationId: 58 });
+  assert.deepEqual(created, [{
+    definition: "pibox.reporter",
+    input: { name, conversationId: 58, message: "执行今天的生产计划", followUp: true },
+  }]);
+  assert.equal(state.reporters["901"], 901);
 });
 
 test("legacy model config migrates and multiple providers persist without exposing a shared slot", async () => {

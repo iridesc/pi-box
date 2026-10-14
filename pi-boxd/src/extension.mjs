@@ -90,7 +90,7 @@ export function makeSubagentTool(getPiBoxExtension) {
     execute: async (args, api, ctx) => {
       const { action, name, message, followUp } = args;
       const reply = (text, conversationId) => ({
-        content: [{ type: "text", text }],
+        output: [{ type: "text", text }],
         ...(conversationId === undefined || name === undefined ? {} : { details: { name, conversationId } }),
       });
       const state = (await api.snapshot(Subagents, api.conversationId, ctx)) ?? { agents: {} };
@@ -128,27 +128,32 @@ export function makeSubagentTool(getPiBoxExtension) {
       const result = await api.commit(async (tx) => {
         const s = await tx.doc(Subagents, api.conversationId);
         const background = { ownership: { kind: "conversation" }, background: true };
+        let reused = false;
         if (action === "spawn") {
-          if (Object.hasOwn(s.agents, name)) return `${name} 已存在，用 send`;
-          const def = enabledDef;
-          const anchor = await tx.createTask(AnchorTask, null, background);
-          const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
-          // 子 agent 从主 agent 复制，再 configure 成该 agent 的角色；移除 pi-box 扩展防递归
-          await configure(tx, child.id, {
-            model: resolveAgentModel(def.model),
-            instructions: def.instructions,
-            tools: resolveAgentTools(def.tools, def.mcps),
-            extensions: { remove: [getPiBoxExtension()] },
-            cwd,
-          });
-          s.agents[name] = { conversationId: child.id, reported: [] };
+          if (Object.hasOwn(s.agents, name)) {
+            // Agent 是持久会话；重复 spawn（包括改名后的第一次派发）应复用并排队，而不是静默丢弃任务。
+            reused = true;
+          } else {
+            const def = enabledDef;
+            const anchor = await tx.createTask(AnchorTask, null, background);
+            const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+            // 子 agent 从主 agent 复制，再 configure 成该 agent 的角色；移除 pi-box 扩展防递归
+            await configure(tx, child.id, {
+              model: resolveAgentModel(def.model),
+              instructions: def.instructions,
+              tools: resolveAgentTools(def.tools, def.mcps),
+              extensions: { remove: [getPiBoxExtension()] },
+              cwd,
+            });
+            s.agents[name] = { conversationId: child.id, reported: [] };
+          }
         }
         const conversationId = s.agents[name].conversationId;
-        const input = { name, conversationId, message, followUp: action === "send" && followUp === true };
+        const input = { name, conversationId, message, followUp: reused || (action === "send" && followUp === true) };
         s.reporters = s.reporters ?? {};
         const reporterId = await tx.createTask(ReporterTask, input, background);
         s.reporters[String(reporterId)] = reporterId;
-        return action === "send" ? `已发送给 ${name}` : `已启动 ${name}`;
+        return action === "send" ? `已发送给 ${name}` : reused ? `已复用 ${name} 的会话并发送任务` : `已启动 ${name}`;
       }, ctx);
       const current = (await api.snapshot(Subagents, api.conversationId, ctx))?.agents[name];
       return reply(result, current?.conversationId);
