@@ -11,24 +11,41 @@ import { models, currentModel } from "./model.mjs";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 
 const TOOL_BY_NAME = new Map((CodingTools.tools ?? []).map((tool) => [tool.name, tool]));
+let mcpToolsByServer = new Map();
+let mcpSupportTools = [];
+
+/** MCP bridge 热更新后替换工具目录；Agent 文件只持久化 MCP server 名。 */
+export function setMcpToolsByServer(next, supportTools = mcpSupportTools) {
+  mcpToolsByServer = new Map(next);
+  mcpSupportTools = [...supportTools];
+}
 
 /** Agent 文件里的工具名转换成 registry 中真实的工具定义；null 表示继承默认工具集。 */
-export function resolveAgentTools(toolNames) {
+export function resolveAgentTools(toolNames, mcpNames = []) {
   if (toolNames === null || toolNames === undefined) return undefined;
   if (!Array.isArray(toolNames)) throw new Error("tools 必须是工具名数组");
   const unknown = toolNames.filter((name) => !TOOL_BY_NAME.has(name));
   if (unknown.length > 0) {
     throw new Error(`未知工具：${unknown.join(", ")}；可用工具：${[...TOOL_BY_NAME.keys()].join(", ")}`);
   }
-  return toolNames.map((name) => TOOL_BY_NAME.get(name));
+  if (mcpNames === null || mcpNames === undefined) mcpNames = [];
+  if (!Array.isArray(mcpNames)) throw new Error("mcps 必须是 MCP 名称数组");
+  const missingMcps = mcpNames.filter((name) => !mcpToolsByServer.has(name));
+  if (missingMcps.length > 0) throw new Error(`MCP 未连接或不存在：${missingMcps.join(", ")}`);
+  const mcpTools = mcpNames.flatMap((name) => mcpToolsByServer.get(name) ?? []);
+  const needsCodemode = mcpTools.some((tool) => tool.callers?.includes("tools"));
+  const needsSearch = mcpTools.some((tool) => tool.deferred === true);
+  const support = mcpSupportTools.filter((tool) =>
+    (needsCodemode && tool.name === "codemode") || (needsSearch && tool.name === "tool_search"));
+  return [...toolNames.map((name) => TOOL_BY_NAME.get(name)), ...mcpTools, ...support];
 }
 
 export const AVAILABLE_TOOL_NAMES = [...TOOL_BY_NAME.keys()];
 
-/** 解析 .md 的 frontmatter + 正文。frontmatter：model / tools / agents */
+/** 解析 .md 的 frontmatter + 正文。frontmatter：model / tools / mcps / agents */
 export function parseAgentDef(md) {
   const m = md.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---(?:\r?\n)?([\s\S]*)$/);
-  if (!m) return { model: null, tools: null, agents: null, instructions: md.trim() };
+  if (!m) return { model: null, tools: null, mcps: null, agents: null, instructions: md.trim() };
   const fm = {};
   for (const line of m[1].split("\n")) {
     const kv = line.match(/^(\w+):\s*(.+)$/);
@@ -38,15 +55,16 @@ export function parseAgentDef(md) {
     const a = s?.match(/\[([^\]]*)\]/);
     return a ? a[1].split(",").map((x) => x.trim()).filter(Boolean) : null;
   };
-  return { model: fm.model || null, tools: arr(fm.tools), agents: arr(fm.agents), instructions: m[2].trim() };
+  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), agents: arr(fm.agents), instructions: m[2].trim() };
 }
 
 /** 序列化回 .md（保存到文件） */
-export function serializeAgentDef({ model: m, tools, agents, instructions }) {
+export function serializeAgentDef({ model: m, tools, mcps, agents, instructions }) {
   const fm = [];
   if (m) fm.push(`model: ${m}`);
   // 空数组也要落盘，否则会被解释成 null（继承全部默认工具）。
   if (tools !== null && tools !== undefined) fm.push(`tools: [${tools.join(", ")}]`);
+  if (mcps !== null && mcps !== undefined) fm.push(`mcps: [${mcps.join(", ")}]`);
   if (agents?.length) fm.push(`agents: [${agents.join(", ")}]`);
   const body = (instructions ?? "").trim();
   return fm.length ? `---\n${fm.join("\n")}\n---\n\n${body}\n` : `${body}\n`;
@@ -94,6 +112,7 @@ async function listAgentsInDir(dir, scope, projectName) {
       scope,
       model: def.model ?? null,
       tools: def.tools ?? null,
+      mcps: def.mcps ?? null,
       instructions: def.instructions ?? "",
     });
   }

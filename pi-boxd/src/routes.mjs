@@ -8,12 +8,12 @@ import { refreshProvider, currentModel, testProviderConnection } from "./model.m
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
 import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
 import { syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
-import { validateMcpServerConfig } from "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js";
+import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
 
-export function buildExtraRoutes(harness, context) {
+export function buildExtraRoutes(harness, context, mcpBridge) {
   return {
     // 项目：GET 列表 / POST 新建
     "/api/projects": {
@@ -203,7 +203,7 @@ export function buildExtraRoutes(harness, context) {
           res.end(JSON.stringify({ project, agents: await listAgents(project) }));
           return;
         }
-        const { project, name, scope = "project", model: m, tools, instructions } = await readBody(req);
+        const { project, name, scope = "project", model: m, tools, mcps, instructions } = await readBody(req);
         if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
@@ -226,7 +226,19 @@ export function buildExtraRoutes(harness, context) {
           res.end(JSON.stringify({ error: error.message }));
           return;
         }
-        const file = await saveAgentFile(project, name, scope, { model: m, tools, instructions });
+        const mcpConfig = await loadMcpConfig();
+        const availableMcps = new Set(
+          Object.entries(mcpConfig.mcpServers ?? {})
+            .filter(([, config]) => config.enabled !== false)
+            .map(([mcpName]) => mcpName),
+        );
+        const invalidMcps = Array.isArray(mcps) ? mcps.filter((mcp) => !availableMcps.has(mcp)) : [];
+        if (invalidMcps.length > 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `MCP 不存在或已停用：${invalidMcps.join(", ")}` }));
+          return;
+        }
+        const file = await saveAgentFile(project, name, scope, { model: m, tools, mcps: Array.isArray(mcps) ? mcps : [], instructions });
         await syncAfterConfigChange(harness, { scope, projectName: project, agentName: name });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, name, scope, file }));
@@ -319,18 +331,43 @@ export function buildExtraRoutes(harness, context) {
           }
           delete all.mcpServers[name];
           await saveMcpConfig(all);
+          await mcpBridge.reload();
+          await syncAllConfig(harness);
           return res.end(JSON.stringify({ ok: true, deleted: name }));
         }
         if (!name || !config) {
           res.writeHead(400); return res.end(JSON.stringify({ error: "缺少 name 或 config" }));
         }
-        const validated = validateMcpServerConfig(name, config);
-        if (typeof validated === "string") {
-          res.writeHead(400); return res.end(JSON.stringify({ error: validated }));
+        let validated;
+        try {
+          validated = validatePublicMcpConfig(name, config);
+        } catch (error) {
+          res.writeHead(400); return res.end(JSON.stringify({ error: error.message }));
         }
         all.mcpServers[name] = validated;
         await saveMcpConfig(all);
+        await mcpBridge.reload();
+        await syncAllConfig(harness);
         return res.end(JSON.stringify({ ok: true, name, config: validated }));
+      },
+    },
+    // MCP 连接测试：使用与 pi-coding-agent 相同的 transport 完成握手并列出工具。
+    "/api/mcp/test": {
+      method: "POST",
+      async handler(req, res) {
+        const { name } = await readBody(req);
+        if (!name) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, error: "缺少 MCP 名称" }));
+        }
+        try {
+          const tools = await mcpBridge.test(name);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, name, tools }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+        }
       },
     },
     // ── Skill 列表与启停 ─────────────────────────────────────────────────

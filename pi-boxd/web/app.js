@@ -150,8 +150,7 @@ function renderTree() {
     addAgent.setAttribute("aria-label", `在 ${proj} 中新建 Agent`);
     addAgent.onclick = (event) => {
       event.stopPropagation();
-      selected = { type: "agent", project: proj, name: null, isNew: true };
-      render();
+      openAgentEditor({ scope: "project", project: proj });
     };
     sep.appendChild(addAgent);
     root.appendChild(sep);
@@ -161,8 +160,7 @@ function renderTree() {
     for (const a of agents) {
       const n = el("div", "tree-item tree-level-2");
       const isSel = selected?.type === "conversation" && selected.id === projStatus[a.name]?.conversationId;
-      const isCfgSel = selected?.type === "agent" && selected.project === proj && selected.name === a.name;
-      if (isSel || isCfgSel) n.classList.add("selected");
+      if (isSel) n.classList.add("selected");
 
       // 圆点
       const status = projStatus[a.name]?.status ?? "unknown";
@@ -182,12 +180,7 @@ function renderTree() {
       agentSettings.setAttribute("aria-label", `配置 Agent ${a.name}`);
       agentSettings.onclick = (ev) => {
         ev.stopPropagation();
-        if (a.scope === "global") {
-          openSettingsModal("agents");
-          return;
-        }
-        selected = { type: "agent", project: proj, name: a.name };
-        render();
+        openAgentEditor({ scope: a.scope, project: a.scope === "project" ? proj : null, existing: a });
       };
       n.appendChild(agentSettings);
       n.appendChild(el("span", "tree-tag", a.scope === "project" ? "项目" : "全局"));
@@ -220,7 +213,6 @@ function renderView() {
   if (selected.type === "project") return renderProjectForm(view);
   if (selected.type === "conversation") return renderConversation(view);
   if (selected.type === "assistant") return renderAssistantForm(view);
-  if (selected.type === "agent") return renderAgentForm(view);
 }
 
 function renderProjectForm(view) {
@@ -482,146 +474,6 @@ async function populateAgentModelSelect(select, selectedValue) {
   }
 }
 
-function openAgentToolsPicker(selectedTools, onConfirm) {
-  const modal = document.getElementById("agent-tools-modal");
-  const options = document.getElementById("agent-tools-options");
-  options.innerHTML = "";
-  for (const tool of state.availableTools ?? ["read", "write", "edit", "bash"]) {
-    const label = el("label", "checkbox-item");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = tool;
-    checkbox.checked = selectedTools.has(tool);
-    label.appendChild(checkbox);
-    label.appendChild(el("span", "", tool));
-    options.appendChild(label);
-  }
-  const close = () => modal.classList.add("hidden");
-  document.getElementById("close-agent-tools").onclick = close;
-  document.getElementById("cancel-agent-tools").onclick = close;
-  document.getElementById("confirm-agent-tools").onclick = () => {
-    onConfirm(new Set([...options.querySelectorAll("input:checked")].map((input) => input.value)));
-    close();
-  };
-  modal.onclick = (event) => { if (event.target === modal) close(); };
-  modal.classList.remove("hidden");
-}
-
-function renderAgentForm(view) {
-  const proj = selected.project;
-  const isNew = selected.isNew;
-  const existing = isNew ? null : (agentsCache[proj] ?? []).find((a) => a.name === selected.name);
-
-  const head = el("div", "view-head");
-  head.appendChild(el("span", "view-title", `📁 ${isNew ? "新建 agent" : selected.name}`));
-  view.appendChild(head);
-
-  const form = el("div", "view-form");
-
-  const nameInput = document.createElement("input");
-  nameInput.type = "text";
-  nameInput.placeholder = "Agent 名（支持中文、字母、数字、-、_）";
-  nameInput.value = isNew ? "" : selected.name;
-  nameInput.disabled = !isNew;
-  form.appendChild(formRow("名称", nameInput));
-
-  const scopeLabel = el("div", "fixed-field", `项目专属（${proj}，创建后始终启用）`);
-  form.appendChild(formRow("存放位置", scopeLabel));
-
-  const modelSelect = document.createElement("select");
-  populateAgentModelSelect(modelSelect, existing?.model ?? "");
-  form.appendChild(formRow("模型", modelSelect));
-
-  let selectedTools = new Set(existing ? (existing.tools ?? state.availableTools ?? []) : ["read", "bash"]);
-  const toolsField = el("div", "field-with-button");
-  const toolsSummary = document.createElement("input");
-  toolsSummary.type = "text";
-  toolsSummary.readOnly = true;
-  const updateToolsSummary = () => {
-    toolsSummary.value = [...selectedTools].join(", ");
-    toolsSummary.placeholder = "未选择工具";
-  };
-  updateToolsSummary();
-  const chooseTools = el("button", "btn-secondary", "选择…");
-  chooseTools.type = "button";
-  chooseTools.onclick = () => openAgentToolsPicker(selectedTools, (next) => {
-    selectedTools = next;
-    updateToolsSummary();
-  });
-  toolsField.appendChild(toolsSummary);
-  toolsField.appendChild(chooseTools);
-  form.appendChild(formRow("工具", toolsField));
-
-  form.appendChild(el("div", "form-label", "提示词（instructions）"));
-  const ta = document.createElement("textarea");
-  ta.className = "cfg-textarea";
-  ta.rows = 10;
-  ta.value = existing?.instructions || (isNew ? "你是一个专注、可靠的子 Agent。请根据收到的任务完成工作，并返回简洁、准确的结果。" : "");
-  ta.required = true;
-  form.appendChild(ta);
-
-  const status = el("div", "form-status", "");
-  const bar = el("div", "form-actions");
-
-  const save = el("button", "btn-primary", "保存");
-  save.onclick = async () => {
-    const name = isNew ? nameInput.value.trim() : selected.name;
-    if (!name) {
-      status.className = "form-status err";
-      status.textContent = "❌ 需要名称";
-      return;
-    }
-    const instructions = ta.value.trim();
-    if (!instructions) {
-      status.className = "form-status err";
-      status.textContent = "❌ 提示词不能为空";
-      ta.focus();
-      return;
-    }
-    const tools = [...selectedTools];
-    const res = await fetch("/api/agents", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project: proj,
-        name,
-        scope: "project",
-        model: modelSelect.value || null,
-        tools,
-        instructions,
-      }),
-    });
-    if (res.ok) {
-      selected = { type: "agent", project: proj, name };
-      await refresh();
-      status.className = "form-status ok";
-      status.textContent = "✅ 已保存";
-    } else {
-      status.className = "form-status err";
-      status.textContent = "❌ " + ((await res.json()).error || "保存失败");
-    }
-  };
-  bar.appendChild(save);
-
-  if (!isNew) {
-    const del = el("button", "btn-danger", "删除");
-    del.onclick = async () => {
-      if (!confirm(`删除 agent "${selected.name}"？`)) return;
-      await fetch("/api/agents/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project: proj, name: selected.name, scope: "project" }),
-      });
-      selected = null;
-      await refresh();
-    };
-    bar.appendChild(del);
-  }
-  bar.appendChild(status);
-  form.appendChild(bar);
-  view.appendChild(form);
-}
-
 // ─── 右：任务图 ─────────────────────────────────────────────────────────────
 function renderTaskGraph() {
   const tasks = Object.values(state.taskGraph.tasks);
@@ -780,7 +632,7 @@ async function renderDrawerAgents(panel) {
   head.appendChild(titleBox);
   const add = el("button", "btn-secondary", "＋ 新建全局 Agent");
   add.type = "button";
-  add.onclick = () => openGlobalAgentEditor(null, () => renderDrawerAgents(panel));
+  add.onclick = () => openAgentEditor({ scope: "global", onSaved: () => renderDrawerAgents(panel) });
   head.appendChild(add);
   panel.appendChild(head);
   if (agents.length === 0) {
@@ -800,7 +652,7 @@ async function renderDrawerAgents(panel) {
     const edit = el("button", "tree-settings", "✎");
     edit.type = "button";
     edit.title = `编辑全局 Agent ${agent.name}`;
-    edit.onclick = () => openGlobalAgentEditor(agent, () => renderDrawerAgents(panel));
+    edit.onclick = () => openAgentEditor({ scope: "global", existing: agent, onSaved: () => renderDrawerAgents(panel) });
     actions.appendChild(edit);
     const del = el("button", "tree-settings drawer-danger", "🗑");
     del.type = "button";
@@ -822,44 +674,76 @@ async function renderDrawerAgents(panel) {
   }
 }
 
-function openGlobalAgentEditor(existing, onSaved) {
+async function openAgentEditor({ scope, project = null, existing = null, onSaved = null }) {
   const isNew = !existing;
+  const isProject = scope === "project";
+  const mcpResponse = await fetch("/api/mcp");
+  const mcpConfig = mcpResponse.ok ? await mcpResponse.json() : { mcpServers: {} };
+  const mcpServers = Object.entries(mcpConfig.mcpServers ?? {});
   const overlay = el("div", "drawer-submodal-backdrop");
-  const modal = el("div", "drawer-submodal global-agent-editor");
-  modal.appendChild(el("h3", "", isNew ? "新建全局 Agent" : `编辑全局 Agent · ${existing.name}`));
+  const modal = el("div", "drawer-submodal agent-editor-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  const kind = isProject ? "项目 Agent" : "全局 Agent";
+  modal.appendChild(el("h3", "", isNew ? `新建${kind}` : `编辑${kind} · ${existing.name}`));
   const nameInput = document.createElement("input");
   nameInput.type = "text";
   nameInput.placeholder = "Agent 名（支持中文、字母、数字、-、_）";
   nameInput.value = existing?.name ?? "";
   nameInput.disabled = !isNew;
   modal.appendChild(formRow("名称", nameInput));
+  modal.appendChild(formRow("存放位置", el(
+    "div",
+    "fixed-field",
+    isProject ? `项目专属（${project}，创建后始终启用）` : "全局库（由项目助理选择启用）",
+  )));
   const modelSelect = document.createElement("select");
   populateAgentModelSelect(modelSelect, existing?.model ?? "");
   modal.appendChild(formRow("模型", modelSelect));
-  let selectedTools = new Set(existing ? (existing.tools ?? state.availableTools ?? []) : ["read", "bash"]);
-  const toolsField = el("div", "field-with-button");
-  const toolsSummary = document.createElement("input");
-  toolsSummary.type = "text";
-  toolsSummary.readOnly = true;
-  const updateSummary = () => {
-    toolsSummary.value = [...selectedTools].join(", ");
-    toolsSummary.placeholder = "未选择工具";
+
+  const selectedTools = new Set(existing ? (existing.tools ?? state.availableTools ?? []) : ["read", "bash"]);
+  const enabledMcpNames = new Set(mcpServers.filter(([, config]) => config.enabled !== false).map(([name]) => name));
+  const selectedMcps = new Set((existing?.mcps ?? []).filter((name) => enabledMcpNames.has(name)));
+  const addCheckboxGroup = (title, description, choices, selectedValues, disabledWhen = () => false) => {
+    const section = el("section", "agent-editor-section");
+    section.appendChild(el("div", "agent-editor-section-title", title));
+    section.appendChild(el("div", "muted agent-editor-section-desc", description));
+    const grid = el("div", "agent-option-grid");
+    if (choices.length === 0) grid.appendChild(el("div", "muted", "（暂无可选项）"));
+    for (const choice of choices) {
+      const label = el("label", "agent-option");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = choice.value;
+      checkbox.checked = selectedValues.has(choice.value);
+      checkbox.disabled = disabledWhen(choice);
+      checkbox.onchange = () => checkbox.checked ? selectedValues.add(choice.value) : selectedValues.delete(choice.value);
+      if (checkbox.disabled) label.classList.add("agent-option-disabled");
+      label.appendChild(checkbox);
+      label.appendChild(el("span", "", choice.label));
+      grid.appendChild(label);
+    }
+    section.appendChild(grid);
+    modal.appendChild(section);
   };
-  updateSummary();
-  const choose = el("button", "btn-secondary", "选择…");
-  choose.type = "button";
-  choose.onclick = () => openAgentToolsPicker(selectedTools, (next) => {
-    selectedTools = next;
-    updateSummary();
-  });
-  toolsField.appendChild(toolsSummary);
-  toolsField.appendChild(choose);
-  modal.appendChild(formRow("工具", toolsField));
+  addCheckboxGroup(
+    "工具",
+    "选择该 Agent 可以直接调用的内置工具。",
+    (state.availableTools ?? ["read", "write", "edit", "bash"]).map((tool) => ({ value: tool, label: tool })),
+    selectedTools,
+  );
+  addCheckboxGroup(
+    "MCP",
+    "选择该 Agent 可以使用的 MCP 服务；已停用的服务不可选择。",
+    mcpServers.map(([name, config]) => ({ value: name, label: config.enabled === false ? `${name}（已停用）` : name, config })),
+    selectedMcps,
+    (choice) => choice.config.enabled === false,
+  );
   modal.appendChild(el("div", "form-label", "提示词（instructions）"));
   const instructions = document.createElement("textarea");
   instructions.className = "cfg-textarea";
   instructions.rows = 8;
-  instructions.value = existing?.instructions || "你是一个专注、可靠的全局 Agent。请根据收到的任务完成工作，并返回简洁、准确的结果。";
+  instructions.value = existing?.instructions || `你是一个专注、可靠的${kind}。请根据收到的任务完成工作，并返回简洁、准确的结果。`;
   modal.appendChild(instructions);
   const status = el("div", "form-status");
   modal.appendChild(status);
@@ -869,6 +753,27 @@ function openGlobalAgentEditor(existing, onSaved) {
   const save = el("button", "btn-primary", "保存");
   save.type = "button";
   actions.appendChild(cancel);
+  if (!isNew) {
+    const remove = el("button", "btn-danger", "删除");
+    remove.type = "button";
+    remove.onclick = async () => {
+      if (!confirm(`确认删除 ${kind} "${existing.name}"？`)) return;
+      const response = await fetch("/api/agents/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project, name: existing.name, scope }),
+      });
+      if (!response.ok) {
+        status.className = "form-status err";
+        status.textContent = `❌ ${(await response.json()).error || "删除失败"}`;
+        return;
+      }
+      close();
+      await refresh();
+      if (onSaved) await onSaved();
+    };
+    actions.appendChild(remove);
+  }
   actions.appendChild(save);
   modal.appendChild(actions);
   overlay.appendChild(modal);
@@ -893,7 +798,15 @@ function openGlobalAgentEditor(existing, onSaved) {
     const response = await fetch("/api/agents", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, scope: "global", model: modelSelect.value || null, tools: [...selectedTools], instructions: prompt }),
+      body: JSON.stringify({
+        project,
+        name,
+        scope,
+        model: modelSelect.value || null,
+        tools: [...selectedTools],
+        mcps: [...selectedMcps],
+        instructions: prompt,
+      }),
     });
     save.disabled = false;
     if (!response.ok) {
@@ -903,7 +816,7 @@ function openGlobalAgentEditor(existing, onSaved) {
     }
     close();
     await refresh();
-    await onSaved();
+    if (onSaved) await onSaved();
   };
 }
 
@@ -993,6 +906,10 @@ async function renderDrawerMcp(panel) {
       edit.title = "编辑";
       edit.onclick = () => openMcpForm({ name, config }, render);
       acts.appendChild(edit);
+      const test = el("button", "btn-secondary mcp-test-button", "测试连接");
+      test.type = "button";
+      test.title = `测试 ${name} 并列出工具`;
+      acts.appendChild(test);
       const del = el("button", "tree-settings drawer-danger", "🗑");
       del.title = "删除";
       del.onclick = async () => {
@@ -1006,6 +923,48 @@ async function renderDrawerMcp(panel) {
       acts.appendChild(del);
       row.appendChild(acts);
       panel.appendChild(row);
+      const testResult = el("div", "mcp-test-result hidden");
+      panel.appendChild(testResult);
+      test.onclick = async () => {
+        test.disabled = true;
+        test.textContent = "测试中…";
+        testResult.className = "mcp-test-result testing";
+        testResult.textContent = "正在连接 MCP 并获取工具列表…";
+        try {
+          const response = await fetch("/api/mcp/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          const data = await response.json();
+          testResult.innerHTML = "";
+          if (!response.ok || !data.ok) {
+            testResult.className = "mcp-test-result error";
+            testResult.appendChild(el("div", "mcp-test-title", `❌ MCP 不可用：${data.error || "连接失败"}`));
+            return;
+          }
+          testResult.className = "mcp-test-result success";
+          testResult.appendChild(el("div", "mcp-test-title", `✅ MCP 可用 · ${data.tools.length} 个工具`));
+          if (data.tools.length === 0) {
+            testResult.appendChild(el("div", "muted", "该 MCP 没有声明可调用工具。"));
+          } else {
+            const list = el("div", "mcp-tool-list");
+            for (const tool of data.tools) {
+              const item = el("div", "mcp-tool-item");
+              item.appendChild(el("code", "mcp-tool-name", tool.name));
+              if (tool.description) item.appendChild(el("span", "mcp-tool-description", tool.description));
+              list.appendChild(item);
+            }
+            testResult.appendChild(list);
+          }
+        } catch (error) {
+          testResult.className = "mcp-test-result error";
+          testResult.textContent = `❌ 测试失败：${error.message}`;
+        } finally {
+          test.disabled = false;
+          test.textContent = "测试连接";
+        }
+      };
     }
   };
   await render();

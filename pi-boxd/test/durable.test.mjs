@@ -13,6 +13,7 @@ const { initProvider } = await import("../src/model.mjs");
 const { loadConfig, saveConfig } = await import("../src/io.mjs");
 const {
   resolveAgentTools,
+  setMcpToolsByServer,
   parseAgentDef,
   serializeAgentDef,
   saveAgentFile,
@@ -23,6 +24,7 @@ const {
 } = await import("../src/agents.mjs");
 const { PiBoxTasks } = await import("../src/extension.mjs");
 const { createHarness } = await import("../src/harness.mjs");
+const { createDurableMcpTools, validatePublicMcpConfig } = await import("../src/mcp-bridge.mjs");
 
 test.after(async () => {
   await rm(root, { recursive: true, force: true });
@@ -41,9 +43,50 @@ test("agent tool names resolve to registered tool definitions", () => {
   assert.throws(() => resolveAgentTools(["missing"]), /未知工具/);
 });
 
+test("selected MCP servers add their durable tools and official support tools", () => {
+  const direct = { name: "mcp__demo__read", parameters: {}, execute: async () => ({}) };
+  const codemodeOnly = { name: "mcp__demo__search", parameters: {}, callers: ["tools"], execute: async () => ({}) };
+  const codemode = { name: "codemode", parameters: {}, execute: async () => ({}) };
+  const toolSearch = { name: "tool_search", parameters: {}, execute: async () => ({}) };
+  setMcpToolsByServer(new Map([["demo", [direct, codemodeOnly]]]), [codemode, toolSearch]);
+  assert.deepEqual(
+    resolveAgentTools(["read"], ["demo"]).map((tool) => tool.name),
+    ["read", "mcp__demo__read", "mcp__demo__search", "codemode"],
+  );
+  assert.throws(() => resolveAgentTools(["read"], ["missing"]), /MCP 未连接/);
+  setMcpToolsByServer(new Map(), []);
+});
+
+test("official MCP definitions become namespaced durable tools with exposure", async () => {
+  const calls = [];
+  const client = {
+    async callTool(name, args) {
+      calls.push({ name, args });
+      return { content: [{ type: "text", text: "ok" }], structuredContent: { ok: true } };
+    },
+  };
+  const config = validatePublicMcpConfig("product-db", {
+    url: "https://example.test/mcp",
+    exposure: "codemode",
+    toolExposure: { lookup: "direct", "delete_*": "hidden" },
+  });
+  const tools = createDurableMcpTools("product-db", config, client, [
+    { name: "lookup", description: "Lookup", inputSchema: { type: "object", properties: {} } },
+    { name: "search", description: "Search", inputSchema: { type: "object", properties: {} } },
+    { name: "delete_item", description: "Delete", inputSchema: { type: "object", properties: {} } },
+  ]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["mcp__product_db__lookup", "mcp__product_db__search"]);
+  assert.equal(tools[0].callers, undefined);
+  assert.deepEqual(tools[1].callers, ["tools"]);
+  const result = await tools[0].execute({}, { output() {} });
+  assert.deepEqual(result.output, [{ type: "text", text: "ok" }]);
+  assert.deepEqual(calls, [{ name: "lookup", args: {} }]);
+});
+
 test("an explicitly empty agent tool selection survives serialization", () => {
-  const markdown = serializeAgentDef({ model: null, tools: [], instructions: "Do the work." });
+  const markdown = serializeAgentDef({ model: null, tools: [], mcps: [], instructions: "Do the work." });
   assert.deepEqual(parseAgentDef(markdown).tools, []);
+  assert.deepEqual(parseAgentDef(markdown).mcps, []);
 });
 
 test("project agents are always enabled while global agents require assistant selection", async () => {

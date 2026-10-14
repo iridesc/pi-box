@@ -9,9 +9,16 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@earendil-works/chord": "1.1.0",
-    "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-durable": "1.1.0",
+    "@earendil-works/chord": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-codemode": "1.2.0",
+    "@earendil-works/pi-durable": "1.2.0",
+    "@earendil-works/pi-mcp": "1.2.0",
     "pi-durable-web": "github:iridesc/pi-durable-web#a8beadc"
+  },
+  "overrides": {
+    "@earendil-works/chord": "$@earendil-works/chord",
+    "@earendil-works/pi-ai": "$@earendil-works/pi-ai",
+    "@earendil-works/pi-durable": "$@earendil-works/pi-durable"
   }
 }

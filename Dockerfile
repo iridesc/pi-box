@@ -14,7 +14,7 @@ RUN apt-get update \
 
 # 预装 pi 本体（供 cron 调用，生成会话）
 RUN npm config set registry https://registry.npmmirror.com
-RUN npm install -g @earendil-works/pi-coding-agent
+RUN npm install -g @earendil-works/pi-coding-agent@1.2.0
 
 # pi-boxd：分步 COPY 减少 npm install 缓存失效
 COPY pi-boxd/package.json pi-boxd/package-lock.json /home/pi-boxd/app/

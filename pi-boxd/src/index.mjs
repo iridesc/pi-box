@@ -11,7 +11,7 @@ await initProvider();
 await refreshProvider();
 
 // 创建 Harness + 注册 pi-box 扩展
-const { harness, context } = await createHarness();
+const { harness, context, mcpBridge } = await createHarness();
 
 // 为每个项目建主会话
 await ensureProjectConversations(harness);
@@ -26,7 +26,7 @@ const server = createWebServer({
   getSnapshot: () => boxSnapshot(harness),
   createConversation: () =>
     harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: currentModel, cwd: PROJECTS_DIR } }, context),
-  extraRoutes: buildExtraRoutes(harness, context),
+  extraRoutes: buildExtraRoutes(harness, context, mcpBridge),
   webDir: WEB_DIR,
 });
 

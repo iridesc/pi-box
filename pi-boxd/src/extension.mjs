@@ -137,7 +137,7 @@ export function makeSubagentTool(getPiBoxExtension) {
           await configure(tx, child.id, {
             model: resolveAgentModel(def.model),
             instructions: def.instructions,
-            tools: resolveAgentTools(def.tools),
+            tools: resolveAgentTools(def.tools, def.mcps),
             extensions: { remove: [getPiBoxExtension()] },
             cwd,
           });

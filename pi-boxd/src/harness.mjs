@@ -5,6 +5,9 @@ import { createRegistry, defineExtension, Harness, configure, LiveDoc } from "@e
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
+import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { snapshot } from "pi-durable-web/src/core.mjs";
 import { AgentDoc } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -21,9 +24,11 @@ import {
   resolveAgentModel,
   loadAgentDef,
   resolveAgentTools,
+  setMcpToolsByServer,
   AVAILABLE_TOOL_NAMES,
 } from "./agents.mjs";
 import { makeSubagentTool, PiBoxTasks, Subagents } from "./extension.mjs";
+import { McpDurableBridge } from "./mcp-bridge.mjs";
 
 const context = BACKGROUND_CONTEXT;
 export { context };
@@ -43,6 +48,20 @@ export async function createHarness() {
   piBoxExt = defineExtension({ name: "pi-box", tools: [SubagentTool], tasks: PiBoxTasks });
   registry.install(piBoxExt);
 
+  // MCP 工具先注册为独立 extension；codemode/tool_search 使用 Durable 1.2 的嵌套工具机制调用它们。
+  const mcpBridge = new McpDurableBridge(registry);
+  await mcpBridge.reload();
+  const namespaces = Object.keys(mcpBridge.snapshot()).map((name) => ({
+    name: `mcp__${name}`,
+    description: `MCP server ${name}`,
+    prefix: `mcp__${name.replace(/[^A-Za-z0-9_]/g, "_")}__`,
+  }));
+  const codemodeExtension = createCodemodeExtension({ sandbox: new CodemodeSandbox(), namespaces });
+  const toolSearchExtension = createToolSearchExtension();
+  registry.install(codemodeExtension);
+  registry.install(toolSearchExtension);
+  setMcpToolsByServer(mcpBridge.toolsByServer, [codemodeExtension.tools[0], toolSearchExtension.tools[0]]);
+
   const harness = await Harness.open(
     storage,
     {
@@ -54,7 +73,7 @@ export async function createHarness() {
     context,
   );
 
-  return { harness, context, PiBoxExtension: piBoxExt };
+  return { harness, context, PiBoxExtension: piBoxExt, mcpBridge };
 }
 
 /** 给定 harness，为项目目录里的每个项目确保有一个主会话（项目助理） */
@@ -122,7 +141,7 @@ async function syncSubagentInstances(harness, projectName, agentName) {
       (tx) => configure(tx, found.conversationId, {
         instructions: def.instructions,
         model: resolveAgentModel(def.model),
-        tools: resolveAgentTools(def.tools),
+        tools: resolveAgentTools(def.tools, def.mcps),
       }),
       context,
     );
@@ -135,7 +154,14 @@ export async function syncAfterConfigChange(harness, { scope, projectName, agent
   const projects = scope === "global" ? await listProjects() : [projectName];
   for (const p of projects) {
     await syncProjectAssistant(harness, p);
-    if (agentName) await syncSubagentInstances(harness, p, agentName);
+    if (agentName) {
+      try {
+        await syncSubagentInstances(harness, p, agentName);
+      } catch (error) {
+        // 配置先落盘；暂时不可达的 MCP 恢复后会在 reload/startup 时重新同步。
+        console.error(`[sync] 暂未刷新子 agent ${p}/${agentName}: ${error.message}`);
+      }
+    }
   }
 }
 
