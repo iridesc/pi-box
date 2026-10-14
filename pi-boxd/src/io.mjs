@@ -5,8 +5,7 @@ import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 
 const configPath = join(DATA_DIR, "config.json");
-// MCP server 配置：与 pi-coding-agent 共用同一份 mcp.json，以便 pi CLI 也能读到。
-// 存放位置与 pi-coding-agent 约定一致：全局 ~/.pi/agent/mcp.json。
+// MCP server 配置保存在应用 HOME 下，随 agent-home 持久化。
 const mcpPath = join(homedir(), ".pi", "agent", "mcp.json");
 // Skill 目录：内置位于 /opt/pi-box/skills，用户位于 ~/.pi/agent/skills/。
 const userSkillsDir = join(homedir(), ".pi", "agent", "skills");

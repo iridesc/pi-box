@@ -1,5 +1,4 @@
-# Pi + pi-boxd 常驻容器，容器内 cron 驱动周期任务
-# 镜像里同时预装 pi CLI（供 cron 调用）和 pi-boxd（多 agent 管理台）
+# pi-boxd 持久化多 Agent 管理台
 FROM node:24-slim
 
 # 容器内不走宿主代理（apt 和 npm 都受影响）；用国内镜像
@@ -8,13 +7,9 @@ ENV HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= NO_PROXY=localhost,127.0.0
 # 基础工具
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      cron ca-certificates git \
+      ca-certificates git \
       curl wget jq python3 \
  && rm -rf /var/lib/apt/lists/*
-
-# 预装 pi 本体（供 cron 调用，生成会话）
-RUN npm config set registry https://registry.npmmirror.com
-RUN npm install -g @earendil-works/pi-coding-agent@1.2.0
 
 # pi-boxd：分步 COPY 减少 npm install 缓存失效
 COPY pi-boxd/package.json pi-boxd/package-lock.json /home/pi-boxd/app/
@@ -36,13 +31,8 @@ ENV PORT=8790
 # 工作区（挂载）与入口
 WORKDIR /workspace
 COPY entrypoint.sh /entrypoint.sh
-COPY bin/pi-job /usr/local/bin/pi-job
-COPY bin/pi-run /usr/local/bin/pi-run
-# 通用系统提示词模板 + cron-jobs skill（首启时由 entrypoint 安装）
-COPY system-prompt/ /opt/pi-box/
-COPY skills/ /opt/pi-box/skills/
-RUN chmod +x /entrypoint.sh /usr/local/bin/pi-job /usr/local/bin/pi-run \
- && mkdir -p /workspace/.cron/logs /workspace/.pi /home/agent/.pi-boxd
+RUN chmod +x /entrypoint.sh \
+ && mkdir -p /workspace /home/agent/.pi-boxd /home/agent/.pi/agent
 
 EXPOSE 8790
 

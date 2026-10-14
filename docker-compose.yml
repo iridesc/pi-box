@@ -7,18 +7,13 @@ services:
       # pi-boxd 管理台：127.0.0.1:8790 → 容器 8790
       - "127.0.0.1:8790:8790"
     volumes:
-      # 工作区：用户项目（每个子目录 = 一个项目）+ .cron/ 任务配置
+      # 工作区：项目文件、项目/全局 Agent 与项目定时任务配置
       - ./workspace:/workspace
-      # pi-boxd 持久数据：会话/任务（SQLite）、模型配置、全局 agent 库
-      - ./agent-data:/home/agent/.pi-boxd
-      # pi-coding-agent 用户配置：MCP、用户 Skills、系统提示词
-      - ./agent-data/pi-agent:/home/agent/.pi/agent
+      # 应用 HOME：Durable SQLite、模型/MCP 配置、用户 Skills 与会话数据
+      - ./agent-home:/home/agent
     environment:
       - TZ=${TZ:-Asia/Shanghai}
-      # pi-boxd 配置
-      - PI_BOX_WORKSPACE=/workspace
       - PI_BOXD_DATA_DIR=/home/agent/.pi-boxd
-      - PI_BOXD_WEB_DIR=/home/pi-boxd/app/web
       - PORT=8790
       # 应用层 HTTP Basic Auth；密码为空时仅适合本地开发。
       - PI_BOX_AUTH_USERNAME=${PI_BOX_AUTH_USERNAME:-pi}

@@ -2,6 +2,7 @@
 .env
 .env.*
 agent-data
+agent-home
 workspace
 pi-boxd/node_modules
 **/.DS_Store

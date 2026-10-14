@@ -445,7 +445,7 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         return res.end(JSON.stringify({ ok: true, name, config: validated }));
       },
     },
-    // MCP 连接测试：使用与 pi-coding-agent 相同的 transport 完成握手并列出工具。
+    // MCP 连接测试：使用正式 transport 完成握手并列出工具。
     "/api/mcp/test": {
       method: "POST",
       async handler(req, res) {
