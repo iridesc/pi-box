@@ -623,6 +623,177 @@ function messageText(msg) {
   return String(c);
 }
 
+function appendInlineMarkdown(parent, source) {
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_([^_]+)_|\[[^\]]+\]\([^)]+\))/g;
+  let cursor = 0;
+  for (const match of source.matchAll(pattern)) {
+    parent.appendChild(document.createTextNode(source.slice(cursor, match.index)));
+    const token = match[0];
+    if (token.startsWith("`")) parent.appendChild(el("code", "", token.slice(1, -1)));
+    else if (token.startsWith("**") || token.startsWith("__")) parent.appendChild(el("strong", "", token.slice(2, -2)));
+    else if (token.startsWith("[") && token.includes("](")) {
+      const parts = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
+      const link = el("a", "", parts?.[1] ?? token);
+      const href = parts?.[2] ?? "";
+      if (/^https?:\/\//i.test(href)) {
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+      parent.appendChild(link);
+    } else parent.appendChild(el("em", "", token.slice(1, -1)));
+    cursor = (match.index ?? 0) + token.length;
+  }
+  parent.appendChild(document.createTextNode(source.slice(cursor)));
+}
+
+function markdownBlock(text) {
+  const root = el("div", "markdown-body");
+  const lines = String(text ?? "").replace(/\r\n/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    if (line.startsWith("```")) {
+      const language = line.slice(3).trim();
+      const code = [];
+      index += 1;
+      while (index < lines.length && !lines[index].startsWith("```")) code.push(lines[index++]);
+      if (index < lines.length) index += 1;
+      const pre = el("pre", "");
+      const codeNode = el("code", language ? `language-${language}` : "", code.join("\n"));
+      pre.appendChild(codeNode); root.appendChild(pre); continue;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (heading) {
+      const node = document.createElement(`h${heading[1].length}`);
+      appendInlineMarkdown(node, heading[2]); root.appendChild(node); index += 1; continue;
+    }
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { root.appendChild(document.createElement("hr")); index += 1; continue; }
+    if (line.includes("|") && index + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1])) {
+      const rows = [];
+      const splitRow = (value) => value.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+      rows.push(splitRow(line)); index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) rows.push(splitRow(lines[index++]));
+      const table = document.createElement("table");
+      rows.forEach((cells, rowIndex) => {
+        const tr = document.createElement("tr");
+        cells.forEach((cell) => { const node = document.createElement(rowIndex === 0 ? "th" : "td"); appendInlineMarkdown(node, cell); tr.appendChild(node); });
+        (rowIndex === 0 ? table.createTHead() : table.tBodies[0] ?? table.createTBody()).appendChild(tr);
+      });
+      root.appendChild(table); continue;
+    }
+    const listMatch = /^\s*([-*+] |\d+\. )(.+)$/.exec(line);
+    if (listMatch) {
+      const ordered = /\d/.test(listMatch[1][0]);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (index < lines.length) {
+        const item = /^\s*([-*+] |\d+\. )(.+)$/.exec(lines[index]);
+        if (!item || /\d/.test(item[1][0]) !== ordered) break;
+        const li = document.createElement("li"); appendInlineMarkdown(li, item[2]); list.appendChild(li); index += 1;
+      }
+      root.appendChild(list); continue;
+    }
+    if (line.startsWith(">")) {
+      const quote = [];
+      while (index < lines.length && lines[index].startsWith(">")) quote.push(lines[index++].replace(/^>\s?/, ""));
+      const node = document.createElement("blockquote"); appendInlineMarkdown(node, quote.join("\n")); root.appendChild(node); continue;
+    }
+    const paragraph = [line]; index += 1;
+    while (index < lines.length && lines[index].trim() && !/^(#{1,6})\s|^```|^\s*([-*+] |\d+\. )|^>/.test(lines[index])) paragraph.push(lines[index++]);
+    const node = document.createElement("p"); appendInlineMarkdown(node, paragraph.join("\n")); root.appendChild(node);
+  }
+  return root;
+}
+
+function messageRoleLabel(msg, entry) {
+  if (msg.role === "toolResult") return `工具结果${msg.toolName ? ` · ${msg.toolName}` : ""}`;
+  if (msg.role === "assistant") {
+    const call = Array.isArray(msg.content) && msg.content.find((part) => part?.type === "toolCall");
+    if (call) return `工具调用 · ${call.name}`;
+    const thinking = Array.isArray(msg.content) && msg.content.some((part) => part?.type === "thinking");
+    return thinking ? "思考与阶段回复" : "阶段回复";
+  }
+  if (msg.role === "user" && String(entry.kind).startsWith("pibox.")) return "子 Agent 回传";
+  return entry.kind;
+}
+
+function isFinalAssistant(msg) {
+  return msg.role === "assistant" && ["stop", "endTurn"].includes(msg.stopReason) && assistantText(msg).trim();
+}
+
+function assistantText(msg) {
+  if (typeof msg?.content === "string") return msg.content;
+  if (!Array.isArray(msg?.content)) return messageText(msg);
+  return msg.content.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("\n");
+}
+
+function conversationTurns(entries) {
+  const turns = [];
+  let current = null;
+  for (const entry of entries) {
+    const messages = entry.model ?? [];
+    const userMessages = messages.filter((msg) => msg.role === "user");
+    const synthetic = userMessages.length > 0 && userMessages.every((msg) => /^\[子 agent .+ 回复\]/.test(messageText(msg).trim()));
+    if (userMessages.length > 0 && !synthetic) {
+      current = { users: userMessages, items: [] };
+      turns.push(current);
+    }
+    if (!current) {
+      current = { users: [], items: [] };
+      turns.push(current);
+    }
+    for (const msg of messages) {
+      if (userMessages.includes(msg) && !synthetic) continue;
+      if (msg.role === "system" || !messageText(msg).trim()) continue;
+      current.items.push({ entry, msg });
+    }
+  }
+  return turns;
+}
+
+function renderConversationTurn(turn) {
+  const fragment = document.createDocumentFragment();
+  for (const msg of turn.users) {
+    const bubble = el("div", "conversation-user");
+    bubble.appendChild(markdownBlock(messageText(msg)));
+    fragment.appendChild(bubble);
+  }
+  if (turn.items.length === 0) return fragment;
+  let finalIndex = -1;
+  turn.items.forEach(({ msg }, index) => { if (isFinalAssistant(msg)) finalIndex = index; });
+  const processItems = turn.items.flatMap((item, index) => {
+    if (index !== finalIndex) return [item];
+    const thinking = Array.isArray(item.msg.content) ? item.msg.content.filter((part) => part?.type === "thinking") : [];
+    return thinking.length > 0 ? [{ entry: item.entry, msg: { ...item.msg, content: thinking, stopReason: "toolUse" } }] : [];
+  });
+  const group = el("section", `agent-response${finalIndex < 0 ? " agent-response-running" : ""}`);
+  const groupTitle = el("div", "agent-response-title", finalIndex < 0 ? "Agent 正在处理…" : "Agent 回复");
+  group.appendChild(groupTitle);
+  if (processItems.length > 0) {
+    const process = el("details", "agent-process");
+    process.open = finalIndex < 0;
+    const summary = el("summary", "agent-process-summary", `处理过程 · ${processItems.length} 个步骤`);
+    process.appendChild(summary);
+    const list = el("div", "agent-process-list");
+    processItems.forEach(({ entry, msg }) => {
+      const step = el("details", `agent-step agent-step-${msg.role}`);
+      step.appendChild(el("summary", "agent-step-summary", messageRoleLabel(msg, entry)));
+      const content = el("div", "agent-step-content");
+      content.appendChild(markdownBlock(messageText(msg)));
+      step.appendChild(content); list.appendChild(step);
+    });
+    process.appendChild(list); group.appendChild(process);
+  }
+  if (finalIndex >= 0) {
+    const final = el("div", "agent-final");
+    final.appendChild(markdownBlock(assistantText(turn.items[finalIndex].msg)));
+    group.appendChild(final);
+  }
+  fragment.appendChild(group);
+  return fragment;
+}
+
 function renderConversation(view) {
   const conv = state.conversations.find((c) => c.id === selected.id);
   if (!conv) {
@@ -646,16 +817,7 @@ function renderConversation(view) {
   view.appendChild(head);
 
   const body = el("div", "view-body");
-  for (const e of conv.entries) {
-    const div = el("div", "entry entry-" + e.kind.replace(/\./g, "-"));
-    div.appendChild(el("div", "entry-kind", e.kind));
-    for (const msg of e.model ?? []) {
-      const p = el("div", "entry-msg entry-role-" + msg.role);
-      p.textContent = messageText(msg);
-      div.appendChild(p);
-    }
-    body.appendChild(div);
-  }
+  for (const turn of conversationTurns(conv.entries)) body.appendChild(renderConversationTurn(turn));
   view.appendChild(body);
   body.scrollTop = body.scrollHeight;
 

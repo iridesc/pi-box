@@ -120,16 +120,55 @@ section:last-child { border-right: none; }
 }
 .view-input button:disabled { background: #21262d; border-color: #30363d; color: #484f58; cursor: not-allowed; }
 
-/* 对话条目 */
-.entry { border: 1px solid #21262d; border-radius: 6px; margin-bottom: 8px; background: #0d1117; }
-.entry-kind {
-  font-size: 11px; color: #8b949e; padding: 4px 8px;
-  border-bottom: 1px solid #21262d; background: #161b22;
+/* 对话：一条用户输入 + Agent 的完整处理过程 = 一个视觉单元。 */
+.conversation-user {
+  max-width: 82%; margin: 4px 0 10px auto; padding: 9px 12px;
+  color: #e6edf3; background: #16345b; border: 1px solid #1f6feb; border-radius: 12px 12px 3px 12px;
 }
-.entry-msg { padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
-.entry-role-user .entry-msg { color: #79c0ff; }
-.entry-role-assistant .entry-msg { color: #c9d1d9; }
-.entry-role-toolResult .entry-msg { color: #7ee787; }
+.agent-response {
+  margin: 0 8% 18px 0; border: 1px solid #30363d; border-radius: 10px;
+  background: #0d1117; overflow: hidden; box-shadow: 0 3px 12px rgba(0, 0, 0, .16);
+}
+.agent-response-running { border-color: #9e6a03; }
+.agent-response-title {
+  padding: 8px 12px; color: #8b949e; font-size: 11px; font-weight: 600;
+  background: #161b22; border-bottom: 1px solid #21262d;
+}
+.agent-response-running .agent-response-title { color: #d29922; }
+.agent-process { margin: 8px 10px; border: 1px solid #30363d; border-radius: 7px; background: #161b22; }
+.agent-process-summary, .agent-step-summary { cursor: pointer; user-select: none; list-style: none; }
+.agent-process-summary::-webkit-details-marker, .agent-step-summary::-webkit-details-marker { display: none; }
+.agent-process-summary { padding: 8px 10px; color: #8b949e; font-size: 12px; }
+.agent-process-summary::before, .agent-step-summary::before { content: "▶"; display: inline-block; width: 16px; font-size: 9px; transition: transform .15s; }
+.agent-process[open] > .agent-process-summary::before, .agent-step[open] > .agent-step-summary::before { transform: rotate(90deg); }
+.agent-process-list { display: flex; flex-direction: column; gap: 6px; padding: 0 8px 8px; }
+.agent-step { border: 1px solid #30363d; border-radius: 5px; background: #0d1117; overflow: hidden; }
+.agent-step-summary { padding: 6px 8px; color: #79c0ff; font-size: 11px; }
+.agent-step-toolResult > .agent-step-summary { color: #7ee787; }
+.agent-step-content { padding: 8px 10px; border-top: 1px solid #21262d; max-height: 420px; overflow: auto; }
+.agent-final { padding: 5px 14px 12px; color: #c9d1d9; }
+
+/* 安全 DOM Markdown 渲染，不使用 innerHTML。 */
+.markdown-body { min-width: 0; line-height: 1.62; word-break: break-word; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { margin: 8px 0; white-space: pre-wrap; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { margin: 15px 0 8px; color: #e6edf3; line-height: 1.3; }
+.markdown-body h1 { font-size: 20px; } .markdown-body h2 { font-size: 17px; } .markdown-body h3 { font-size: 15px; }
+.markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 13px; }
+.markdown-body ul, .markdown-body ol { margin: 7px 0; padding-left: 24px; }
+.markdown-body li { margin: 3px 0; }
+.markdown-body code { padding: 2px 5px; border-radius: 4px; background: #21262d; color: #ff7b72; font-family: inherit; font-size: .92em; }
+.markdown-body pre { margin: 9px 0; padding: 10px 12px; overflow: auto; border: 1px solid #30363d; border-radius: 6px; background: #010409; }
+.markdown-body pre code { padding: 0; color: #c9d1d9; background: transparent; white-space: pre; }
+.markdown-body blockquote { margin: 8px 0; padding: 2px 12px; color: #8b949e; border-left: 3px solid #3b434b; white-space: pre-wrap; }
+.markdown-body table { display: block; width: max-content; max-width: 100%; margin: 10px 0; overflow-x: auto; border-collapse: collapse; }
+.markdown-body th, .markdown-body td { padding: 6px 9px; border: 1px solid #30363d; text-align: left; }
+.markdown-body th { background: #161b22; color: #e6edf3; }
+.markdown-body tr:nth-child(2n) td { background: rgba(22, 27, 34, .65); }
+.markdown-body a { color: #58a6ff; text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
+.markdown-body hr { height: 1px; margin: 14px 0; border: 0; background: #30363d; }
 
 /* ── 中：表单 ── */
 .view-form { padding: 14px; overflow-y: auto; flex: 1; }
