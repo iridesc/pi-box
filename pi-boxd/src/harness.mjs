@@ -29,6 +29,7 @@ import {
 } from "./agents.mjs";
 import { makeSubagentTool, PiBoxTasks, Subagents } from "./extension.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
+import { listSchedules } from "./schedules.mjs";
 
 const context = BACKGROUND_CONTEXT;
 export { context };
@@ -165,6 +166,25 @@ export async function syncAfterConfigChange(harness, { scope, projectName, agent
   }
 }
 
+/** Agent 改名后迁移已经创建的子会话索引，保留原会话和历史。 */
+export async function renameSubagentRecords(harness, { scope, projectName, oldName, newName }) {
+  const projects = scope === "global" ? await listProjects() : [projectName];
+  const projectCwds = new Set(projects.map((name) => join(PROJECTS_DIR, name)));
+  const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+  for (const record of records) {
+    if (record.owner != null) continue;
+    const agent = await harness.snapshot(AgentDoc, record.id, context);
+    if (!projectCwds.has(agent?.cwd)) continue;
+    await harness.commit(async (tx) => {
+      const state = await tx.doc(Subagents, record.id);
+      if (!state.agents?.[oldName]) return;
+      if (state.agents[newName]) throw new Error(`已存在运行中的 Agent “${newName}”`);
+      state.agents[newName] = state.agents[oldName];
+      delete state.agents[oldName];
+    }, context);
+  }
+}
+
 /** 对账所有项目助理和已经创建的子 agent；启动及全局模型变更后调用。 */
 export async function syncAllConfig(harness) {
   for (const projectName of await listProjects()) {
@@ -209,11 +229,13 @@ export async function boxSnapshot(harness) {
   const agentsByProject = {};
   const agentCatalogByProject = {};
   const assistantByProject = {};
+  const schedulesByProject = {};
   const agentsStatus = {}; // { [project]: { [name]: { status, conversationId } } }
   for (const p of projects) {
     agentsByProject[p] = await listAgents(p);
     agentCatalogByProject[p] = await listAgentCatalog(p);
     assistantByProject[p] = await loadAssistant(p);
+    schedulesByProject[p] = (await listSchedules(p)).schedules;
     agentsStatus[p] = {};
     // 主会话：找到该项目主会话（ownerless 且 cwd 是该项目）。
     const mainConv = conversations.find((c) => c.project === p && !c.owner);
@@ -243,6 +265,7 @@ export async function boxSnapshot(harness) {
     agentCatalogByProject,
     globalAgents: await listGlobalAgents(),
     assistantByProject,
+    schedulesByProject,
     agentsStatus,
     availableTools: AVAILABLE_TOOL_NAMES,
   };

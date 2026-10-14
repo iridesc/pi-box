@@ -1,0 +1,7 @@
+.git
+.env
+.env.*
+agent-data
+workspace
+pi-boxd/node_modules
+**/.DS_Store

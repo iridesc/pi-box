@@ -20,6 +20,9 @@ services:
       - PI_BOXD_DATA_DIR=/home/agent/.pi-boxd
       - PI_BOXD_WEB_DIR=/home/pi-boxd/app/web
       - PORT=8790
+      # 应用层 HTTP Basic Auth；密码为空时仅适合本地开发。
+      - PI_BOX_AUTH_USERNAME=${PI_BOX_AUTH_USERNAME:-pi}
+      - PI_BOX_AUTH_PASSWORD=${PI_BOX_AUTH_PASSWORD:-}
     env_file:
       - path: .env
         required: false

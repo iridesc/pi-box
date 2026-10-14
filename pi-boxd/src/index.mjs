@@ -5,6 +5,9 @@ import { initProvider, refreshProvider, getUseFaux, currentModel, getHasKey } fr
 import { createHarness, ensureProjectConversations, boxSnapshot } from "./harness.mjs";
 import { buildExtraRoutes } from "./routes.mjs";
 import { join } from "node:path";
+import { listProjects } from "./agents.mjs";
+import { startProjectScheduler } from "./schedules.mjs";
+import { installBasicAuth } from "./auth.mjs";
 
 // 初始化 model（用 config.json 或回退到 faux）
 await initProvider();
@@ -19,6 +22,9 @@ await ensureProjectConversations(harness);
 // 主动恢复上次进程遗留的 generation/tool/reporter 等持久任务。
 harness.resume();
 
+// 项目级时钟只负责发现到期 occurrence；实际执行通过 Durable submission 进入项目助理。
+const projectScheduler = startProjectScheduler({ harness, context, listProjects });
+
 // 启动 HTTP 服务
 const server = createWebServer({
   harness,
@@ -30,10 +36,17 @@ const server = createWebServer({
   webDir: WEB_DIR,
 });
 
+const auth = installBasicAuth(server);
+
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`pi-boxd 已启动: http://localhost:${PORT}`);
   console.log(`项目目录: ${PROJECTS_DIR}`);
   console.log(`全局 agent 库: ${GLOBAL_AGENTS_DIR}`);
   console.log(`存储: ${join(DATA_DIR, "session.sqlite")}`);
   console.log(`模型: ${getUseFaux() ? "faux（离线）" : `${currentModel.provider}/${currentModel.modelId}`}`);
+  console.log(`HTTP Basic Auth: ${auth.enabled ? `已启用（用户 ${auth.username}）` : "未启用"}`);
 });
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => projectScheduler.close());
+}

@@ -4,7 +4,7 @@
 //   项目覆盖        <PROJECTS_DIR>/<project>/.pi/agents/<name>.md
 //   项目助理        <PROJECTS_DIR>/<project>/.pi/assistant.md   —— prompt + agents:[引用列表]
 // 加载链：项目内同名优先 → 全局库兜底
-import { readdir, readFile, writeFile, mkdir, unlink } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdir, unlink, rename } from "node:fs/promises";
 import { basename, join, dirname } from "node:path";
 import { PROJECTS_DIR, GLOBAL_AGENTS_DIR } from "./paths.mjs";
 import { models, currentModel } from "./model.mjs";
@@ -235,6 +235,30 @@ export async function saveAgentFile(projectName, name, scope, def) {
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, serializeAgentDef(def), "utf-8");
   return file;
+}
+
+/** 重命名 Agent 定义；全局 Agent 同时迁移各项目助理中的授权引用。 */
+export async function renameAgentFile(projectName, oldName, newName, scope) {
+  if (oldName === newName) return agentFilePath(projectName, newName, scope);
+  const oldFile = agentFilePath(projectName, oldName, scope);
+  const newFile = agentFilePath(projectName, newName, scope);
+  try {
+    await readFile(newFile, "utf-8");
+    throw new Error(`Agent “${newName}”已存在`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await mkdir(dirname(newFile), { recursive: true });
+  await rename(oldFile, newFile);
+  if (scope === "global") {
+    for (const project of await listProjects()) {
+      const assistant = await loadAssistant(project);
+      if (!(assistant.agents ?? []).includes(oldName)) continue;
+      const agents = assistant.agents.map((name) => name === oldName ? newName : name);
+      await saveAssistantFile(project, { ...assistant, agents: [...new Set(agents)] });
+    }
+  }
+  return newFile;
 }
 
 /** 删除 agent 定义文件 */

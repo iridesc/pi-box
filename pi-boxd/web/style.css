@@ -229,6 +229,34 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 }
 .tree-sep-add:hover { background: #30363d; color: #79c0ff; }
 .tree-agent-empty { color: #6e7681; font-size: 11px; padding-top: 3px; padding-bottom: 3px; }
+.tree-schedule-head .tree-sep-label { cursor: pointer; }
+.tree-schedule-head.selected, .tree-schedule-head:hover { color: #79c0ff; background: #161b22; }
+.schedule-dot { width: 8px; height: 8px; border-radius: 50%; background: #484f58; margin: 0 6px 0 4px; flex: 0 0 auto; }
+.schedule-dot-on { background: #3fb950; box-shadow: 0 0 5px rgba(63, 185, 80, .45); }
+
+/* ── 项目定时任务 ── */
+.schedule-head-action { margin-left: auto; }
+.schedule-intro { margin-bottom: 14px; }
+.schedule-list { display: flex; flex-direction: column; gap: 10px; }
+.schedule-empty { padding: 30px; text-align: center; color: #6e7681; border: 1px dashed #30363d; border-radius: 6px; }
+.schedule-card { padding: 12px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+.schedule-card.selected { border-color: #1f6feb; }
+.schedule-card-title { display: flex; align-items: center; gap: 8px; }
+.schedule-badge { padding: 2px 6px; border-radius: 10px; font-size: 10px; color: #8b949e; background: #21262d; }
+.schedule-badge.enabled { color: #7ee787; background: rgba(46, 160, 67, .18); }
+.schedule-cron { margin-top: 8px; color: #79c0ff; font-size: 12px; }
+.schedule-timezone { margin-top: 3px; font-size: 11px; }
+.schedule-prompt { margin: 8px 0; white-space: pre-wrap; color: #c9d1d9; }
+.schedule-actions { display: flex; gap: 8px; margin-top: 10px; }
+.schedule-editor-modal { width: 560px; }
+.schedule-editor-modal .schedule-enabled { margin: 8px 0; }
+.schedule-rule-fields { padding: 10px 12px 2px; margin: 0 0 10px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+.schedule-inline-rule { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: #c9d1d9; font-size: 13px; }
+.schedule-inline-rule input { width: 90px; }
+.schedule-inline-rule select { width: 110px; }
+.schedule-weekdays { display: flex; flex-wrap: wrap; gap: 6px; }
+.schedule-weekday { display: inline-flex; align-items: center; gap: 4px; padding: 5px 8px; border: 1px solid #30363d; border-radius: 5px; cursor: pointer; }
+.schedule-weekday:has(input:checked) { color: #79c0ff; border-color: #1f6feb; background: rgba(31, 111, 235, .12); }
 
 /* ── Agent 状态圆点 ── */
 .agent-dot {
@@ -377,6 +405,9 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
   width: 100%; min-width: 0; resize: vertical; font-family: ui-monospace, monospace;
 }
 .drawer-submodal .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.project-delete-modal { width: 480px; }
+.delete-warning { margin-bottom: 14px; padding: 10px; color: #ffb4ad; background: rgba(248, 81, 73, .1); border: 1px solid rgba(248, 81, 73, .45); border-radius: 5px; }
+.confirm-name-input { width: 100%; margin-top: 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; padding: 7px 10px; font-family: inherit; }
 
 /* ── 主题与密度切换 ── */
 body.theme-light { background: #f6f8fa; color: #1f2328; }

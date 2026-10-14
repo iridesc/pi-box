@@ -1,20 +1,80 @@
 // HTTP 路由（6 个 extraRoutes）
 import { mkdir, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
 import { readBody, loadConfig, saveConfig, loadMcpConfig, saveMcpConfig, listSkills, setSkillEnabled, loadPrefs, savePrefs } from "./io.mjs";
 import { PROJECTS_DIR, DATA_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
-import { syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
+import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
+import { renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
+import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upsertSchedule } from "./schedules.mjs";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
 
 export function buildExtraRoutes(harness, context, mcpBridge) {
   return {
+    // 项目级定时任务：定义保存在项目 .pi/schedules.json，到点后提交给项目助理。
+    "/api/schedules": {
+      methods: ["GET", "POST"],
+      async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const input = req.method === "GET" ? { project: url.searchParams.get("project") } : await readBody(req);
+        if (!input.project || !(await listProjects()).includes(input.project)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "项目不存在" }));
+        }
+        try {
+          const result = req.method === "GET"
+            ? await listSchedules(input.project)
+            : { schedule: await upsertSchedule(input.project, input) };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    "/api/schedules/delete": {
+      method: "POST",
+      async handler(req, res) {
+        const { project, id } = await readBody(req);
+        try {
+          await deleteSchedule(project, id);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (error) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    "/api/schedules/run": {
+      method: "POST",
+      async handler(req, res) {
+        const { project, id } = await readBody(req);
+        const schedule = (await loadScheduleStore(project)).schedules.find((item) => item.id === id);
+        if (!schedule) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "定时任务不存在" }));
+        }
+        try {
+          const run = await triggerSchedule(harness, context, project, schedule, {
+            manual: true,
+            occurrenceId: `manual:${randomUUID()}`,
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, run }));
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
     // 项目：GET 列表 / POST 新建
     "/api/projects": {
       methods: ["GET", "POST"],
@@ -97,6 +157,31 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           await rename(newCwd, oldCwd).catch(() => {});
           throw error;
         }
+      },
+    },
+    // 项目删除采用工作区内软删除，目录可从 .pi-box-trash 恢复。
+    "/api/projects/delete": {
+      method: "POST",
+      async handler(req, res) {
+        const { name, confirmation } = await readBody(req);
+        if (!name || confirmation !== name || !(await listProjects()).includes(name)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "项目不存在或确认名称不匹配" }));
+        }
+        const cwd = join(PROJECTS_DIR, name);
+        const trashDir = join(PROJECTS_DIR, ".pi-box-trash");
+        const trashName = `${name}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+        await mkdir(trashDir, { recursive: true });
+        const { items } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+        for (const record of items) {
+          const agent = await harness.snapshot(AgentDoc, record.id, context);
+          if (agent?.cwd !== cwd) continue;
+          const conversation = await harness.conversation(record.id, context);
+          await conversation?.abort(context, { background: true }).catch(() => {});
+        }
+        await rename(cwd, join(trashDir, trashName));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, project: name, recoverable: true, trashName }));
       },
     },
     // provider 元数据
@@ -203,7 +288,7 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.end(JSON.stringify({ project, agents: await listAgents(project) }));
           return;
         }
-        const { project, name, scope = "project", model: m, tools, mcps, instructions } = await readBody(req);
+        const { project, name, oldName, scope = "project", model: m, tools, mcps, instructions } = await readBody(req);
         if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
@@ -238,10 +323,19 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.end(JSON.stringify({ error: `MCP 不存在或已停用：${invalidMcps.join(", ")}` }));
           return;
         }
-        const file = await saveAgentFile(project, name, scope, { model: m, tools, mcps: Array.isArray(mcps) ? mcps : [], instructions });
-        await syncAfterConfigChange(harness, { scope, projectName: project, agentName: name });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, name, scope, file }));
+        try {
+          if (oldName && oldName !== name) {
+            await renameAgentFile(project, oldName, name, scope);
+            await renameSubagentRecords(harness, { scope, projectName: project, oldName, newName: name });
+          }
+          const file = await saveAgentFile(project, name, scope, { model: m, tools, mcps: Array.isArray(mcps) ? mcps : [], instructions });
+          await syncAfterConfigChange(harness, { scope, projectName: project, agentName: name });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, name, scope, file }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
       },
     },
     // 全局 Agent 独立目录（系统设置中的管理页使用）。

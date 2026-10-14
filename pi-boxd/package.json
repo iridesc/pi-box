@@ -14,6 +14,7 @@
     "@earendil-works/pi-codemode": "1.2.0",
     "@earendil-works/pi-durable": "1.2.0",
     "@earendil-works/pi-mcp": "1.2.0",
+    "croner": "^9.1.0",
     "pi-durable-web": "github:iridesc/pi-durable-web#a8beadc"
   },
   "overrides": {
