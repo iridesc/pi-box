@@ -2,12 +2,20 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Cron } from "croner";
+import { configure } from "@earendil-works/pi-durable";
 
-import { PROJECTS_DIR } from "./paths.mjs";
+import { assistantInstructions, listAgents, loadAssistant, resolveAgentModel } from "./agents.mjs";
+import { AnchorTask, setConversationMeta } from "./extension.mjs";
+import { META_DIR, META_PROJECT, PROJECTS_DIR } from "./paths.mjs";
 
 const MAX_RUNS = 100;
 const DEFAULT_TIMEZONE = process.env.TZ || "Asia/Shanghai";
 const RULE_TYPES = new Set(["interval", "daily", "weekdays", "weekly", "monthly", "once"]);
+const SESSION_MODES = new Set(["assistant", "isolated"]);
+
+function projectCwd(project) {
+  return project === META_PROJECT ? META_DIR : join(PROJECTS_DIR, project);
+}
 
 function schedulePath(project) {
   return join(PROJECTS_DIR, project, ".pi", "schedules.json");
@@ -175,7 +183,9 @@ export function validateScheduleInput(input) {
   } catch (error) {
     throw new Error(`执行规则或时区无效：${error.message}`);
   }
-  return { name, prompt, ...compiled, timezone, enabled: input.enabled !== false };
+  const sessionMode = String(input.sessionMode ?? "isolated");
+  if (!SESSION_MODES.has(sessionMode)) throw new Error("请选择有效的会话方式");
+  return { name, prompt, ...compiled, timezone, enabled: input.enabled !== false, sessionMode };
 }
 
 export async function listSchedules(project) {
@@ -183,6 +193,8 @@ export async function listSchedules(project) {
   return {
     schedules: store.schedules.map((schedule) => ({
       ...schedule,
+      // 旧任务没有该字段；保持上线前的主会话行为。
+      sessionMode: schedule.sessionMode ?? "assistant",
       rule: schedule.rule ?? inferLegacyRule(schedule.cron),
       description: scheduleDescription(schedule),
       nextRunAt: nextScheduleRun(schedule),
@@ -223,7 +235,7 @@ async function appendRun(project, run, updateSchedule) {
 }
 
 async function projectConversation(harness, project, context) {
-  const cwd = join(PROJECTS_DIR, project);
+  const cwd = projectCwd(project);
   const { AgentDoc } = await import("@earendil-works/pi-durable");
   const { items } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
   for (const record of items) {
@@ -234,6 +246,42 @@ async function projectConversation(harness, project, context) {
   return undefined;
 }
 
+async function isolatedScheduleConversation(harness, project, schedule, run, context) {
+  const main = await projectConversation(harness, project, context);
+  if (!main) throw new Error(`找不到项目“${project}”的助理会话`);
+  const assistant = await loadAssistant(project);
+  const agents = await listAgents(project);
+  // Anchor 会立即 terminal，因此必须和 owned conversation 在同一个 transaction 内原子创建。
+  const conversationId = await harness.commit(async (tx) => {
+    const anchor = await tx.createTask(AnchorTask, null, {
+      ownership: { kind: "conversation" },
+      conversationId: main.id,
+      background: true,
+    });
+    const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+    await configure(tx, child.id, {
+      model: resolveAgentModel(assistant.model),
+      instructions: assistantInstructions(project, assistant, agents),
+      cwd: projectCwd(project),
+    });
+    await setConversationMeta(tx, child.id, {
+      project,
+      actorType: "assistant",
+      actorName: "助理",
+      source: "schedule",
+      title: schedule.name,
+      parentConversationId: String(main.id),
+      scheduleId: schedule.id,
+      scheduleRunId: run.id,
+      createdAt: run.triggeredAt,
+    });
+    return child.id;
+  }, context);
+  const conversation = await harness.conversation(conversationId, context);
+  if (!conversation) throw new Error(`未能创建项目“${project}”的独立定时任务会话`);
+  return conversation;
+}
+
 export async function triggerSchedule(harness, context, project, schedule, options = {}) {
   const scheduledAt = options.scheduledAt ?? new Date().toISOString();
   const occurrenceId = options.occurrenceId ?? `${schedule.id}:${scheduledAt}`;
@@ -242,10 +290,14 @@ export async function triggerSchedule(harness, context, project, schedule, optio
     id: randomUUID(), scheduleId: schedule.id, scheduleName: schedule.name,
     scheduledAt, triggeredAt: new Date().toISOString(), status: "submitted", requestId,
     manual: options.manual === true,
+    sessionMode: schedule.sessionMode ?? "assistant",
   };
   try {
-    const conversation = await projectConversation(harness, project, context);
+    const conversation = run.sessionMode === "isolated"
+      ? await isolatedScheduleConversation(harness, project, schedule, run, context)
+      : await projectConversation(harness, project, context);
     if (!conversation) throw new Error(`找不到项目“${project}”的助理会话`);
+    run.conversationId = String(conversation.id);
     const submission = await conversation.submit({
       type: "input",
       content: schedule.prompt,
@@ -253,7 +305,7 @@ export async function triggerSchedule(harness, context, project, schedule, optio
       whenBusy: "followUp",
       entry: {
         kind: "pibox.schedule",
-        data: { scheduleId: schedule.id, scheduleName: schedule.name, scheduledAt, occurrenceId },
+        data: { scheduleId: schedule.id, scheduleName: schedule.name, scheduledAt, occurrenceId, sessionMode: run.sessionMode },
       },
     }, context);
     run.submissionId = String(submission.id);

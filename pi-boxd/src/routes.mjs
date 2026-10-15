@@ -9,6 +9,7 @@ import { refreshProvider, currentModel, testProviderConnection } from "./model.m
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
 import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, agentFilePath } from "./agents.mjs";
 import { renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
+import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
 import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upsertSchedule } from "./schedules.mjs";
 
@@ -107,6 +108,10 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           {
             ownership: { kind: "ownerless" },
             agent: { model: resolveAgentModel(assistant.model), instructions: assistantInstructions(name, assistant, agents), cwd },
+            init: (tx, conversationId) => setConversationMeta(tx, conversationId, {
+              project: name, actorType: "assistant", actorName: "助理", source: "main",
+              title: "项目主会话", createdAt: new Date().toISOString(),
+            }),
           },
           context,
         );

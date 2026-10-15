@@ -29,7 +29,7 @@ header h1 { font-size: 15px; margin: 0; color: #58a6ff; }
 main {
   flex: 1;
   display: grid;
-  grid-template-columns: 300px 1fr 320px;
+  grid-template-columns: 260px 280px minmax(420px, 1fr) 320px;
   min-height: 0;
 }
 section { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid #21262d; }
@@ -49,6 +49,20 @@ section:last-child { border-right: none; }
 .panel-head button:disabled { opacity: .5; cursor: not-allowed; }
 
 .scroll { flex: 1; overflow-y: auto; padding: 6px; }
+
+/* ── 第二栏：角色会话 ── */
+.session-empty { padding: 24px 12px; color: #6e7681; line-height: 1.7; text-align: center; }
+.session-context { padding: 8px 10px; margin-bottom: 6px; color: #8b949e; border-bottom: 1px solid #21262d; }
+.session-context strong { display: block; margin-bottom: 3px; color: #e6edf3; }
+.session-item { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 3px 6px; padding: 9px 8px; margin-bottom: 4px; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.session-item:hover { background: #161b22; border-color: #30363d; }
+.session-item.selected { background: rgba(31, 111, 235, .16); border-color: #1f6feb; }
+.session-dot { grid-row: 1 / span 2; align-self: center; width: 8px; height: 8px; border-radius: 50%; background: #58a6ff; }
+.session-dot-running { background: #3fb950; animation: agent-pulse 1s ease-in-out infinite; }
+.session-dot-waiting-tool { background: #d29922; animation: agent-pulse 1.3s ease-in-out infinite; }
+.session-dot-error { background: #f85149; }
+.session-title { overflow: hidden; color: #c9d1d9; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.session-meta { overflow: hidden; color: #8b949e; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
 
 /* ── 左：项目树 ── */
 .tree-empty { color: #8b949e; padding: 12px; font-size: 12px; }
@@ -92,7 +106,7 @@ section:last-child { border-right: none; }
 .global-agent-choice { min-height: 28px; }
 .fixed-field { flex: 1; color: #c9d1d9; padding: 6px 10px; border: 1px solid #30363d; border-radius: 4px; background: #161b22; }
 
-/* ── 中：视图 ── */
+/* ── 第三栏：对话 / 配置视图 ── */
 #panel-view { display: flex; flex-direction: column; min-height: 0; }
 #view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .view-empty {
@@ -170,7 +184,7 @@ section:last-child { border-right: none; }
 .markdown-body a:hover { text-decoration: underline; }
 .markdown-body hr { height: 1px; margin: 14px 0; border: 0; background: #30363d; }
 
-/* ── 中：表单 ── */
+/* ── 第三栏：表单 ── */
 .view-form { padding: 14px; overflow-y: auto; flex: 1; }
 .form-label { color: #8b949e; font-size: 12px; margin: 12px 0 4px; }
 .form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
@@ -211,7 +225,7 @@ section:last-child { border-right: none; }
 .form-status.err { color: #f85149; }
 .modal-hint { color: #8b949e; font-size: 11px; margin-right: auto; }
 
-/* ── 右：任务图 ── */
+/* ── 第四栏：任务图 ── */
 .task-node {
   padding: 5px 8px; border-radius: 4px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -279,6 +293,9 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 .schedule-badge.enabled { color: #7ee787; background: rgba(46, 160, 67, .18); }
 .schedule-cron { margin-top: 8px; color: #79c0ff; font-size: 12px; }
 .schedule-timezone { margin-top: 3px; font-size: 11px; }
+.schedule-session-mode { margin-top: 3px; font-size: 11px; }
+.schedule-last-run { margin-top: 4px; font-size: 11px; }
+.schedule-session-help { margin: -4px 0 12px; line-height: 1.5; }
 .schedule-prompt { margin: 8px 0; white-space: pre-wrap; color: #c9d1d9; }
 .schedule-actions { display: flex; gap: 8px; margin-top: 10px; }
 .project-schedules { margin-top: 22px; padding-top: 4px; border-top: 1px solid #30363d; }
@@ -298,7 +315,7 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 .schedule-weekday { display: inline-flex; align-items: center; gap: 4px; padding: 5px 8px; border: 1px solid #30363d; border-radius: 5px; cursor: pointer; }
 .schedule-weekday:has(input:checked) { color: #79c0ff; border-color: #1f6feb; background: rgba(31, 111, 235, .12); }
 
-/* ── Agent 状态圆点 ── */
+/* 旧状态样式保留给兼容节点；角色本身不再显示状态，状态属于第二栏的会话。 */
 .agent-dot {
   display: inline-block;
   width: 8px;
@@ -321,6 +338,10 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 @keyframes agent-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.7); }
   50%      { opacity: 0.45; box-shadow: 0 0 0 5px rgba(63, 185, 80, 0); }
+}
+
+@media (max-width: 1180px) {
+  main { grid-template-columns: 230px 250px minmax(380px, 1fr) 280px; }
 }
 
 /* ── SSE 状态指示器（顶部状态栏右侧） ── */

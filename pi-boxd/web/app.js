@@ -1,15 +1,12 @@
-// pi-boxd 前端：项目 → 助理 / 子 agent
-// - 左：项目树（唯一主会话入口、子 agent 池）
-// - 中：对话 / 助理配置 / agent 编辑器
-// - 右：任务图（live task）
+// pi-boxd 前端：项目/角色 → 会话 → 对话 → 当前会话任务图
 let state = null;
 // selected = { type: "conversation"|"assistant"|"agent", project, id?, name? }
 let selected = null;
 let expandedProjects = new Set();
 let expandedProjectSchedules = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
-let agentsStatus = {}; // project -> { name: { status, conversationId } }，实时
 let schedulesCache = {}; // project -> schedule 列表
+let scheduleRunsCache = {}; // project -> 最近运行记录
 let cfgProviders = [];
 let cfgSettings = { activeProvider: "openai", providers: {} };
 const MASKED_API_KEY = "********";
@@ -68,6 +65,7 @@ async function refresh() {
 function render() {
   renderStatus();
   renderTree();
+  renderSessions();
   renderView();
   renderTaskGraph();
 }
@@ -120,10 +118,11 @@ function renderTree() {
     if (!open) continue;
 
     // 助理
-    const mainConversation = state.conversations.find((c) => c.project === proj && !c.owner);
     const aNode = el("div", "tree-item tree-assistant");
     aNode.classList.add("tree-level-1");
-    const aSel = selected?.type === "conversation" && selected.id === mainConversation?.id;
+    const selectedConversation = selected?.type === "conversation" ? state.conversations.find((item) => item.id === selected.id) : null;
+    const aSel = (selected?.type === "actor" && selected.project === proj && selected.actorType === "assistant")
+      || (selectedConversation?.project === proj && selectedConversation.actorType === "assistant");
     if (aSel) aNode.classList.add("selected");
     aNode.appendChild(el("span", "tree-arrow", ""));
     aNode.appendChild(el("span", "tree-label", "🤖 助理"));
@@ -144,15 +143,13 @@ function renderTree() {
     }
     aNode.appendChild(assistantSettings);
     aNode.onclick = () => {
-      if (!mainConversation) return;
-      selected = { type: "conversation", project: proj, id: mainConversation.id };
+      selected = { type: "actor", project: proj, actorType: "assistant", actorName: "助理" };
       render();
     };
     root.appendChild(aNode);
 
     // 子 agent：直接挂在项目下，不再有折叠组（需求：随时看到圆点状态）
     const agents = agentsCache[proj] ?? [];
-    const projStatus = agentsStatus[proj] ?? {};
     // 子 Agent 区域与新建入口始终存在，空项目也必须能创建第一个 Agent。
     const sep = el("div", "tree-sep");
     sep.appendChild(el("span", "tree-sep-label", "子 Agent"));
@@ -176,14 +173,9 @@ function renderTree() {
     }
     for (const a of agents) {
       const n = el("div", "tree-item tree-level-2");
-      const isSel = selected?.type === "conversation" && selected.id === projStatus[a.name]?.conversationId;
+      const isSel = (selected?.type === "actor" && selected.project === proj && selected.actorType === "agent" && selected.actorName === a.name)
+        || (selectedConversation?.project === proj && selectedConversation.actorType === "agent" && selectedConversation.actorName === a.name);
       if (isSel) n.classList.add("selected");
-
-      // 圆点
-      const status = projStatus[a.name]?.status ?? "unknown";
-      const dot = el("span", `agent-dot agent-dot-${status}`);
-      dot.title = `状态：${agentStatusLabel(status)}`;
-      n.appendChild(dot);
       n.appendChild(el("span", "tree-arrow", ""));
       const avatar = el("span", `agent-avatar agent-avatar-${a.scope}`, "🤖");
       avatar.title = a.scope === "global" ? "全局 Agent" : a.scope === "meta" ? "元项目 Agent" : "项目 Agent";
@@ -213,14 +205,9 @@ function renderTree() {
       const tag = a.scope === "meta" ? "元" : a.scope === "project" ? "项目" : "全局";
       n.appendChild(el("span", "tree-tag", tag));
 
-      // 单击名字：切到子 agent 聊天框（未启动则提示）
+      // 单击角色：第二栏展示该 Agent 的全部会话。
       n.onclick = () => {
-        const s = projStatus[a.name];
-        if (!s || !s.conversationId) {
-          flashHint(n, "该 agent 尚未启动，需主助理派任务时才会被创建");
-          return;
-        }
-        selected = { type: "conversation", project: proj, id: s.conversationId, isAgent: a.name };
+        selected = { type: "actor", project: proj, actorType: "agent", actorName: a.name };
         render();
       };
       root.appendChild(n);
@@ -229,7 +216,60 @@ function renderTree() {
   }
 }
 
-// ─── 中：视图 ───────────────────────────────────────────────────────────────
+function sessionSourceLabel(conversation) {
+  if (conversation.source === "main") return "项目主会话";
+  if (conversation.source === "schedule") return "定时任务";
+  if (conversation.source === "subagent") return `由助理会话 #${conversation.parentConversationId ?? "—"} 派发`;
+  return conversation.owner ? "后台会话" : "项目会话";
+}
+
+function actorFromSelection() {
+  if (selected?.type === "actor") return selected;
+  if (selected?.type !== "conversation") return null;
+  const conversation = state.conversations.find((item) => item.id === selected.id);
+  if (!conversation?.actorType) return null;
+  return { project: conversation.project, actorType: conversation.actorType, actorName: conversation.actorName };
+}
+
+function renderSessions() {
+  const body = document.getElementById("session-list");
+  body.replaceChildren();
+  const actor = actorFromSelection();
+  if (!actor) {
+    body.appendChild(el("div", "session-empty", "请在第一栏选择一个助理或 Agent，这里会显示它的全部会话。"));
+    return;
+  }
+  const heading = el("div", "session-context");
+  heading.appendChild(el("strong", "", actor.actorType === "assistant" ? "🤖 助理" : `🤖 ${actor.actorName}`));
+  heading.appendChild(el("span", "", actor.project));
+  body.appendChild(heading);
+  const conversations = state.conversations
+    .filter((item) => item.project === actor.project && item.actorType === actor.actorType
+      && (actor.actorType !== "agent" || item.actorName === actor.actorName))
+    .sort((a, b) => {
+      const active = (value) => value.status === "running" || value.status === "waiting-tool" ? 1 : 0;
+      return active(b) - active(a) || String(b.createdAt ?? b.id).localeCompare(String(a.createdAt ?? a.id));
+    });
+  if (conversations.length === 0) {
+    body.appendChild(el("div", "session-empty", actor.actorType === "agent" ? "这个 Agent 还没有会话；助理首次派发任务后会自动创建。" : "暂无会话。"));
+    return;
+  }
+  for (const conversation of conversations) {
+    const item = el("div", `session-item${selected?.type === "conversation" && selected.id === conversation.id ? " selected" : ""}`);
+    const dot = el("span", `session-dot session-dot-${conversation.status ?? "idle"}`);
+    dot.title = agentStatusLabel(conversation.status ?? "idle");
+    item.appendChild(dot);
+    item.appendChild(el("div", "session-title", conversation.title || (conversation.actorType === "assistant" ? "助理会话" : conversation.actorName) || `会话 #${conversation.id}`));
+    item.appendChild(el("div", "session-meta", `${sessionSourceLabel(conversation)} · #${conversation.id}${conversation.createdAt ? ` · ${formatDateTime(conversation.createdAt)}` : ""}`));
+    item.onclick = () => {
+      selected = { type: "conversation", project: conversation.project, id: conversation.id };
+      render();
+    };
+    body.appendChild(item);
+  }
+}
+
+// ─── 第三栏：对话 / 配置视图 ────────────────────────────────────────────────
 function renderView() {
   const view = document.getElementById("view");
   view.innerHTML = "";
@@ -240,6 +280,11 @@ function renderView() {
   }
   view.className = "";
   if (selected.type === "project") return renderProjectForm(view);
+  if (selected.type === "actor") {
+    view.className = "view-empty";
+    view.textContent = "选择一个会话";
+    return;
+  }
   if (selected.type === "conversation") return renderConversation(view);
   if (selected.type === "assistant") return renderAssistantForm(view);
 }
@@ -258,6 +303,7 @@ async function reloadSchedules(project) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "读取定时任务失败");
   schedulesCache[project] = data.schedules ?? [];
+  scheduleRunsCache[project] = data.runs ?? [];
   if (state) state.schedulesByProject = schedulesCache;
   return data;
 }
@@ -277,8 +323,13 @@ function fillScheduleList(body, project, schedules) {
     card.appendChild(title);
     card.appendChild(el("div", "schedule-cron", schedule.description || "自定义时间规则"));
     card.appendChild(el("div", "muted schedule-timezone", `时区：${timezoneLabel(schedule.timezone)}（${schedule.timezone}）`));
+    card.appendChild(el("div", "muted schedule-session-mode", schedule.sessionMode === "isolated" ? "会话：每次创建独立会话" : "会话：继续使用项目助理会话"));
     card.appendChild(el("div", "schedule-prompt", schedule.prompt));
     card.appendChild(el("div", "muted", `上次触发：${formatDateTime(schedule.lastRunAt)}　下次执行：${formatDateTime(schedule.nextRunAt)}`));
+    const latestRun = (scheduleRunsCache[project] ?? []).find((item) => item.scheduleId === schedule.id);
+    if (latestRun?.conversationId) {
+      card.appendChild(el("div", "muted schedule-last-run", `最近运行会话：#${latestRun.conversationId}${latestRun.sessionMode === "isolated" ? "（独立）" : "（项目助理）"}`));
+    }
     const actions = el("div", "schedule-actions");
     const run = el("button", "btn-secondary", "立即运行");
     run.onclick = async () => {
@@ -287,12 +338,24 @@ function fillScheduleList(body, project, schedules) {
       const response = await fetch("/api/schedules/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project, id: schedule.id }) });
       const result = await response.json();
       run.disabled = false;
-      run.textContent = response.ok ? "已提交给助理" : `失败：${result.error || "未知错误"}`;
-      if (response.ok) setTimeout(() => render(), 800);
+      run.textContent = response.ok ? "已提交" : `失败：${result.error || "未知错误"}`;
+      if (response.ok) {
+        await Promise.all([refresh(), reloadSchedules(project)]);
+        render();
+      }
     };
     const edit = el("button", "btn-secondary", "编辑");
     edit.onclick = () => openScheduleEditor(project, schedule);
     actions.append(run, edit);
+    if (latestRun?.conversationId) {
+      const viewRun = el("button", "btn-secondary", "查看最近会话");
+      viewRun.onclick = async () => {
+        if (!state.conversations.some((item) => item.id === String(latestRun.conversationId))) await refresh();
+        selected = { type: "conversation", project, id: String(latestRun.conversationId) };
+        render();
+      };
+      actions.appendChild(viewRun);
+    }
     card.appendChild(actions);
     body.appendChild(card);
   }
@@ -335,6 +398,25 @@ function openScheduleEditor(project, existing = null) {
   }
   timezone.value = existing?.timezone ?? browserTimezone;
   modal.appendChild(formRow("时区", timezone));
+
+  const sessionMode = document.createElement("select");
+  for (const [value, label] of [["isolated", "每次创建独立会话（推荐）"], ["assistant", "继续使用项目助理会话"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    sessionMode.appendChild(option);
+  }
+  sessionMode.value = existing?.sessionMode ?? (existing ? "assistant" : "isolated");
+  modal.appendChild(formRow("会话方式", sessionMode));
+  const sessionHelp = el("div", "muted schedule-session-help");
+  const updateSessionHelp = () => {
+    sessionHelp.textContent = sessionMode.value === "isolated"
+      ? "使用相同的项目助理配置，但不读取或污染主会话历史；结果保存在本次独立会话中。"
+      : "可以读取之前的项目助理对话，执行过程和结果会进入项目助理主会话。";
+  };
+  sessionMode.onchange = updateSessionHelp;
+  updateSessionHelp();
+  modal.appendChild(sessionHelp);
 
   let readRule = () => initialRule;
   const renderRuleFields = () => {
@@ -415,7 +497,7 @@ function openScheduleEditor(project, existing = null) {
   prompt.rows = 7;
   prompt.value = existing?.prompt ?? "请检查当前项目的状态，完成需要处理的工作，并汇报结果。";
   modal.appendChild(prompt);
-  modal.appendChild(el("div", "muted", "触发后进入项目主会话；助理可自行派发任意已启用的子 Agent。"));
+  modal.appendChild(el("div", "muted", "无论选择哪种会话方式，助理都可以派发当前项目中已启用的子 Agent。"));
   const status = el("div", "form-status");
   modal.appendChild(status);
 
@@ -443,7 +525,7 @@ function openScheduleEditor(project, existing = null) {
     status.textContent = "正在保存…";
     const response = await fetch("/api/schedules", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project, id: existing?.id, name: name.value, rule: readRule(), timezone: timezone.value, enabled: enabled.checked, prompt: prompt.value }),
+      body: JSON.stringify({ project, id: existing?.id, name: name.value, rule: readRule(), timezone: timezone.value, sessionMode: sessionMode.value, enabled: enabled.checked, prompt: prompt.value }),
     });
     const result = await response.json();
     save.disabled = false;
@@ -544,7 +626,7 @@ function renderProjectForm(view) {
   };
   summary.append(summaryTitle, count, addSchedule);
   scheduleSection.appendChild(summary);
-  scheduleSection.appendChild(el("div", "muted schedule-intro", "到点后向项目助理提交一次任务；助理可以调用项目中全部已启用的子 Agent。"));
+  scheduleSection.appendChild(el("div", "muted schedule-intro", "到点后由项目助理处理任务；可选择继续主会话或为每次运行创建独立会话，助理可以调用项目中全部已启用的子 Agent。"));
   const scheduleList = el("div", "schedule-list project-schedule-list");
   fillScheduleList(scheduleList, oldName, schedulesCache[oldName] ?? []);
   scheduleSection.appendChild(scheduleList);
@@ -809,17 +891,11 @@ function renderConversation(view) {
     view.textContent = "（会话已不存在）";
     return;
   }
-  const isAgentView = selected.isAgent !== undefined; // 从子 agent 节点点进来
+  const isAgentView = conv.actorType === "agent";
   const title = isAgentView
-    ? `🤖 子 Agent · ${selected.isAgent}（会话 #${conv.id}）`
-    : conv.owner
-      ? `子会话 #${conv.id}`
-      : `${conv.project} · 主对话`;
-  const sub = isAgentView
-    ? `由项目 ${conv.project} 助理派发 · task #${conv.owner?.taskId ?? "—"}`
-    : conv.owner
-      ? `owned by task #${conv.owner.taskId}`
-      : "项目助理";
+    ? `🤖 子 Agent · ${conv.actorName || "未命名"}（会话 #${conv.id}）`
+    : `🤖 ${conv.title || "助理会话"}（#${conv.id}）`;
+  const sub = `${conv.project} · ${sessionSourceLabel(conv)}`;
   const head = el("div", "view-head");
   head.appendChild(el("span", "view-title", title));
   head.appendChild(el("span", "view-sub", sub));
@@ -833,7 +909,7 @@ function renderConversation(view) {
   const form = document.createElement("form");
   form.className = "view-input";
   const input = document.createElement("input");
-  input.placeholder = isAgentView ? `和子 Agent ${selected.isAgent} 对话…` : "和项目助理对话…";
+  input.placeholder = isAgentView ? `和子 Agent ${conv.actorName || ""} 对话…` : "和项目助理对话…";
   input.autocomplete = "off";
   input.disabled = !state.hasKey;
   const btn = el("button", "", "发送");
@@ -973,11 +1049,37 @@ async function populateAgentModelSelect(select, selectedValue) {
   }
 }
 
-// ─── 右：任务图 ─────────────────────────────────────────────────────────────
+// ─── 第四栏：当前会话任务图 ──────────────────────────────────────────────────
 function renderTaskGraph() {
-  const tasks = Object.values(state.taskGraph.tasks);
+  const allTasks = Object.values(state.taskGraph.tasks);
   const elx = document.getElementById("task-graph");
   elx.innerHTML = "";
+  if (selected?.type !== "conversation") {
+    elx.textContent = "（请选择一个会话）";
+    return;
+  }
+  const conversationIds = new Set([String(selected.id)]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const conversation of state.conversations) {
+      if (conversation.parentConversationId && conversationIds.has(String(conversation.parentConversationId)) && !conversationIds.has(conversation.id)) {
+        conversationIds.add(conversation.id);
+        changed = true;
+      }
+    }
+    for (const task of allTasks) {
+      if (!conversationIds.has(String(task.conversationId))) continue;
+      for (const childConversationId of task.conversations ?? []) {
+        if (!conversationIds.has(String(childConversationId))) {
+          conversationIds.add(String(childConversationId));
+          changed = true;
+        }
+      }
+    }
+  }
+  const tasks = allTasks.filter((task) => conversationIds.has(String(task.conversationId)));
+  const taskIds = new Set(tasks.map((task) => String(task.id)));
   const renderNode = (node, depth) => {
     const div = el("div", "task-node");
     div.style.paddingLeft = depth * 16 + 8 + "px";
@@ -987,8 +1089,8 @@ function renderTaskGraph() {
     elx.appendChild(div);
     for (const child of tasks.filter((t) => String(t.owner) === String(node.id))) renderNode(child, depth + 1);
   };
-  for (const node of tasks.filter((t) => t.owner === undefined || t.owner === null)) renderNode(node, 0);
-  if (tasks.length === 0) elx.textContent = "（无运行中任务）";
+  for (const node of tasks.filter((t) => t.owner === undefined || t.owner === null || !taskIds.has(String(t.owner)))) renderNode(node, 0);
+  if (tasks.length === 0) elx.textContent = "（当前会话没有运行中任务）";
 }
 
 // ─── 交互 ───────────────────────────────────────────────────────────────────
@@ -1749,7 +1851,6 @@ const es = new EventSource("/api/events");
 es.onmessage = (ev) => {
   state = JSON.parse(ev.data);
   agentsCache = state.agentsByProject ?? {};
-  agentsStatus = state.agentsStatus ?? {};
   render();
   updateSseIndicator("ok");
 };

@@ -15,6 +15,31 @@ export const Subagents = defineDoc({
   initial: () => ({ agents: {}, reporters: {} }),
 });
 
+// 会话属于哪个逻辑角色。UI 用它把“角色配置”和“一次会话实例”分开。
+export const ConversationMeta = defineDoc({
+  kind: "pibox.conversation-meta",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({
+    project: null,
+    actorType: null,
+    actorName: null,
+    source: null,
+    title: null,
+    parentConversationId: null,
+    scheduleId: null,
+    scheduleRunId: null,
+    createdAt: null,
+  }),
+});
+
+export async function setConversationMeta(tx, conversationId, value) {
+  const meta = await tx.doc(ConversationMeta, conversationId);
+  Object.assign(meta, value);
+}
+
 // Anchor：背景 task，立即 terminal；子 agent 归它所有，从而不阻塞主会话的 idle/Esc
 export const AnchorTask = defineTask({
   name: "pibox.anchor",
@@ -144,6 +169,15 @@ export function makeSubagentTool(getPiBoxExtension) {
               tools: resolveAgentTools(def.tools, def.mcps),
               extensions: { remove: [getPiBoxExtension()] },
               cwd,
+            });
+            await setConversationMeta(tx, child.id, {
+              project: projectName,
+              actorType: "agent",
+              actorName: name,
+              source: "subagent",
+              title: name,
+              parentConversationId: String(api.conversationId),
+              createdAt: new Date().toISOString(),
             });
             s.agents[name] = { conversationId: child.id, reported: [] };
           }

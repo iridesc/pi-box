@@ -28,7 +28,7 @@ import {
   setMcpToolsByServer,
   AVAILABLE_TOOL_NAMES,
 } from "./agents.mjs";
-import { makeSubagentTool, PiBoxTasks, Subagents } from "./extension.mjs";
+import { ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta } from "./extension.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
 import { listSchedules } from "./schedules.mjs";
 
@@ -98,6 +98,10 @@ export async function ensureProjectConversations(harness) {
       {
         ownership: { kind: "ownerless" },
         agent: { model: resolveAgentModel(assistant.model), instructions: assistantInstructions(name, assistant, agents), cwd },
+        init: (tx, conversationId) => setConversationMeta(tx, conversationId, {
+          project: name, actorType: "assistant", actorName: "助理", source: "main",
+          title: "项目主会话", createdAt: new Date().toISOString(),
+        }),
       },
       context,
     );
@@ -226,7 +230,14 @@ export async function boxSnapshot(harness) {
   const infoById = new Map();
   for (const rec of records) {
     const agent = await harness.snapshot(AgentDoc, rec.id, context);
-    if (agent) infoById.set(String(rec.id), { cwd: agent.cwd, instructions: agent.instructions });
+    const meta = await harness.snapshot(ConversationMeta, rec.id, context);
+    const live = await harness.snapshot(LiveDoc, rec.id, context);
+    if (agent) infoById.set(String(rec.id), {
+      cwd: agent.cwd,
+      instructions: agent.instructions,
+      meta,
+      status: deriveAgentStatus(live),
+    });
   }
   const conversations = snap.conversations.map((c) => {
     const info = infoById.get(c.id) ?? {};
@@ -236,7 +247,22 @@ export async function boxSnapshot(harness) {
       if (cwd === META_DIR) project = META_PROJECT;
       else if (cwd.startsWith(PROJECTS_DIR + "/")) project = basename(cwd);
     }
-    return { ...c, cwd, project, instructions: info.instructions ?? null };
+    const meta = info.meta ?? {};
+    return {
+      ...c,
+      cwd,
+      project: meta.project ?? project,
+      instructions: info.instructions ?? null,
+      actorType: meta.actorType ?? null,
+      actorName: meta.actorName ?? null,
+      source: meta.source ?? null,
+      title: meta.title ?? null,
+      parentConversationId: meta.parentConversationId ?? null,
+      scheduleId: meta.scheduleId ?? null,
+      scheduleRunId: meta.scheduleRunId ?? null,
+      createdAt: meta.createdAt ?? null,
+      status: info.status ?? "idle",
+    };
   });
   const projects = await listProjects();
   const agentsByProject = {};
@@ -248,24 +274,51 @@ export async function boxSnapshot(harness) {
     agentsByProject[p] = await listAgents(p);
     agentCatalogByProject[p] = await listAgentCatalog(p);
     assistantByProject[p] = await loadAssistant(p);
-    schedulesByProject[p] = (await listSchedules(p)).schedules;
+    const scheduleState = await listSchedules(p);
+    schedulesByProject[p] = scheduleState.schedules;
     agentsStatus[p] = {};
+    // 旧的独立定时会话没有 ConversationMeta；从持久化运行记录补齐归属。
+    for (const run of scheduleState.runs) {
+      const conversation = conversations.find((item) => item.id === String(run.conversationId));
+      // assistant 模式的运行记录也会指向 ownerless 主会话，不能把主会话误标成定时任务会话。
+      if (!conversation?.owner || conversation.actorType) continue;
+      conversation.project = p;
+      conversation.actorType = "assistant";
+      conversation.actorName = "助理";
+      conversation.source = "schedule";
+      conversation.title = run.scheduleName;
+      conversation.scheduleId = run.scheduleId;
+      conversation.scheduleRunId = run.id;
+      conversation.createdAt = run.triggeredAt;
+    }
     // 主会话：找到该项目主会话（ownerless 且 cwd 是该项目）。
     const mainConv = conversations.find((c) => c.project === p && !c.owner);
-    if (!mainConv) continue;
-    // snapshot() 返回的 id 是字符串，但 durable API 需要 number。
-    const subDoc = await harness.snapshot(Subagents, Number(mainConv.id), context);
-    const spawned = subDoc?.agents ?? {};
-    for (const name of Object.keys(spawned)) {
-      const childId = Number(spawned[name].conversationId);
-      let status = "idle";
-      try {
-        const live = await harness.snapshot(LiveDoc, childId, context);
-        status = deriveAgentStatus(live);
-      } catch {
-        // 子会话可能还没持久化；保持 idle
+    if (mainConv && !mainConv.actorType) {
+      mainConv.actorType = "assistant";
+      mainConv.actorName = "助理";
+      mainConv.source = "main";
+      mainConv.title = "项目主会话";
+    }
+    // 每一个助理会话都有自己的 Subagents 文档；遍历全部会话才能覆盖独立定时任务。
+    for (const assistantConversation of conversations.filter((c) => c.project === p && c.actorType === "assistant")) {
+      const subDoc = await harness.snapshot(Subagents, Number(assistantConversation.id), context);
+      const spawned = subDoc?.agents ?? {};
+      for (const [name, record] of Object.entries(spawned)) {
+        const childId = String(record.conversationId);
+        const child = conversations.find((item) => item.id === childId);
+        if (child && !child.actorType) {
+          child.project = p;
+          child.actorType = "agent";
+          child.actorName = name;
+          child.source = "subagent";
+          child.title = name;
+          child.parentConversationId = assistantConversation.id;
+        }
+        // 保留旧字段供已有客户端兼容；同名 Agent 多会话时优先展示运行中的一个。
+        const candidate = { status: child?.status ?? "idle", conversationId: childId };
+        const current = agentsStatus[p][name];
+        if (!current || (current.status === "idle" && candidate.status !== "idle")) agentsStatus[p][name] = candidate;
       }
-      agentsStatus[p][name] = { status, conversationId: String(childId) };
     }
   }
   return {

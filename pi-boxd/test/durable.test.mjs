@@ -267,6 +267,7 @@ test("one-time schedules use the selected timezone and disable after submission"
   const localDateTime = `${future.getUTCFullYear() + 1}-01-15T09:00`;
   const schedule = await upsertSchedule(project, {
     name: "单次任务", prompt: "执行一次", rule: { type: "once", localDateTime }, timezone: "Asia/Shanghai", enabled: true,
+    sessionMode: "assistant",
   });
   assert.match(schedule.rule.runAt, /T01:00:00\.000Z$/);
   const harness = {
@@ -283,6 +284,7 @@ test("a schedule occurrence is submitted to the project assistant as a durable a
   await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
   const schedule = await upsertSchedule(project, {
     name: "巡检", prompt: "检查项目。", cron: "0 9 * * *", timezone: "Asia/Shanghai", enabled: true,
+    sessionMode: "assistant",
   });
   let request;
   const harness = {
@@ -299,7 +301,52 @@ test("a schedule occurrence is submitted to the project assistant as a durable a
   assert.equal(request.content, "检查项目。");
   assert.equal(request.whenBusy, "followUp");
   assert.equal(request.entry.kind, "pibox.schedule");
+  assert.equal(request.entry.data.sessionMode, "assistant");
   assert.match(request.requestId, /^pibox-schedule:schedule-submit-test:/);
+});
+
+test("an isolated schedule occurrence creates a fresh durable assistant conversation", async () => {
+  const project = "schedule-isolated-test";
+  await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
+  const schedule = await upsertSchedule(project, {
+    name: "独立巡检", prompt: "独立检查项目。", cron: "0 9 * * *", timezone: "Asia/Shanghai", enabled: true,
+  });
+  assert.equal(schedule.sessionMode, "isolated");
+  let createdOptions;
+  const configuredAgent = {};
+  let request;
+  const main = { id: 42, submit: async () => { throw new Error("不应提交到主会话"); } };
+  const isolated = {
+    id: 99,
+    submit: async (value) => {
+      request = value;
+      return { id: 12, wait: async () => ({ status: "done" }) };
+    },
+  };
+  const harness = {
+    commit: async (operation) => operation({
+      scanConversations: async () => ({ items: [{ id: 42, owner: null }] }),
+      createTask: async () => 77,
+      createConversation: async (options) => {
+        createdOptions = options;
+        return { id: 99 };
+      },
+      doc: async () => configuredAgent,
+    }),
+    snapshot: async () => ({ cwd: join(process.env.PI_BOX_WORKSPACE, project) }),
+    conversation: async (id) => id === 42 ? main : id === 99 ? isolated : undefined,
+  };
+  const run = await triggerSchedule(harness, {}, project, schedule, { scheduledAt: "2026-10-15T01:00:00.000Z" });
+  assert.deepEqual(createdOptions.ownership, { kind: "task", taskId: 77 });
+  assert.equal(configuredAgent.cwd, join(process.env.PI_BOX_WORKSPACE, project));
+  assert.equal(configuredAgent.actorType, "assistant");
+  assert.equal(configuredAgent.source, "schedule");
+  assert.equal(configuredAgent.title, "独立巡检");
+  assert.equal(configuredAgent.parentConversationId, "42");
+  assert.equal(run.conversationId, "99");
+  assert.equal(run.sessionMode, "isolated");
+  assert.equal(request.content, "独立检查项目。");
+  assert.equal(request.entry.data.sessionMode, "isolated");
 });
 
 test("harness installs custom tasks and can start its recovery scheduler", async () => {

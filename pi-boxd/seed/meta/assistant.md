@@ -112,6 +112,7 @@ bash 调 curl 用 `-sS --fail-with-body -H 'Content-Type: application/json'`；�
 
 - 列出：`GET /api/schedules?project=<p>`
 - 增改：`POST /api/schedules` 带 `id`（改）/ 不带（增）
+- 会话方式：请求体设置 `sessionMode: "isolated"`（每次新会话，新任务默认）或 `sessionMode: "assistant"`（继续项目助理主会话）；修改旧任务时应保留用户当前选择
 - 删：`POST /api/schedules/delete`
 - 手动跑（仅限自己元项目）：`POST /api/schedules/run {project:"meta", id:"<id>"}`
 - 业务项目的 schedule 你**只配置不主动触发**——让用户在前端"运行"按钮触发
