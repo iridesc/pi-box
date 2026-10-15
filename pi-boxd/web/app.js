@@ -91,8 +91,9 @@ function renderTree() {
   }
   for (const proj of state.projects) {
     const open = expandedProjects.has(proj);
+    const isMeta = proj === state.metaProject;
     // 项目行
-    const row = el("div", "tree-project");
+    const row = el("div", isMeta ? "tree-project tree-project-meta" : "tree-project");
     const arrow = el("span", "tree-arrow", open ? "▼" : "▶");
     arrow.onclick = (ev) => {
       ev.stopPropagation();
@@ -101,17 +102,19 @@ function renderTree() {
       render();
     };
     row.appendChild(arrow);
-    row.appendChild(el("span", "tree-label", `📁 ${proj}`));
-    const projectSettings = el("button", "tree-settings", "⚙");
-    projectSettings.type = "button";
-    projectSettings.title = "修改项目名称";
-    projectSettings.setAttribute("aria-label", `设置项目 ${proj}`);
-    projectSettings.onclick = (ev) => {
-      ev.stopPropagation();
-      selected = { type: "project", project: proj };
-      render();
-    };
-    row.appendChild(projectSettings);
+    row.appendChild(el("span", "tree-label", isMeta ? `🔧 ${proj}（元项目）` : `📁 ${proj}`));
+    if (!isMeta) {
+      const projectSettings = el("button", "tree-settings", "⚙");
+      projectSettings.type = "button";
+      projectSettings.title = "修改项目名称";
+      projectSettings.setAttribute("aria-label", `设置项目 ${proj}`);
+      projectSettings.onclick = (ev) => {
+        ev.stopPropagation();
+        selected = { type: "project", project: proj };
+        render();
+      };
+      row.appendChild(projectSettings);
+    }
     if (selected?.type === "project" && selected.project === proj) row.classList.add("selected");
     root.appendChild(row);
     if (!open) continue;
@@ -133,6 +136,12 @@ function renderTree() {
       selected = { type: "assistant", project: proj };
       render();
     };
+    if (isMeta) {
+      assistantSettings.disabled = true;
+      assistantSettings.title = "元项目助理文件受保护，不可编辑";
+      assistantSettings.style.opacity = "0.4";
+      assistantSettings.style.cursor = "not-allowed";
+    }
     aNode.appendChild(assistantSettings);
     aNode.onclick = () => {
       if (!mainConversation) return;
@@ -149,8 +158,13 @@ function renderTree() {
     sep.appendChild(el("span", "tree-sep-label", "子 Agent"));
     const addAgent = el("button", "tree-sep-add", "＋");
     addAgent.type = "button";
-    addAgent.title = "新建 Agent";
+    addAgent.title = isMeta ? "元项目子 agent 不可通过 UI 新建，请在宿主机直接编辑 /home/agent/.pi/agent/meta/agents/" : "新建 Agent";
     addAgent.setAttribute("aria-label", `在 ${proj} 中新建 Agent`);
+    if (isMeta) {
+      addAgent.disabled = true;
+      addAgent.style.opacity = "0.4";
+      addAgent.style.cursor = "not-allowed";
+    }
     addAgent.onclick = (event) => {
       event.stopPropagation();
       openAgentEditor({ scope: "project", project: proj });
@@ -172,21 +186,32 @@ function renderTree() {
       n.appendChild(dot);
       n.appendChild(el("span", "tree-arrow", ""));
       const avatar = el("span", `agent-avatar agent-avatar-${a.scope}`, "🤖");
-      avatar.title = a.scope === "global" ? "全局 Agent" : "项目 Agent";
+      avatar.title = a.scope === "global" ? "全局 Agent" : a.scope === "meta" ? "元项目 Agent" : "项目 Agent";
       n.appendChild(avatar);
       n.appendChild(el("span", "tree-label", a.name));
 
       // 配置入口：name 后的 ⚙ 小按钮
-      const agentSettings = el("button", "tree-settings", "⚙");
+      const agentSettings = el("button", "tree-settings", a.locked || a.scope === "meta" ? "🔒" : "⚙");
       agentSettings.type = "button";
-      agentSettings.title = "Agent 配置";
+      agentSettings.title = a.locked
+        ? "Agent 已锁定（locked=true），不可删除，可通过 tools:[] 软停用"
+        : a.scope === "meta"
+          ? "元项目子 agent 不可通过 UI 编辑；请在宿主机直接编辑 /home/agent/.pi/agent/meta/agents/"
+          : "Agent 配置";
       agentSettings.setAttribute("aria-label", `配置 Agent ${a.name}`);
-      agentSettings.onclick = (ev) => {
-        ev.stopPropagation();
-        openAgentEditor({ scope: a.scope, project: a.scope === "project" ? proj : null, existing: a });
-      };
+      if (!a.locked && a.scope !== "meta") {
+        agentSettings.onclick = (ev) => {
+          ev.stopPropagation();
+          openAgentEditor({ scope: a.scope, project: a.scope === "project" ? proj : null, existing: a });
+        };
+      } else {
+        agentSettings.disabled = true;
+        agentSettings.style.opacity = "0.4";
+        agentSettings.style.cursor = "not-allowed";
+      }
       n.appendChild(agentSettings);
-      n.appendChild(el("span", "tree-tag", a.scope === "project" ? "项目" : "全局"));
+      const tag = a.scope === "meta" ? "元" : a.scope === "project" ? "项目" : "全局";
+      n.appendChild(el("span", "tree-tag", tag));
 
       // 单击名字：切到子 agent 聊天框（未启动则提示）
       n.onclick = () => {
@@ -1097,7 +1122,12 @@ for (const btn of document.querySelectorAll(".drawer-nav-item")) {
 // ── 全局 Agents Tab ──
 async function renderDrawerAgents(panel) {
   panel.innerHTML = `<div class="drawer-loading">加载中…</div>`;
-  const { agents } = await (await fetch("/api/global-agents")).json();
+  const [{ agents }, stateRes] = await Promise.all([
+    fetch("/api/global-agents").then((r) => r.json()),
+    fetch("/api/state").then((r) => r.json()),
+  ]);
+  const metaAgents = stateRes.metaAgents ?? [];
+  const metaName = stateRes.metaProject ?? "meta";
   panel.innerHTML = "";
   const head = el("div", "drawer-section-head");
   const titleBox = el("div");
@@ -1146,9 +1176,40 @@ async function renderDrawerAgents(panel) {
     row.appendChild(actions);
     panel.appendChild(row);
   }
+  // 元项目子 Agent（只读，由宿主机直接管理 .md 文件）
+  if (metaAgents.length > 0) {
+    const metaHead = el("div", "drawer-section-head");
+    const metaTitle = el("div");
+    metaTitle.appendChild(el("h3", "", "🔧 元项目子 Agents"));
+    metaTitle.appendChild(el("div", "muted", `属于元项目「${metaName}」，业务项目助理看不到这里的子 Agent。文件受保护，仅在宿主机管理。`));
+    metaHead.appendChild(metaTitle);
+    panel.appendChild(metaHead);
+    for (const agent of metaAgents) {
+      const row = el("div", "drawer-row");
+      const left = el("div", "drawer-row-main");
+      const rowTitle = el("div", "drawer-row-title");
+      rowTitle.appendChild(el("span", "agent-avatar agent-avatar-meta", "🤖"));
+      rowTitle.appendChild(el("span", "", agent.name));
+      if (agent.locked) rowTitle.appendChild(el("span", "tree-tag", "🔒锁"));
+      left.appendChild(rowTitle);
+      left.appendChild(el("div", "muted drawer-row-desc", agent.instructions || "（无描述）"));
+      row.appendChild(left);
+      const actions = el("div", "drawer-row-actions");
+      const lock = el("span", "muted", agent.locked ? "locked" : "");
+      actions.appendChild(lock);
+      row.appendChild(actions);
+      panel.appendChild(row);
+    }
+  }
 }
 
 async function openAgentEditor({ scope, project = null, existing = null, onSaved = null }) {
+  if (scope === "meta" || existing?.locked) {
+    alert(scope === "meta"
+      ? "元项目子 agent 不可通过 UI 编辑；请在宿主机直接编辑 /home/agent/.pi/agent/meta/agents/ 下的 .md 文件。"
+      : "该 Agent 已锁定（locked=true），不可编辑。可通过 tools:[] 软停用。");
+    return;
+  }
   const isNew = !existing;
   const isProject = scope === "project";
   const mcpResponse = await fetch("/api/mcp");

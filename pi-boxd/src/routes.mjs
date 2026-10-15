@@ -4,10 +4,10 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
 import { readBody, loadConfig, saveConfig, loadMcpConfig, saveMcpConfig, listSkills, setSkillEnabled, loadPrefs, savePrefs } from "./io.mjs";
-import { PROJECTS_DIR, DATA_DIR } from "./paths.mjs";
+import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools } from "./agents.mjs";
+import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, agentFilePath } from "./agents.mjs";
 import { renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
 import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upsertSchedule } from "./schedules.mjs";
@@ -89,6 +89,10 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "项目名只能含字母、数字、-、_" }));
           return;
+        }
+        if (name === META_PROJECT) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: `项目名 "${META_PROJECT}" 是保留字（系统元项目）` }));
         }
         if ((await listProjects()).includes(name)) {
           res.writeHead(409);
@@ -299,6 +303,10 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.end(JSON.stringify({ error: "项目级 agent 需要 project 参数" }));
           return;
         }
+        if (scope === "meta") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "元项目子 agent 不可通过 API 创建/修改。请在宿主机直接编辑 /home/agent/.pi/agent/meta/agents/ 下的 .md 文件。" }));
+        }
         if (!instructions?.trim()) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "提示词不能为空" }));
@@ -370,7 +378,30 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.end(JSON.stringify({ error: "缺少 name" }));
           return;
         }
-        await deleteAgentFile(project, name, scope);
+        if (scope === "meta") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "元项目子 agent 不可通过 API 删除。请在宿主机直接编辑 /home/agent/.pi/agent/meta/agents/ 下的 .md 文件。" }));
+        }
+        try {
+          // 先实际查文件在哪里：拒绝刪除不在请求指定 scope 目录下的 Agent
+          const { stat, realpath } = await import("node:fs/promises");
+          const targetPath = agentFilePath(project, name, scope);
+          let realTarget;
+          try {
+            realTarget = await realpath(targetPath);
+          } catch {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: `Agent "${name}" 不在 ${scope} 范围内` }));
+          }
+          if (realTarget.startsWith(META_DIR + "/")) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "该 Agent 位于元项目目录，不能通过 API 删除。" }));
+          }
+          await deleteAgentFile(project, name, scope);
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: error.message }));
+        }
         await syncAfterConfigChange(harness, { scope, projectName: project, agentName: null });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
@@ -398,12 +429,21 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.end(JSON.stringify({ error: "缺少 project" }));
           return;
         }
+        if (project === META_PROJECT) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: `元项目助理文件受保护，不能通过 API 改写。请在宿主机直接编辑 ${META_DIR}/assistant.md。` }));
+        }
         const globalNames = new Set((await listGlobalAgents()).map((agent) => agent.name));
         const selectedGlobals = Array.isArray(agents) ? agents.filter((name) => globalNames.has(name)) : [];
-        const file = await saveAssistantFile(project, { model: m, agents: selectedGlobals, instructions });
-        await syncAfterConfigChange(harness, { scope: "project", projectName: project, agentName: null });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, file }));
+        try {
+          const file = await saveAssistantFile(project, { model: m, agents: selectedGlobals, instructions });
+          await syncAfterConfigChange(harness, { scope: "project", projectName: project, agentName: null });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, file }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
       },
     },
     // ── MCP server 配置（读取 / 增改 / 删除 / 启停） ────────────────────────

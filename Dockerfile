@@ -17,6 +17,8 @@ WORKDIR /home/pi-boxd/app
 RUN npm config set registry https://registry.npmmirror.com && npm install --omit=dev --no-audit --no-fund
 COPY pi-boxd/src/ /home/pi-boxd/app/src/
 COPY pi-boxd/web/ /home/pi-boxd/app/web/
+# 元项目 seed（首启由 entrypoint 复制到 /home/agent/.pi/agent/meta/）
+COPY pi-boxd/seed/ /home/pi-boxd/seed/
 
 # rootless 容器（podman）中 root 即宿主机当前用户，bind mount 目录天然可写。
 ENV HOME=/home/agent

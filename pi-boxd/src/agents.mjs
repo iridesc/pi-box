@@ -3,10 +3,12 @@
 //   全局 agent 库   <WORKSPACE>/.pi-box/agents/<name>.md     —— 共享模板
 //   项目覆盖        <PROJECTS_DIR>/<project>/.pi/agents/<name>.md
 //   项目助理        <PROJECTS_DIR>/<project>/.pi/assistant.md   —— prompt + agents:[引用列表]
+//   元项目（meta）   <META_DIR>/assistant.md + <META_DIR>/agents/<name>.md
+//                   —— 平台管理员，身份特殊，业务项目助理看不到这里的子 agent
 // 加载链：项目内同名优先 → 全局库兜底
-import { readdir, readFile, writeFile, mkdir, unlink, rename } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdir, unlink, rename, stat } from "node:fs/promises";
 import { basename, join, dirname } from "node:path";
-import { PROJECTS_DIR, GLOBAL_AGENTS_DIR } from "./paths.mjs";
+import { PROJECTS_DIR, GLOBAL_AGENTS_DIR, META_PROJECT, META_DIR, META_AGENTS_DIR } from "./paths.mjs";
 import { models, currentModel } from "./model.mjs";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 
@@ -55,17 +57,18 @@ export function parseAgentDef(md) {
     const a = s?.match(/\[([^\]]*)\]/);
     return a ? a[1].split(",").map((x) => x.trim()).filter(Boolean) : null;
   };
-  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), agents: arr(fm.agents), instructions: m[2].trim() };
+  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), agents: arr(fm.agents), locked: /^true$/i.test(fm.locked ?? ""), instructions: m[2].trim() };
 }
 
 /** 序列化回 .md（保存到文件） */
-export function serializeAgentDef({ model: m, tools, mcps, agents, instructions }) {
+export function serializeAgentDef({ model: m, tools, mcps, agents, locked, instructions }) {
   const fm = [];
   if (m) fm.push(`model: ${m}`);
   // 空数组也要落盘，否则会被解释成 null（继承全部默认工具）。
   if (tools !== null && tools !== undefined) fm.push(`tools: [${tools.join(", ")}]`);
   if (mcps !== null && mcps !== undefined) fm.push(`mcps: [${mcps.join(", ")}]`);
   if (agents?.length) fm.push(`agents: [${agents.join(", ")}]`);
+  if (locked) fm.push(`locked: true`);
   const body = (instructions ?? "").trim();
   return fm.length ? `---\n${fm.join("\n")}\n---\n\n${body}\n` : `${body}\n`;
 }
@@ -113,6 +116,7 @@ async function listAgentsInDir(dir, scope, projectName) {
       model: def.model ?? null,
       tools: def.tools ?? null,
       mcps: def.mcps ?? null,
+      locked: !!def.locked,
       instructions: def.instructions ?? "",
     });
   }
@@ -129,8 +133,17 @@ export async function listProjectAgents(projectName) {
   return listAgentsInDir(join(PROJECTS_DIR, projectName, ".pi", "agents"), "project", projectName);
 }
 
-/** 助理实际可派发的 Agent = 全部项目 Agent + 助理显式选择的全局 Agent。 */
+/** 元项目（meta）自身的 Agent 库；业务项目助理看不到这里。 */
+export async function listMetaAgents() {
+  return listAgentsInDir(META_AGENTS_DIR, "meta", META_PROJECT);
+}
+
+/** 助理实际可派发的 Agent = 全部项目 Agent + 助理显式选择的全局 Agent。
+ * 元项目：返回它自己目录下的全部子 agent（业务项目不会调用元项目助理，所以无需"授权"概念）。 */
 export async function listAgents(projectName) {
+  if (projectName === META_PROJECT) {
+    return await listMetaAgents();
+  }
   const projectAgents = await listProjectAgents(projectName);
   const projectNames = new Set(projectAgents.map((agent) => agent.name));
   const assistant = await loadAssistant(projectName);
@@ -141,26 +154,36 @@ export async function listAgents(projectName) {
   return [...projectAgents, ...globalAgents].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** 助理配置页所需的完整目录，区分项目内置与全局可选项。 */
+/** 助理配置页所需的完整目录，区分项目内置与全局可选项。
+ * 业务项目查不到 meta agent；元项目只看到自己的子 agent。 */
 export async function listAgentCatalog(projectName) {
+  if (projectName === META_PROJECT) {
+    return { project: await listMetaAgents(), global: [] };
+  }
   return {
     project: await listProjectAgents(projectName),
     global: await listGlobalAgents(),
   };
 }
 
-/** 后端派发时再次检查授权，避免仅靠前端隐藏全局 Agent。 */
+/** 后端派发时再次检查授权，避免仅靠前端隐藏全局 Agent。
+ * 业务项目永远不能加载 meta 目录下的 agent；元项目只能加载自己目录下的子 agent。 */
 export async function loadEnabledAgentDef(projectName, agentName) {
-  const projectAgent = (await listProjectAgents(projectName)).find((agent) => agent.name === agentName);
-  if (projectAgent) return projectAgent;
-  const assistant = await loadAssistant(projectName);
-  if (!(assistant.agents ?? []).includes(agentName)) return null;
-  return (await listGlobalAgents()).find((agent) => agent.name === agentName) ?? null;
+  if (projectName !== META_PROJECT) {
+    const projectAgent = (await listProjectAgents(projectName)).find((agent) => agent.name === agentName);
+    if (projectAgent) return projectAgent;
+    const assistant = await loadAssistant(projectName);
+    if (!(assistant.agents ?? []).includes(agentName)) return null;
+    return (await listGlobalAgents()).find((agent) => agent.name === agentName) ?? null;
+  }
+  return (await listMetaAgents()).find((agent) => agent.name === agentName) ?? null;
 }
 
-/** 读项目助理定义（.pi/assistant.md） */
+/** 读助理定义。元项目读 <META_DIR>/assistant.md；业务项目读 .pi/assistant.md。 */
 export async function loadAssistant(projectName) {
-  const p = join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
+  const p = projectName === META_PROJECT
+    ? join(META_DIR, "assistant.md")
+    : join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
   try {
     const def = parseAgentDef(await readFile(p, "utf-8"));
     return { model: def.model, agents: def.agents ?? [], instructions: def.instructions };
@@ -171,17 +194,23 @@ export async function loadAssistant(projectName) {
 
 /** 拼出主会话（助理）的 instructions：用户 prompt + 可派发子 agent 清单（用真实定义） */
 export function assistantInstructions(projectName, assistant, agents) {
+  const isMeta = projectName === META_PROJECT;
   const parts = [
     assistant.instructions?.trim() ||
-      `你是项目「${projectName}」的助理。理解用户意图，必要时用 subagent 工具把任务派发给合适的子 agent，并汇总结果。`,
+      (isMeta
+        ? `你是 pi-box 元项目助理。管理所有业务项目、Agent、调度与配置；不允许修改业务项目会话，只能读写它们的文件。`
+        : `你是项目「${projectName}」的助理。理解客户意图，必要时用 subagent 工具把任务派发给合适的子 agent，并汇总结果。`),
   ];
   const available = agents.map((a) => a.name);
   if (available.length > 0) {
     const lines = available.map((n) => {
       const a = agents.find((x) => x.name === n);
-      return `- ${n}：${(a?.instructions || "（无描述）").replace(/\n/g, " ").slice(0, 80)}`;
+      const lock = a?.locked ? " 🔒(不可删)" : "";
+      return `- ${n}${lock}：${(a?.instructions || "（无描述）").replace(/\n/g, " ").slice(0, 80)}`;
     });
     parts.push(`\n你可派发的子 agent：\n${lines.join("\n")}\n用 subagent 工具（spawn/send/stop/status）管理它们。`);
+  } else if (isMeta) {
+    parts.push(`\n当前还没有元项目私有子 agent。可在 /home/agent/.pi/agent/meta/agents/ 下添加定义。`);
   } else {
     parts.push(`\n当前项目还没有可派发的子 agent。可在 .pi/agents/ 下添加定义。`);
   }
@@ -210,23 +239,36 @@ export function answerText(message) {
   return message.content.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("");
 }
 
-/** 扫描项目列表（PROJECTS_DIR 直接子目录，排除 . 开头的隐藏目录） */
+/** 扫描项目列表（PROJECTS_DIR 直接子目录，排除 . 开头的隐藏目录 + 元项目 meta 始终在内） */
 export async function listProjects() {
+  const projects = new Set();
   try {
     const entries = await readdir(PROJECTS_DIR, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
-      .map((e) => e.name)
-      .sort();
+    for (const e of entries) {
+      if (e.isDirectory() && !e.name.startsWith(".")) projects.add(e.name);
+    }
   } catch {
-    return [];
+    /* PROJECTS_DIR 还不存在时也允许 */
   }
+  // 元项目独立于 PROJECTS_DIR：当 META_DIR 存在时把 "meta" 加入项目列表
+  try {
+    const metaStat = await stat(META_DIR).catch(() => null);
+    if (metaStat?.isDirectory()) projects.add(META_PROJECT);
+  } catch {
+    /* ignore */
+  }
+  return [...projects].sort((a, b) => {
+    if (a === META_PROJECT) return -1;
+    if (b === META_PROJECT) return 1;
+    return a.localeCompare(b);
+  });
 }
 
-/** agent 定义文件路径（按 scope） */
+/** agent 定义文件路径（按 scope）。scope=meta 永远指向 META_AGENTS_DIR。 */
 export function agentFilePath(projectName, agentName, scope) {
-  const dir = scope === "global" ? GLOBAL_AGENTS_DIR : join(PROJECTS_DIR, projectName, ".pi", "agents");
-  return join(dir, `${agentName}.md`);
+  if (scope === "meta") return join(META_AGENTS_DIR, `${agentName}.md`);
+  if (scope === "global") return join(GLOBAL_AGENTS_DIR, `${agentName}.md`);
+  return join(PROJECTS_DIR, projectName, ".pi", "agents", `${agentName}.md`);
 }
 
 /** 保存 agent 定义到文件 */
@@ -252,6 +294,7 @@ export async function renameAgentFile(projectName, oldName, newName, scope) {
   await rename(oldFile, newFile);
   if (scope === "global") {
     for (const project of await listProjects()) {
+      if (project === META_PROJECT) continue;
       const assistant = await loadAssistant(project);
       if (!(assistant.agents ?? []).includes(oldName)) continue;
       const agents = assistant.agents.map((name) => name === oldName ? newName : name);
@@ -261,18 +304,33 @@ export async function renameAgentFile(projectName, oldName, newName, scope) {
   return newFile;
 }
 
-/** 删除 agent 定义文件 */
+/** 删除 agent 定义文件。locked=true 拒绝。 */
 export async function deleteAgentFile(projectName, name, scope) {
+  const file = agentFilePath(projectName, name, scope);
+  let current;
   try {
-    await unlink(agentFilePath(projectName, name, scope));
+    current = parseAgentDef(await readFile(file, "utf-8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return; // 不存在也算成功
+    throw error;
+  }
+  if (current.locked) throw new Error(`Agent “${name}” 已锁定（locked=true），不可删除。可通过 tools:[] 软停用。`);
+  try {
+    await unlink(file);
   } catch {
     /* 不存在也算成功 */
   }
 }
 
-/** 保存助理定义到 .pi/assistant.md */
-export async function saveAssistantFile(projectName, def) {
-  const file = join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
+/** 保存助理定义到 .pi/assistant.md。
+ * 元项目：只允许首启 force 写入；后续通过 API 改写会被拒（文件 chmod 444 + UI 隐藏）。 */
+export async function saveAssistantFile(projectName, def, { force = false } = {}) {
+  if (projectName === META_PROJECT && !force) {
+    throw new Error(`元项目助理文件受保护，不能通过 API 改写。请在宿主机直接编辑 ${META_DIR}/assistant.md。`);
+  }
+  const file = projectName === META_PROJECT
+    ? join(META_DIR, "assistant.md")
+    : join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, serializeAgentDef(def), "utf-8");
   return file;

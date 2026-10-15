@@ -12,13 +12,14 @@ import { snapshot } from "pi-durable-web/src/core.mjs";
 import { AgentDoc } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
-import { DATA_DIR, GLOBAL_AGENTS_DIR, PROJECTS_DIR } from "./paths.mjs";
+import { DATA_DIR, GLOBAL_AGENTS_DIR, PROJECTS_DIR, META_PROJECT, META_DIR } from "./paths.mjs";
 import { models, currentModel, getUseFaux, getHasKey } from "./model.mjs";
 import {
   listProjects,
   listAgents,
   listAgentCatalog,
   listGlobalAgents,
+  listMetaAgents,
   loadAssistant,
   assistantInstructions,
   resolveAgentModel,
@@ -88,9 +89,9 @@ export async function ensureProjectConversations(harness) {
     if (agent?.cwd) cwdToId.set(agent.cwd, rec.id);
   }
   for (const name of projects) {
-    const cwd = join(PROJECTS_DIR, name);
+    const cwd = name === META_PROJECT ? META_DIR : join(PROJECTS_DIR, name);
     if (cwdToId.has(cwd)) continue;
-    await mkdir(cwd, { recursive: true });
+    if (name !== META_PROJECT) await mkdir(cwd, { recursive: true });
     const assistant = await loadAssistant(name);
     const agents = await listAgents(name);
     const conv = await harness.createConversation(
@@ -101,7 +102,8 @@ export async function ensureProjectConversations(harness) {
       context,
     );
     cwdToId.set(cwd, conv.id);
-    console.log(`[project] 新建项目会话 #${conv.id} → ${name}`);
+    const tag = name === META_PROJECT ? "元项目" : "项目";
+    console.log(`[project] 新建${tag}会话 #${conv.id} → ${name}`);
   }
   // 文件是配置源；每次启动都对账，修复上次写文件后、configure 前崩溃造成的漂移。
   await syncAllConfig(harness);
@@ -109,7 +111,7 @@ export async function ensureProjectConversations(harness) {
 
 /** 同步：durable 的 instructions/model 持久化在会话上，改文件不会自动更新。保存配置后调用。 */
 async function syncProjectAssistant(harness, projectName) {
-  const cwd = join(PROJECTS_DIR, projectName);
+  const cwd = projectName === META_PROJECT ? META_DIR : join(PROJECTS_DIR, projectName);
   const assistant = await loadAssistant(projectName);
   const agents = await listAgents(projectName);
   const instructions = assistantInstructions(projectName, assistant, agents);
@@ -123,13 +125,13 @@ async function syncProjectAssistant(harness, projectName) {
     await harness.commit((tx) => configure(tx, rec.id, { instructions, model: assistantModel }), context);
     n++;
   }
-  if (n > 0) console.log(`[sync] 刷新项目助理会话（${projectName}）：${n} 个`);
+  if (n > 0) console.log(`[sync] 刷新${projectName === META_PROJECT ? "元项目" : "项目"}助理会话（${projectName}）：${n} 个`);
 }
 
 export async function syncSubagentInstances(harness, projectName, agentName, { resetContext = false } = {}) {
   const def = await loadAgentDef(projectName, agentName);
   if (!def) return;
-  const cwd = join(PROJECTS_DIR, projectName);
+  const cwd = projectName === META_PROJECT ? META_DIR : join(PROJECTS_DIR, projectName);
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
   for (const rec of records) {
     if (rec.owner !== null && rec.owner !== undefined) continue; // 只看主会话
@@ -229,7 +231,11 @@ export async function boxSnapshot(harness) {
   const conversations = snap.conversations.map((c) => {
     const info = infoById.get(c.id) ?? {};
     const cwd = info.cwd ?? null;
-    const project = cwd && cwd.startsWith(PROJECTS_DIR + "/") ? basename(cwd) : null;
+    let project = null;
+    if (cwd) {
+      if (cwd === META_DIR) project = META_PROJECT;
+      else if (cwd.startsWith(PROJECTS_DIR + "/")) project = basename(cwd);
+    }
     return { ...c, cwd, project, instructions: info.instructions ?? null };
   });
   const projects = await listProjects();
@@ -271,6 +277,9 @@ export async function boxSnapshot(harness) {
     agentsByProject,
     agentCatalogByProject,
     globalAgents: await listGlobalAgents(),
+    metaProject: META_PROJECT,
+    metaDir: META_DIR,
+    metaAgents: await listMetaAgents(),
     assistantByProject,
     schedulesByProject,
     agentsStatus,

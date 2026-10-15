@@ -1,6 +1,6 @@
 // pi-boxd 入口：装配 + 启动
 import { createWebServer } from "pi-durable-web/src/core.mjs";
-import { WORKSPACE, PROJECTS_DIR, GLOBAL_AGENTS_DIR, DATA_DIR, PORT, WEB_DIR } from "./paths.mjs";
+import { WORKSPACE, PROJECTS_DIR, GLOBAL_AGENTS_DIR, DATA_DIR, PORT, WEB_DIR, META_DIR, META_PROJECT } from "./paths.mjs";
 import { initProvider, refreshProvider, getUseFaux, currentModel, getHasKey } from "./model.mjs";
 import { createHarness, ensureProjectConversations, boxSnapshot } from "./harness.mjs";
 import { buildExtraRoutes } from "./routes.mjs";
@@ -42,6 +42,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`pi-boxd 已启动: http://localhost:${PORT}`);
   console.log(`项目目录: ${PROJECTS_DIR}`);
   console.log(`全局 agent 库: ${GLOBAL_AGENTS_DIR}`);
+  console.log(`元项目目录: ${META_DIR}（项目名: ${META_PROJECT}）`);
   console.log(`存储: ${join(DATA_DIR, "session.sqlite")}`);
   console.log(`模型: ${getUseFaux() ? "faux（离线）" : `${currentModel.provider}/${currentModel.modelId}`}`);
   console.log(`HTTP Basic Auth: ${auth.enabled ? `已启用（用户 ${auth.username}）` : "未启用"}`);
