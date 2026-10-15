@@ -60,6 +60,72 @@ services:
 
 删除项目时，目录会先移动到 `/workspace/.pi-box-trash`，便于人工恢复。
 
+## 元项目（pi-box-expert）
+
+pi-box 启动时会在 `agent-home/.pi/agent/meta/` 下安装一个**身份特殊的内置项目**，代号 `pi-box-expert`。它不是用户创建的业务项目，而是平台级的“管理员项目”，在左侧项目列表中始终排在最前面，标记为 🔧。
+
+### 与业务项目的区别
+
+| 维度 | 业务项目 | 元项目 |
+|---|---|---|
+| 位置 | `/workspace/<name>/` | `/home/agent/.pi/agent/meta/` |
+| 创建方式 | UI “+ 新建项目” | 镜像内置，首启自动安装 |
+| 项目助理提示词 | 业务定位、可改 | 写死为管理员身份，UI 不可编辑 |
+| 助理文件权限 | 可改 | `chmod 444`、API 拒绝改写 |
+| 子 Agent | 项目级 + 全局 | 独立库 `meta/agents/*.md`，业务项目助理看不到 |
+| 子 Agent 创建 | UI / API 可创建 | 宿主机直接 `write` `.md` |
+| 面向客户 | 交互主题 | 平台管理 |
+| `name === "meta"` | 拒绝 | 占位名 |
+
+### 元项目能做什么
+
+- **读**：所有业务项目的源码、`.pi/assistant.md`、`.pi/agents/*.md`、`.pi/schedules.json`、项目任意文件；业务项目助理的 Durable 会话（只读 snapshot）。
+- **读写**：业务项目的助理提示词、Agent 定义、定时任务；全局 `config.json` / `prefs.json` / `mcp.json`；自己目录下的子 Agent。
+- **不能做**：给业务项目助理的会话发消息 / reset / abort；调用 `/api/schedules/run` 触发业务项目的 schedule；删除自己目录下的预置 Agent。
+
+### 怎么使用
+
+1. 启动后在左侧项目列表最上面看到 🔧 `meta（元项目）`。
+2. 点开它，与 `pi-box-expert` 助理对话；典型问题：
+   - “帮我看看 /workspace 下所有项目状态怎么样”
+   - “优化 `test` 项目的助理提示词”
+   - “为 `travel` 加一个每天 9 点总结昨日日志的定时任务”
+   - “在全局 Agent 库新建一个 `code-reviewer`”
+3. 元项目助理会调 `bash` + 后端 API 读写文件与配置，操作透明可追。
+
+### 怎么修改元项目助理提示词
+
+只允许在宿主机手动改，首启后 file 已是只读（`chmod 444`）。需要更新时：
+
+```bash
+chmod 644 agent-home/.pi/agent/meta/assistant.md
+# 编辑后
+chmod 444 agent-home/.pi/agent/meta/assistant.md
+```
+
+或者重新部署 image（从 `pi-boxd/seed/meta/assistant.md` 拉取新版；仅在本地不存在时复制）：
+
+```bash
+rm agent-home/.pi/agent/meta/assistant.md
+podman compose restart
+```
+
+### 元项目子 Agent 怎么加
+
+```bash
+cat > agent-home/.pi/agent/meta/agents/<name>.md <<'EOF'
+---
+locked: true        # 预置 agent 一般加锁，防止被误删（依然可通过 tools:[] 软停用）
+---
+
+你是 <role> ... 提示词 ...
+EOF
+chmod 444 agent-home/.pi/agent/meta/agents/<name>.md
+podman compose restart
+```
+
+`locked: true` 只能宿主机改；被锁定的 Agent 在 UI 中显示 🔒、不能编辑、不能删除、不能通过 API 改写。“软停用”只需将其 frontmatter `tools:` 改为空数组 `[]`，助理仍然在但子 agent 不会被 spawn。
+
 ## 项目定时任务
 
 定时任务在项目设置页面配置。支持每隔一段时间、每天、工作日、每周、每月以及指定时间仅运行一次。每项任务可以单独设置时区、启用状态和任务说明，也可以手动立即运行。
