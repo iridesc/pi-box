@@ -8,7 +8,7 @@ import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
 import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, agentFilePath } from "./agents.mjs";
-import { renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
+import { createRoleConversation, renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
 import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upsertSchedule } from "./schedules.mjs";
@@ -18,6 +18,25 @@ const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
 
 export function buildExtraRoutes(harness, context, mcpBridge) {
   return {
+    // 页面为当前助理或 Agent 新建独立持久会话。
+    "/api/role-conversations": {
+      method: "POST",
+      async handler(req, res) {
+        const { project, actorType, actorName } = await readBody(req);
+        if (!project || !(await listProjects()).includes(project)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "项目不存在" }));
+        }
+        try {
+          const conversationId = await createRoleConversation(harness, project, actorType, actorName);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, conversationId }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
     // 项目级定时任务：定义保存在项目 .pi/schedules.json，到点后提交给项目助理。
     "/api/schedules": {
       methods: ["GET", "POST"],

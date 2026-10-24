@@ -25,7 +25,7 @@ const {
   loadEnabledAgentDef,
 } = await import("../src/agents.mjs");
 const { makeSubagentTool, PiBoxTasks } = await import("../src/extension.mjs");
-const { createHarness, syncSubagentInstances } = await import("../src/harness.mjs");
+const { createHarness, createRoleConversation, syncSubagentInstances } = await import("../src/harness.mjs");
 const { createDurableMcpTools, validatePublicMcpConfig } = await import("../src/mcp-bridge.mjs");
 const { compileScheduleRule, deleteSchedule, listSchedules, nextScheduleRun, scheduleDescription, triggerSchedule, upsertSchedule, validateScheduleInput } = await import("../src/schedules.mjs");
 const { verifyBasicAuthorization } = await import("../src/auth.mjs");
@@ -164,6 +164,50 @@ test("spawn reuses a renamed persistent subagent and returns visible durable out
     input: { name, conversationId: 58, message: "执行今天的生产计划", followUp: true },
   }]);
   assert.equal(state.reporters["901"], 901);
+});
+
+test("the web UI can create an independent persistent conversation for an enabled agent", async () => {
+  const project = "manual-conversation-test";
+  const name = "手动会话Agent";
+  const cwd = join(process.env.PI_BOX_WORKSPACE, project);
+  await mkdir(cwd, { recursive: true });
+  await saveAgentFile(project, name, "project", { tools: ["read"], instructions: "处理手动会话" });
+  const configured = {};
+  const taskCalls = [];
+  let commitCount = 0;
+  const harness = {
+    snapshot: async () => ({ cwd }),
+    commit: async (operation) => {
+      commitCount += 1;
+      if (commitCount === 1) {
+        return operation({ scanConversations: async () => ({ items: [{ id: 42, owner: null }] }) });
+      }
+      return operation({
+        createTask: async (definition, input, options) => {
+          taskCalls.push({ kind: definition.definition.name, input, options });
+          return 77;
+        },
+        createConversation: async (options) => {
+          assert.deepEqual(options, { ownership: { kind: "task", taskId: 77 } });
+          return { id: 99 };
+        },
+        doc: async () => configured,
+      });
+    },
+  };
+  const id = await createRoleConversation(harness, project, "agent", name);
+  assert.equal(id, "99");
+  assert.equal(configured.cwd, cwd);
+  assert.equal(configured.instructions, "处理手动会话");
+  assert.equal(configured.actorType, "agent");
+  assert.equal(configured.actorName, name);
+  assert.equal(configured.source, "manual");
+  assert.equal(configured.parentConversationId, "42");
+  assert.deepEqual(taskCalls, [{
+    kind: "pibox.anchor",
+    input: null,
+    options: { ownership: { kind: "conversation" }, conversationId: 42, background: true },
+  }]);
 });
 
 test("saving a subagent can reset active context without deleting its persistent conversation", async () => {

@@ -266,6 +266,7 @@ function sessionSourceLabel(conversation) {
   if (conversation.source === "main") return "项目主会话";
   if (conversation.source === "schedule") return "定时任务";
   if (conversation.source === "subagent") return `由助理会话 #${conversation.parentConversationId ?? "—"} 派发`;
+  if (conversation.source === "manual") return "手动创建";
   return conversation.owner ? "后台会话" : "项目会话";
 }
 
@@ -279,8 +280,13 @@ function actorFromSelection() {
 
 function renderSessions() {
   const body = document.getElementById("session-list");
+  const createButton = document.getElementById("new-conversation");
   body.replaceChildren();
   const actor = actorFromSelection();
+  createButton.disabled = !actor;
+  createButton.title = actor
+    ? `为${actor.actorType === "assistant" ? "助理" : ` Agent ${actor.actorName}`}新建独立会话`
+    : "请先选择助理或 Agent";
   if (!actor) {
     body.appendChild(el("div", "session-empty", "请在第一栏选择一个助理或 Agent，这里会显示它的全部会话。"));
     return;
@@ -315,6 +321,32 @@ function renderSessions() {
     body.appendChild(item);
   }
 }
+
+document.getElementById("new-conversation").onclick = async () => {
+  const actor = actorFromSelection();
+  if (!actor) return;
+  const button = document.getElementById("new-conversation");
+  const oldText = button.textContent;
+  button.disabled = true;
+  button.textContent = "创建中…";
+  try {
+    const response = await fetch("/api/role-conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actor),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "创建会话失败");
+    selected = { type: "conversation", project: actor.project, id: String(result.conversationId) };
+    setMobilePanel("view");
+    await refresh();
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    button.textContent = oldText;
+    button.disabled = !actorFromSelection();
+  }
+};
 
 // ─── 第三栏：对话 / 配置视图 ────────────────────────────────────────────────
 function renderView() {

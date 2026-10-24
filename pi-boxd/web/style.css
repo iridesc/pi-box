@@ -546,3 +546,74 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 /* ── 主题与密度切换 ── */
 body.theme-light { background: #f6f8fa; color: #1f2328; }
 body.density-compact .tree-item { padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
+
+/* 系统设置、Agent/MCP 编辑器的最终手机覆盖。必须放在桌面组件规则之后。 */
+@media (max-width: 760px) {
+  .modal { padding: 0; align-items: stretch; }
+  .modal-content.modal-settings {
+    width: 100vw; max-width: none; height: 100dvh; max-height: none;
+    border: 0; border-radius: 0;
+  }
+  .modal-settings .modal-head {
+    flex: 0 0 auto; min-height: 50px;
+    padding: max(12px, env(safe-area-inset-top)) 14px 10px;
+  }
+  .modal-settings .close-btn { min-width: 40px; min-height: 36px; padding: 0; }
+  .modal-settings-body {
+    flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-settings-body .drawer-nav {
+    width: 100%; flex: 0 0 auto; display: flex; flex-direction: row; gap: 4px;
+    padding: 6px 8px; overflow-x: auto; overflow-y: hidden;
+    border-right: 0; border-bottom: 1px solid #30363d;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  .modal-settings-body .drawer-nav::-webkit-scrollbar { display: none; }
+  .modal-settings-body .drawer-nav-item {
+    flex: 1 0 auto; min-width: max-content; padding: 8px 10px;
+    text-align: center; white-space: nowrap;
+  }
+  .modal-settings-body .drawer-content {
+    flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0;
+    padding: 14px 12px max(18px, env(safe-area-inset-bottom)); overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .drawer-content .form-row {
+    width: 100%; align-items: stretch; flex-direction: column; gap: 5px; margin-bottom: 14px;
+  }
+  .drawer-content .form-row label { width: auto; font-size: 12px; }
+  .drawer-content .form-row input,
+  .drawer-content .form-row select {
+    width: 100%; min-height: 42px; padding: 9px 10px; font-size: 16px;
+  }
+  .drawer-content .form-row > button { width: 100%; min-height: 40px; }
+  .drawer-content .form-actions {
+    display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; gap: 8px;
+    width: 100%; margin-top: 18px;
+  }
+  .drawer-content .form-actions .modal-hint {
+    grid-column: 1 / -1; margin: 0 0 3px; line-height: 1.5;
+  }
+  .drawer-content .form-actions button { min-height: 42px; margin: 0; }
+  .drawer-content .drawer-section-head { align-items: flex-start; gap: 8px; }
+  .drawer-content .drawer-row { align-items: stretch; flex-direction: column; gap: 9px; }
+  .drawer-content .drawer-row-actions { flex-wrap: wrap; margin-left: 0; }
+  .drawer-content .drawer-row-actions button { min-height: 36px; }
+  .drawer-content .kv-table { display: block; overflow-x: auto; }
+
+  .drawer-submodal-backdrop { align-items: flex-end; }
+  .drawer-submodal,
+  .agent-editor-modal,
+  .project-delete-modal {
+    width: 100%; max-width: none; max-height: 92dvh; padding: 18px 14px max(18px, env(safe-area-inset-bottom));
+    border-radius: 12px 12px 0 0;
+  }
+  .drawer-submodal .form-row { align-items: stretch; flex-direction: column; gap: 5px; }
+  .drawer-submodal .form-row label { width: auto; }
+  .drawer-submodal .form-row input,
+  .drawer-submodal .form-row select { width: 100%; min-height: 42px; font-size: 16px; }
+  .drawer-submodal .form-actions { flex-wrap: wrap; }
+  .drawer-submodal .form-actions button { min-height: 42px; }
+  .agent-option-grid { grid-template-columns: 1fr; }
+}

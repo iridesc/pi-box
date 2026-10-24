@@ -21,6 +21,7 @@ import {
   listGlobalAgents,
   listMetaAgents,
   loadAssistant,
+  loadEnabledAgentDef,
   assistantInstructions,
   resolveAgentModel,
   loadAgentDef,
@@ -28,7 +29,7 @@ import {
   setMcpToolsByServer,
   AVAILABLE_TOOL_NAMES,
 } from "./agents.mjs";
-import { ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta } from "./extension.mjs";
+import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta } from "./extension.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
 import { listSchedules } from "./schedules.mjs";
 
@@ -111,6 +112,69 @@ export async function ensureProjectConversations(harness) {
   }
   // 文件是配置源；每次启动都对账，修复上次写文件后、configure 前崩溃造成的漂移。
   await syncAllConfig(harness);
+}
+
+/** 从页面为某个角色创建独立持久会话；以项目主会话为根，但不读写主会话历史。 */
+export async function createRoleConversation(harness, projectName, actorType, actorName = null) {
+  const cwd = projectName === META_PROJECT ? META_DIR : join(PROJECTS_DIR, projectName);
+  const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+  let mainId = null;
+  for (const record of records) {
+    if (record.owner != null) continue;
+    const agent = await harness.snapshot(AgentDoc, record.id, context);
+    if (agent?.cwd === cwd) {
+      mainId = record.id;
+      break;
+    }
+  }
+  if (mainId == null) throw new Error(`找不到项目“${projectName}”的主会话`);
+
+  let config;
+  let resolvedActorName;
+  if (actorType === "assistant") {
+    const assistant = await loadAssistant(projectName);
+    const agents = await listAgents(projectName);
+    config = {
+      model: resolveAgentModel(assistant.model),
+      instructions: assistantInstructions(projectName, assistant, agents),
+      cwd,
+    };
+    resolvedActorName = "助理";
+  } else if (actorType === "agent") {
+    const def = await loadEnabledAgentDef(projectName, actorName);
+    if (!def) throw new Error(`Agent“${actorName || ""}”不存在或未在当前项目启用`);
+    config = {
+      model: resolveAgentModel(def.model),
+      instructions: def.instructions,
+      tools: resolveAgentTools(def.tools, def.mcps),
+      cwd,
+    };
+    resolvedActorName = def.name;
+  } else {
+    throw new Error("会话角色必须是 assistant 或 agent");
+  }
+
+  // Anchor 与 owned conversation 必须在同一个 transaction 内创建，避免 terminal owner 竞态。
+  const conversationId = await harness.commit(async (tx) => {
+    const anchor = await tx.createTask(AnchorTask, null, {
+      ownership: { kind: "conversation" },
+      conversationId: mainId,
+      background: true,
+    });
+    const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+    await configure(tx, child.id, config);
+    await setConversationMeta(tx, child.id, {
+      project: projectName,
+      actorType,
+      actorName: resolvedActorName,
+      source: "manual",
+      title: "手动会话",
+      parentConversationId: String(mainId),
+      createdAt: new Date().toISOString(),
+    });
+    return child.id;
+  }, context);
+  return String(conversationId);
 }
 
 /** 同步：durable 的 instructions/model 持久化在会话上，改文件不会自动更新。保存配置后调用。 */
