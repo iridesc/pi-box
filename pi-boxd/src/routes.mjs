@@ -18,6 +18,27 @@ const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
 
 export function buildExtraRoutes(harness, context, mcpBridge) {
   return {
+    // 会话历史按需加载，避免 SSE 周期性传输所有旧消息。
+    "/api/conversation": {
+      method: "GET",
+      async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const id = url.searchParams.get("id");
+        const conversation = id ? await harness.conversation(id, context) : undefined;
+        if (!conversation) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "会话不存在" }));
+        }
+        const view = await conversation.viewState(context);
+        const entries = view.value.entries.map((entry) => ({
+          id: String(entry.id),
+          kind: entry.kind,
+          model: entry.model ?? null,
+        }));
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ id: String(id), entries }));
+      },
+    },
     // 页面为当前助理或 Agent 新建独立持久会话。
     "/api/role-conversations": {
       method: "POST",

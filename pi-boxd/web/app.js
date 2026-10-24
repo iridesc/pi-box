@@ -26,6 +26,8 @@ let expandedProjectSchedules = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
 let schedulesCache = {}; // project -> schedule 列表
 let scheduleRunsCache = {}; // project -> 最近运行记录
+const conversationDetailCache = new Map(); // conversation id -> 按需加载的完整 entries
+const conversationDetailRequests = new Map();
 let cfgProviders = [];
 let cfgSettings = { activeProvider: "openai", providers: {} };
 const MASKED_API_KEY = "********";
@@ -278,6 +280,33 @@ function actorFromSelection() {
   return { project: conversation.project, actorType: conversation.actorType, actorName: conversation.actorName };
 }
 
+async function loadConversationDetail(id, { force = false } = {}) {
+  const key = String(id);
+  if (!force && conversationDetailCache.has(key)) return conversationDetailCache.get(key);
+  if (conversationDetailRequests.has(key)) return conversationDetailRequests.get(key);
+  const request = fetch(`/api/conversation?id=${encodeURIComponent(key)}`)
+    .then(async (response) => {
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "加载会话失败");
+      conversationDetailCache.set(key, result);
+      return result;
+    })
+    .finally(() => conversationDetailRequests.delete(key));
+  conversationDetailRequests.set(key, request);
+  return request;
+}
+
+function conversationAgeBucket(conversation) {
+  if (["running", "waiting-tool", "pending"].includes(conversation.status)) return "recent";
+  const createdAt = new Date(conversation.createdAt ?? 0).getTime();
+  if (!createdAt) return "older";
+  const age = Date.now() - createdAt;
+  if (age < 3 * 86400000) return "recent";
+  if (age < 7 * 86400000) return "threeDays";
+  if (age < 30 * 86400000) return "sevenDays";
+  return "older";
+}
+
 function renderSessions() {
   const body = document.getElementById("session-list");
   const createButton = document.getElementById("new-conversation");
@@ -306,7 +335,7 @@ function renderSessions() {
     body.appendChild(el("div", "session-empty", actor.actorType === "agent" ? "这个 Agent 还没有会话；助理首次派发任务后会自动创建。" : "暂无会话。"));
     return;
   }
-  for (const conversation of conversations) {
+  const renderConversationItem = (conversation, container) => {
     const item = el("div", `session-item${selected?.type === "conversation" && selected.id === conversation.id ? " selected" : ""}`);
     const dot = el("span", `session-dot session-dot-${conversation.status ?? "idle"}`);
     dot.title = agentStatusLabel(conversation.status ?? "idle");
@@ -318,7 +347,21 @@ function renderSessions() {
       setMobilePanel("view");
       render();
     };
-    body.appendChild(item);
+    container.appendChild(item);
+  };
+  const buckets = { recent: [], threeDays: [], sevenDays: [], older: [] };
+  for (const conversation of conversations) buckets[conversationAgeBucket(conversation)].push(conversation);
+  for (const conversation of buckets.recent) renderConversationItem(conversation, body);
+  for (const [key, label] of [["threeDays", "3 天以前"], ["sevenDays", "7 天以前"], ["older", "一个月以前"]]) {
+    const items = buckets[key];
+    if (items.length === 0) continue;
+    const folded = el("details", "session-history-group");
+    folded.open = items.some((conversation) => selected?.type === "conversation" && selected.id === conversation.id);
+    folded.appendChild(el("summary", "session-history-summary", `${label} · ${items.length} 个会话`));
+    const list = el("div", "session-history-list");
+    for (const conversation of items) renderConversationItem(conversation, list);
+    folded.appendChild(list);
+    body.appendChild(folded);
   }
 }
 
@@ -371,6 +414,23 @@ function renderView() {
 function formatDateTime(value) {
   if (!value) return "—";
   try { return new Date(value).toLocaleString("zh-CN", { hour12: false }); } catch { return value; }
+}
+
+function formatMessageTime(value) {
+  if (value === undefined || value === null) return "";
+  try {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const today = new Date();
+    const sameDay = date.getFullYear() === today.getFullYear()
+      && date.getMonth() === today.getMonth()
+      && date.getDate() === today.getDate();
+    return date.toLocaleString("zh-CN", sameDay
+      ? { hour: "2-digit", minute: "2-digit", hour12: false }
+      : { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  } catch {
+    return "";
+  }
 }
 
 function timezoneLabel(value) {
@@ -928,9 +988,13 @@ function conversationTurns(entries) {
 function renderConversationTurn(turn) {
   const fragment = document.createDocumentFragment();
   for (const msg of turn.users) {
+    const wrap = el("div", "conversation-user-wrap");
     const bubble = el("div", "conversation-user");
     bubble.appendChild(markdownBlock(messageText(msg)));
-    fragment.appendChild(bubble);
+    wrap.appendChild(bubble);
+    const timestamp = formatMessageTime(msg.timestamp);
+    if (timestamp) wrap.appendChild(el("div", "conversation-message-time conversation-message-time-user", timestamp));
+    fragment.appendChild(wrap);
   }
   if (turn.items.length === 0) return fragment;
   let finalIndex = -1;
@@ -940,6 +1004,7 @@ function renderConversationTurn(turn) {
     const thinking = Array.isArray(item.msg.content) ? item.msg.content.filter((part) => part?.type === "thinking") : [];
     return thinking.length > 0 ? [{ entry: item.entry, msg: { ...item.msg, content: thinking, stopReason: "toolUse" } }] : [];
   });
+  const responseWrap = el("div", "agent-response-wrap");
   const group = el("section", `agent-response${finalIndex < 0 ? " agent-response-running" : ""}`);
   const groupTitle = el("div", "agent-response-title", finalIndex < 0 ? "Agent 正在处理…" : "Agent 回复");
   group.appendChild(groupTitle);
@@ -963,7 +1028,11 @@ function renderConversationTurn(turn) {
     final.appendChild(markdownBlock(assistantText(turn.items[finalIndex].msg)));
     group.appendChild(final);
   }
-  fragment.appendChild(group);
+  responseWrap.appendChild(group);
+  const latestMessage = finalIndex >= 0 ? turn.items[finalIndex].msg : turn.items.at(-1)?.msg;
+  const timestamp = formatMessageTime(latestMessage?.timestamp);
+  if (timestamp) responseWrap.appendChild(el("div", "conversation-message-time conversation-message-time-agent", timestamp));
+  fragment.appendChild(responseWrap);
   return fragment;
 }
 
@@ -983,8 +1052,22 @@ function renderConversation(view) {
   head.appendChild(el("span", "view-sub", sub));
   view.appendChild(head);
 
+  const detail = conversationDetailCache.get(String(conv.id));
+  if (!detail) {
+    view.appendChild(el("div", "conversation-loading", "正在加载会话记录…"));
+    loadConversationDetail(conv.id).then(() => {
+      if (selected?.type === "conversation" && selected.id === conv.id) renderView();
+    }).catch((error) => {
+      if (selected?.type === "conversation" && selected.id === conv.id) {
+        const loading = view.querySelector?.(".conversation-loading");
+        if (loading) loading.textContent = `加载失败：${error.message}`;
+      }
+    });
+    return;
+  }
+
   const body = el("div", "view-body");
-  for (const turn of conversationTurns(conv.entries)) body.appendChild(renderConversationTurn(turn));
+  for (const turn of conversationTurns(detail.entries ?? [])) body.appendChild(renderConversationTurn(turn));
   view.appendChild(body);
   body.scrollTop = body.scrollHeight;
 
@@ -1941,6 +2024,12 @@ es.onmessage = (ev) => {
   state = JSON.parse(ev.data);
   agentsCache = state.agentsByProject ?? {};
   render();
+  if (selected?.type === "conversation") {
+    const selectedId = selected.id;
+    loadConversationDetail(selectedId, { force: true }).then(() => {
+      if (selected?.type === "conversation" && selected.id === selectedId) renderView();
+    }).catch(() => {});
+  }
   updateSseIndicator("ok");
 };
 es.onerror = () => {

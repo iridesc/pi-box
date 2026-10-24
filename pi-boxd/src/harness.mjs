@@ -8,7 +8,6 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
-import { snapshot } from "pi-durable-web/src/core.mjs";
 import { AgentDoc } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
@@ -289,8 +288,8 @@ function deriveAgentStatus(live) {
 
 /** 完整快照：会话 + cwd/project + agentsByProject + assistantByProject + agentsStatus + 全局 model */
 export async function boxSnapshot(harness) {
-  const snap = await snapshot(harness, context);
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+  const taskGraph = (await harness.taskGraph(context)).value;
   const infoById = new Map();
   for (const rec of records) {
     const agent = await harness.snapshot(AgentDoc, rec.id, context);
@@ -303,7 +302,13 @@ export async function boxSnapshot(harness) {
       status: deriveAgentStatus(live),
     });
   }
-  const conversations = snap.conversations.map((c) => {
+  // SSE 只发送会话摘要；完整 entries 由 /api/conversation 在用户打开时按需读取。
+  const conversations = records.map((record) => {
+    const c = {
+      id: String(record.id),
+      owner: record.owner ?? null,
+      parent: record.parent ?? null,
+    };
     const info = infoById.get(c.id) ?? {};
     const cwd = info.cwd ?? null;
     let project = null;
@@ -386,8 +391,8 @@ export async function boxSnapshot(harness) {
     }
   }
   return {
-    ...snap,
     conversations,
+    taskGraph,
     model: currentModel,
     hasKey: getHasKey(),
     projects,
