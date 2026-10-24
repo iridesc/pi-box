@@ -2,7 +2,26 @@
 let state = null;
 // selected = { type: "conversation"|"assistant"|"agent", project, id?, name? }
 let selected = null;
-let expandedProjects = new Set();
+const EXPANDED_PROJECTS_STORAGE_KEY = "pi-box.expanded-projects.v1";
+
+function loadExpandedProjects() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(EXPANDED_PROJECTS_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(saved) ? saved.filter((name) => typeof name === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExpandedProjects() {
+  try {
+    localStorage.setItem(EXPANDED_PROJECTS_STORAGE_KEY, JSON.stringify([...expandedProjects]));
+  } catch {
+    // localStorage 可能被浏览器策略禁用；此时仍保留当前页面内的展开状态。
+  }
+}
+
+let expandedProjects = loadExpandedProjects();
 let expandedProjectSchedules = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
 let schedulesCache = {}; // project -> schedule 列表
@@ -10,6 +29,21 @@ let scheduleRunsCache = {}; // project -> 最近运行记录
 let cfgProviders = [];
 let cfgSettings = { activeProvider: "openai", providers: {} };
 const MASKED_API_KEY = "********";
+const MOBILE_PANELS = new Set(["tree", "sessions", "view", "tasks"]);
+let activeMobilePanel = "tree";
+
+function setMobilePanel(panel) {
+  if (!MOBILE_PANELS.has(panel)) return;
+  activeMobilePanel = panel;
+  for (const section of document.querySelectorAll("main > section")) {
+    section.classList.toggle("mobile-active", section.id === `panel-${panel}`);
+  }
+  for (const button of document.querySelectorAll("[data-mobile-panel]")) {
+    const active = button.dataset.mobilePanel === panel;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-current", active ? "page" : "false");
+  }
+}
 
 function el(tag, className, text) {
   const e = document.createElement(tag);
@@ -59,6 +93,13 @@ async function refresh() {
   state = await res.json();
   agentsCache = state.agentsByProject ?? {};
   schedulesCache = state.schedulesByProject ?? {};
+  // 清掉已经删除或重命名的旧项目记录，避免本地状态无限累积。
+  const existingProjects = new Set(state.projects);
+  const restoredProjects = new Set([...expandedProjects].filter((name) => existingProjects.has(name)));
+  if (restoredProjects.size !== expandedProjects.size) {
+    expandedProjects = restoredProjects;
+    saveExpandedProjects();
+  }
   render();
 }
 
@@ -97,6 +138,7 @@ function renderTree() {
       ev.stopPropagation();
       if (open) expandedProjects.delete(proj);
       else expandedProjects.add(proj);
+      saveExpandedProjects();
       render();
     };
     row.appendChild(arrow);
@@ -109,6 +151,7 @@ function renderTree() {
       projectSettings.onclick = (ev) => {
         ev.stopPropagation();
         selected = { type: "project", project: proj };
+        setMobilePanel("view");
         render();
       };
       row.appendChild(projectSettings);
@@ -133,6 +176,7 @@ function renderTree() {
     assistantSettings.onclick = (ev) => {
       ev.stopPropagation();
       selected = { type: "assistant", project: proj };
+      setMobilePanel("view");
       render();
     };
     if (isMeta) {
@@ -144,6 +188,7 @@ function renderTree() {
     aNode.appendChild(assistantSettings);
     aNode.onclick = () => {
       selected = { type: "actor", project: proj, actorType: "assistant", actorName: "助理" };
+      setMobilePanel("sessions");
       render();
     };
     root.appendChild(aNode);
@@ -208,6 +253,7 @@ function renderTree() {
       // 单击角色：第二栏展示该 Agent 的全部会话。
       n.onclick = () => {
         selected = { type: "actor", project: proj, actorType: "agent", actorName: a.name };
+        setMobilePanel("sessions");
         render();
       };
       root.appendChild(n);
@@ -263,6 +309,7 @@ function renderSessions() {
     item.appendChild(el("div", "session-meta", `${sessionSourceLabel(conversation)} · #${conversation.id}${conversation.createdAt ? ` · ${formatDateTime(conversation.createdAt)}` : ""}`));
     item.onclick = () => {
       selected = { type: "conversation", project: conversation.project, id: conversation.id };
+      setMobilePanel("view");
       render();
     };
     body.appendChild(item);
@@ -352,6 +399,7 @@ function fillScheduleList(body, project, schedules) {
       viewRun.onclick = async () => {
         if (!state.conversations.some((item) => item.id === String(latestRun.conversationId))) await refresh();
         selected = { type: "conversation", project, id: String(latestRun.conversationId) };
+        setMobilePanel("view");
         render();
       };
       actions.appendChild(viewRun);
@@ -594,6 +642,7 @@ function renderProjectForm(view) {
     expandedProjects.delete(oldName);
     expandedProjects.delete(`agents-${oldName}`);
     expandedProjects.add(newName);
+    saveExpandedProjects();
     selected = { type: "project", project: newName };
     await refresh();
   };
@@ -679,6 +728,7 @@ function openProjectDeleteDialog(project) {
     }
     overlay.remove();
     expandedProjects.delete(project);
+    saveExpandedProjects();
     selected = null;
     await refresh();
   };
@@ -1108,10 +1158,17 @@ document.getElementById("new-project").onclick = async () => {
     return;
   }
   expandedProjects.add(name);
+  saveExpandedProjects();
   // 子 Agent 永远展开，无需 agents-${name} 标记。
   selected = { type: "conversation", project: name, id: String(data.conversationId) };
+  setMobilePanel("view");
   refresh();
 };
+
+for (const button of document.querySelectorAll("[data-mobile-panel]")) {
+  button.onclick = () => setMobilePanel(button.dataset.mobilePanel);
+}
+setMobilePanel(activeMobilePanel);
 
 // ─── 设置弹窗（模型）────────────────────────────────────────────────────────
 function fillModelList(meta, sel2) {
