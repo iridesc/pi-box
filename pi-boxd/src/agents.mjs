@@ -15,11 +15,17 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 const TOOL_BY_NAME = new Map((CodingTools.tools ?? []).map((tool) => [tool.name, tool]));
 let mcpToolsByServer = new Map();
 let mcpSupportTools = [];
+let assistantRequiredTools = [];
 
 /** MCP bridge 热更新后替换工具目录；Agent 文件只持久化 MCP server 名。 */
 export function setMcpToolsByServer(next, supportTools = mcpSupportTools) {
   mcpToolsByServer = new Map(next);
   mcpSupportTools = [...supportTools];
+}
+
+/** 项目助理必须保留的系统工具（当前为 subagent），不允许被页面配置关闭。 */
+export function setAssistantRequiredTools(tools) {
+  assistantRequiredTools = [...tools];
 }
 
 /** Agent 文件里的工具名转换成 registry 中真实的工具定义；null 表示继承默认工具集。 */
@@ -42,12 +48,30 @@ export function resolveAgentTools(toolNames, mcpNames = []) {
   return [...toolNames.map((name) => TOOL_BY_NAME.get(name)), ...mcpTools, ...support];
 }
 
+/** 助理工具 = 用户选择的内置/MCP 工具 + 系统强制工具。 */
+export function resolveAssistantTools(toolNames, mcpNames = []) {
+  const selected = resolveAgentTools(toolNames, mcpNames);
+  if (selected === undefined) return undefined;
+  const byName = new Map(selected.map((tool) => [tool.name, tool]));
+  for (const tool of assistantRequiredTools) byName.set(tool.name, tool);
+  return [...byName.values()];
+}
+
 export const AVAILABLE_TOOL_NAMES = [...TOOL_BY_NAME.keys()];
 
-/** 解析 .md 的 frontmatter + 正文。frontmatter：model / tools / mcps / agents */
+/** 启用 skill 时必须有读取手段：SKILL.md 正文只能靠 read 工具加载。
+ *  注意 resolvedTools === undefined 表示"继承默认全部工具"，此时天然包含 read，不应报错。 */
+export function ensureSkillReadTool(resolvedTools, skillCount) {
+  if (!skillCount) return;
+  if (resolvedTools === undefined) return;
+  if (resolvedTools.some((tool) => tool.name === "read")) return;
+  throw new Error("启用 Skill 必须同时启用 read 工具：Skill 正文由模型用 read 读取 SKILL.md。");
+}
+
+/** 解析 .md 的 frontmatter + 正文。frontmatter：model / tools / mcps / skills / agents / locked */
 export function parseAgentDef(md) {
   const m = md.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---(?:\r?\n)?([\s\S]*)$/);
-  if (!m) return { model: null, tools: null, mcps: null, agents: null, instructions: md.trim() };
+  if (!m) return { model: null, tools: null, mcps: null, skills: null, agents: null, instructions: md.trim() };
   const fm = {};
   for (const line of m[1].split("\n")) {
     const kv = line.match(/^(\w+):\s*(.+)$/);
@@ -57,16 +81,17 @@ export function parseAgentDef(md) {
     const a = s?.match(/\[([^\]]*)\]/);
     return a ? a[1].split(",").map((x) => x.trim()).filter(Boolean) : null;
   };
-  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), agents: arr(fm.agents), locked: /^true$/i.test(fm.locked ?? ""), instructions: m[2].trim() };
+  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), skills: arr(fm.skills), agents: arr(fm.agents), locked: /^true$/i.test(fm.locked ?? ""), instructions: m[2].trim() };
 }
 
 /** 序列化回 .md（保存到文件） */
-export function serializeAgentDef({ model: m, tools, mcps, agents, locked, instructions }) {
+export function serializeAgentDef({ model: m, tools, mcps, skills, agents, locked, instructions }) {
   const fm = [];
   if (m) fm.push(`model: ${m}`);
   // 空数组也要落盘，否则会被解释成 null（继承全部默认工具）。
   if (tools !== null && tools !== undefined) fm.push(`tools: [${tools.join(", ")}]`);
   if (mcps !== null && mcps !== undefined) fm.push(`mcps: [${mcps.join(", ")}]`);
+  if (skills !== null && skills !== undefined) fm.push(`skills: [${skills.join(", ")}]`);
   if (agents?.length) fm.push(`agents: [${agents.join(", ")}]`);
   if (locked) fm.push(`locked: true`);
   const body = (instructions ?? "").trim();
@@ -116,6 +141,7 @@ async function listAgentsInDir(dir, scope, projectName) {
       model: def.model ?? null,
       tools: def.tools ?? null,
       mcps: def.mcps ?? null,
+      skills: def.skills ?? null,
       locked: !!def.locked,
       instructions: def.instructions ?? "",
     });
@@ -186,9 +212,16 @@ export async function loadAssistant(projectName) {
     : join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
   try {
     const def = parseAgentDef(await readFile(p, "utf-8"));
-    return { model: def.model, agents: def.agents ?? [], instructions: def.instructions };
+    return {
+      model: def.model,
+      tools: def.tools,
+      mcps: def.mcps,
+      skills: def.skills ?? null,
+      agents: def.agents ?? [],
+      instructions: def.instructions,
+    };
   } catch {
-    return { model: null, agents: [], instructions: "" };
+    return { model: null, tools: null, mcps: null, skills: null, agents: [], instructions: "" };
   }
 }
 

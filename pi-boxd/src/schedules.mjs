@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { Cron } from "croner";
 import { configure } from "@earendil-works/pi-durable";
 
-import { assistantInstructions, listAgents, loadAssistant, resolveAgentModel } from "./agents.mjs";
+import { assistantInstructions, listAgents, loadAssistant, resolveAgentModel, resolveAssistantTools } from "./agents.mjs";
 import { AnchorTask, setConversationMeta } from "./extension.mjs";
 import { META_DIR, META_PROJECT, PROJECTS_DIR } from "./paths.mjs";
 
@@ -262,6 +262,7 @@ async function isolatedScheduleConversation(harness, project, schedule, run, con
     await configure(tx, child.id, {
       model: resolveAgentModel(assistant.model),
       instructions: assistantInstructions(project, assistant, agents),
+      tools: resolveAssistantTools(assistant.tools, assistant.mcps),
       cwd: projectCwd(project),
     });
     await setConversationMeta(tx, child.id, {

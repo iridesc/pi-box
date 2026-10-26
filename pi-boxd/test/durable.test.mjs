@@ -7,12 +7,17 @@ import { tmpdir } from "node:os";
 const root = await mkdtemp(join(tmpdir(), "pi-boxd-test-"));
 process.env.PI_BOX_WORKSPACE = join(root, "workspace");
 process.env.PI_BOXD_DATA_DIR = join(root, "data");
+// 技能库隔离到临时目录（避免测试碰到镜像内置库或宿主 ~/.pi）
+process.env.PI_BOX_USER_SKILLS_DIR = join(root, "skills-user");
+process.env.PI_BOX_BUILTIN_SKILLS_DIR = join(root, "skills-builtin");
 await mkdir(process.env.PI_BOX_WORKSPACE, { recursive: true });
 
 const { initProvider } = await import("../src/model.mjs");
 const { loadConfig, saveConfig } = await import("../src/io.mjs");
 const {
   resolveAgentTools,
+  resolveAssistantTools,
+  ensureSkillReadTool,
   setMcpToolsByServer,
   parseAgentDef,
   serializeAgentDef,
@@ -24,6 +29,19 @@ const {
   listAgentCatalog,
   loadEnabledAgentDef,
 } = await import("../src/agents.mjs");
+const {
+  installSkill,
+  removeSkill,
+  scanSkills,
+  resolveSkills,
+  setSkillEnabled,
+  formatSkillsForPrompt,
+  validateSkillName,
+  normalizeSkillRelativePath,
+  invalidateSkillsCache,
+  USER_SKILLS_DIR,
+} = await import("../src/skills.mjs");
+const { SkillsExtension } = await import("../src/skills-extension.mjs");
 const { makeSubagentTool, PiBoxTasks } = await import("../src/extension.mjs");
 const { createHarness, createRoleConversation, syncSubagentInstances } = await import("../src/harness.mjs");
 const { createDurableMcpTools, validatePublicMcpConfig } = await import("../src/mcp-bridge.mjs");
@@ -108,7 +126,11 @@ test("project agents are always enabled while global agents require assistant se
   await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
   await saveAgentFile(project, "项目助手", "project", { tools: ["read"], instructions: "project" });
   await saveAgentFile(null, "全局助手", "global", { tools: ["read"], instructions: "global" });
-  await saveAssistantFile(project, { agents: [], instructions: "main" });
+  await saveAssistantFile(project, { tools: ["read"], mcps: [], agents: [], instructions: "main" });
+
+  const assistant = await loadAssistant(project);
+  assert.deepEqual(assistant.tools, ["read"]);
+  assert.deepEqual(assistant.mcps, []);
 
   const catalog = await listAgentCatalog(project);
   assert.deepEqual(catalog.project.map((agent) => agent.name), ["项目助手"]);
@@ -402,4 +424,171 @@ test("harness installs custom tasks and can start its recovery scheduler", async
   );
   harness.resume();
   await harness.close(context);
+});
+
+// ── Skills ───────────────────────────────────────────────────────────────
+
+const SKILL_MD = `---
+name: demo-skill
+description: 演示用技能：当需要演示 skill 注入时使用。
+---
+
+# demo
+
+按这里的说明执行。
+`;
+
+test("agent frontmatter round-trips the skills whitelist", () => {
+  const parsed = parseAgentDef("---\nmodel: gpt-4o\ntools: [read]\nskills: [demo-skill, other]\n---\n\n正文\n");
+  assert.deepEqual(parsed.skills, ["demo-skill", "other"]);
+  const text = serializeAgentDef({ model: "gpt-4o", tools: ["read"], mcps: [], skills: ["demo-skill"], agents: [], instructions: "正文" });
+  assert.match(text, /^skills: \[demo-skill\]$/m);
+  assert.deepEqual(parseAgentDef(text).skills, ["demo-skill"]);
+  // 不写 skills → null（不启用任何 skill），与 tools 的"null = 继承"语义不同，必须显式区分。
+  assert.equal(parseAgentDef("---\nmodel: gpt-4o\n---\n\n正文\n").skills, null);
+  assert.equal(parseAgentDef(serializeAgentDef({ model: null, tools: null, mcps: null, skills: [], agents: [], instructions: "x" })).skills, []);
+});
+
+test("skill names and relative paths are validated per the Agent Skills spec", () => {
+  assert.equal(validateSkillName("pdf-tools"), null);
+  assert.match(validateSkillName("PDF-Tools"), /小写字母/);
+  assert.match(validateSkillName("-pdf"), /小写字母/);
+  assert.match(validateSkillName("pdf--tools"), /小写字母/);
+  assert.match(validateSkillName("a".repeat(65)), /64/);
+  assert.equal(normalizeSkillRelativePath("scripts/a.sh"), "scripts/a.sh");
+  assert.throws(() => normalizeSkillRelativePath("../etc/passwd"), /\.\./);
+  assert.throws(() => normalizeSkillRelativePath("/etc/passwd"), /绝对路径/);
+  assert.throws(() => normalizeSkillRelativePath("SKILL.md"), /content 字段/);
+});
+
+test("uploaded skills are scanned, resolved and rendered for the prompt", async () => {
+  const installed = await installSkill({ name: "demo-skill", content: SKILL_MD, files: [{ path: "scripts/run.sh", content: "echo hi\n" }] });
+  assert.equal(installed.name, "demo-skill");
+  assert.equal(installed.source, "user");
+  assert.equal(installed.file, join(USER_SKILLS_DIR, "demo-skill", "SKILL.md"));
+  assert.equal(installed.bytes > 0, true);
+
+  const library = await scanSkills({ fresh: true });
+  assert.deepEqual(library.map((skill) => skill.name), ["demo-skill"]);
+  assert.equal(library[0].enabled, true);
+  assert.equal(library[0].error, null);
+
+  const resolved = await resolveSkills(["demo-skill", "nope"], null);
+  assert.deepEqual(resolved.skills.map((skill) => skill.name), ["demo-skill"]);
+  assert.deepEqual(resolved.missing, ["nope"]);
+
+  const prompt = formatSkillsForPrompt(resolved.skills, "read");
+  assert.match(prompt, /<available_skills>/);
+  assert.match(prompt, /<name>demo-skill<\/name>/);
+  assert.match(prompt, /演示用技能/);
+  assert.match(prompt, /Use the read tool/);
+  assert.match(prompt, /<location>.*demo-skill\/SKILL\.md<\/location>/);
+  // 未启用任何 skill 时不注入（opt-in，上传不会自动对所有角色生效）
+  assert.deepEqual((await resolveSkills(null, null)).skills, []);
+  assert.deepEqual((await resolveSkills([], null)).skills, []);
+});
+
+test("upload rejects traversal, duplicate names and missing description", async () => {
+  await assert.rejects(() => installSkill({ name: "demo-skill", content: SKILL_MD }), /已存在/);
+  await assert.rejects(
+    () => installSkill({ name: "bad-skill", content: SKILL_MD, files: [{ path: "../../escape.sh", content: "x" }] }),
+    /\.\./,
+  );
+  await assert.rejects(() => installSkill({ name: "Bad_Name", content: SKILL_MD }), /小写字母/);
+  await assert.rejects(
+    () => installSkill({ name: "no-desc", content: "---\nname: no-desc\n---\n\nbody\n" }),
+    /description/,
+  );
+});
+
+test("the global toggle gates every role and is bypassed by re-upload", async () => {
+  await setSkillEnabled("demo-skill", false);
+  const resolved = await resolveSkills(["demo-skill"], null);
+  assert.deepEqual(resolved.skills, []);
+  assert.deepEqual(resolved.disabled, ["demo-skill"]);
+
+  await installSkill({ name: "demo-skill", content: SKILL_MD, overwrite: true });
+  assert.deepEqual((await resolveSkills(["demo-skill"], null)).skills.map((skill) => skill.name), ["demo-skill"]);
+});
+
+test("invalid skill definitions are reported instead of silently advertised", async () => {
+  const { mkdir: mkdirFs, writeFile: writeFileFs } = await import("node:fs/promises");
+  await mkdirFs(join(USER_SKILLS_DIR, "broken-skill"), { recursive: true });
+  await writeFileFs(join(USER_SKILLS_DIR, "broken-skill", "SKILL.md"), "no frontmatter at all\n", "utf-8");
+  invalidateSkillsCache();
+  const resolved = await resolveSkills(["broken-skill"], null);
+  assert.deepEqual(resolved.skills, []);
+  assert.equal(resolved.invalid.length, 1);
+  assert.match(resolved.invalid[0].error, /description/);
+  await removeSkill("broken-skill");
+});
+
+test("enabling a skill requires the read tool", () => {
+  assert.equal(ensureSkillReadTool(resolveAgentTools(["read", "bash"]), 1), undefined);
+  // tools 未配置 = 继承默认全部工具，天然含 read，不报错
+  assert.equal(ensureSkillReadTool(resolveAgentTools(null), 1), undefined);
+  assert.equal(ensureSkillReadTool(resolveAgentTools(["bash"]), 0), undefined);
+  assert.throws(() => ensureSkillReadTool(resolveAgentTools(["bash"]), 1), /必须同时启用 read/);
+  // 助理侧同样适用：subagent 是系统强制工具，但不替代 read
+  assert.throws(() => ensureSkillReadTool(resolveAssistantTools(["bash"], []), 1), /必须同时启用 read/);
+});
+
+test("skills section renders per role from conversation meta", async () => {
+  const project = "skills-section-test";
+  await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
+  await saveAssistantFile(project, {
+    model: null, tools: null, mcps: null, skills: ["demo-skill"], agents: [], instructions: "你是助理。",
+  });
+
+  const render = SkillsExtension.sections[0].render;
+  const call = (meta, tools) => render(
+    { conversationId: 1, agent: { tools }, env: undefined, shown: {}, read: { snapshot: async () => meta } },
+    {},
+  );
+
+  const assistantText = await call({ project, actorType: "assistant", actorName: "助理" }, [{ name: "read" }]);
+  assert.match(assistantText, /<available_skills>/);
+  assert.match(assistantText, /demo-skill/);
+
+  // 没有 read 但有 bash → 用 bash 提示加载
+  const bashText = await call({ project, actorType: "assistant", actorName: "助理" }, [{ name: "bash" }]);
+  assert.match(bashText, /Use bash to load a skill/);
+
+  // 完全没有读取手段 → 不渲染，避免广告无法完成的操作
+  assert.equal(await call({ project, actorType: "assistant", actorName: "助理" }, [{ name: "write" }]), undefined);
+
+  // 子 agent 走自己的定义：未配置 skills → 不注入
+  await saveAgentFile(project, "plain-agent", "project", {
+    model: null, tools: ["read"], mcps: [], skills: null, instructions: "你是子 agent。",
+  });
+  assert.equal(await call({ project, actorType: "agent", actorName: "plain-agent" }, [{ name: "read" }]), undefined);
+
+  // 子 agent 配置了 skills → 注入自己的清单
+  await saveAgentFile(project, "skill-agent", "project", {
+    model: null, tools: ["read"], mcps: [], skills: ["demo-skill"], instructions: "你是子 agent。",
+  });
+  assert.match(await call({ project, actorType: "agent", actorName: "skill-agent" }, [{ name: "read" }]), /demo-skill/);
+
+  // 非 pi-box 会话（没有 meta、cwd 不在项目下）不注入
+  assert.equal(await call(null, [{ name: "read" }]), undefined);
+});
+
+test("project-private skills shadow user skills of the same name", async () => {
+  const project = "skills-shadow-test";
+  const projectSkillDir = join(process.env.PI_BOX_WORKSPACE, project, ".pi", "skills", "demo-skill");
+  await mkdir(projectSkillDir, { recursive: true });
+  await writeFile(join(projectSkillDir, "SKILL.md"), "---\nname: demo-skill\ndescription: 项目私有版本\n---\n\nbody\n", "utf-8");
+  invalidateSkillsCache();
+  const scoped = await resolveSkills(["demo-skill"], project);
+  assert.equal(scoped.skills.length, 1);
+  assert.equal(scoped.skills[0].source, "project");
+  assert.equal(scoped.skills[0].description, "项目私有版本");
+  // 其他项目仍然看到用户库版本
+  const other = await resolveSkills(["demo-skill"], "another-project");
+  assert.equal(other.skills[0].source, "user");
+});
+
+test("removeSkill refuses non-user sources", async () => {
+  assert.throws(() => removeSkill("does-not-exist"), /不存在/);
+  assert.throws(() => removeSkill("../escape"), /小写字母/);
 });

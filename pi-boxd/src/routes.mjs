@@ -3,11 +3,12 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
-import { readBody, loadConfig, saveConfig, loadMcpConfig, saveMcpConfig, listSkills, setSkillEnabled, loadPrefs, savePrefs } from "./io.mjs";
+import { readBody, loadConfig, saveConfig, loadMcpConfig, saveMcpConfig, loadPrefs, savePrefs } from "./io.mjs";
+import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, resolveSkills, projectSkillsDir, USER_SKILLS_DIR, BUILTIN_SKILLS_DIR } from "./skills.mjs";
 import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, agentFilePath } from "./agents.mjs";
+import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, agentFilePath, ensureSkillReadTool } from "./agents.mjs";
 import { createRoleConversation, renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
@@ -147,7 +148,12 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         const conv = await harness.createConversation(
           {
             ownership: { kind: "ownerless" },
-            agent: { model: resolveAgentModel(assistant.model), instructions: assistantInstructions(name, assistant, agents), cwd },
+            agent: {
+              model: resolveAgentModel(assistant.model),
+              instructions: assistantInstructions(name, assistant, agents),
+              tools: resolveAssistantTools(assistant.tools, assistant.mcps),
+              cwd,
+            },
             init: (tx, conversationId) => setConversationMeta(tx, conversationId, {
               project: name, actorType: "assistant", actorName: "助理", source: "main",
               title: "项目主会话", createdAt: new Date().toISOString(),
@@ -337,7 +343,7 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.end(JSON.stringify({ project, agents: await listAgents(project) }));
           return;
         }
-        const { project, name, oldName, scope = "project", model: m, tools, mcps, instructions } = await readBody(req);
+        const { project, name, oldName, scope = "project", model: m, tools, mcps, skills, instructions } = await readBody(req);
         if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
@@ -377,11 +383,26 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           return;
         }
         try {
+          // skill 必须先解析成功；引用了不存在的定义直接拒绝，避免角色静默失效。
+          const { skills: resolvedSkills, missing, invalid } = await resolveSkills(skills, project);
+          if (missing.length > 0) {
+            throw new Error(`未知 Skill：${missing.join(", ")}（请先在系统设置 → Skills 中上传）`);
+          }
+          if (invalid.length > 0) {
+            throw new Error(`Skill 定义非法：${invalid.map((item) => `${item.name}（${item.error}）`).join("; ")}`);
+          }
+          ensureSkillReadTool(resolveAgentTools(tools, Array.isArray(mcps) ? mcps : []), resolvedSkills.length);
           if (oldName && oldName !== name) {
             await renameAgentFile(project, oldName, name, scope);
             await renameSubagentRecords(harness, { scope, projectName: project, oldName, newName: name });
           }
-          const file = await saveAgentFile(project, name, scope, { model: m, tools, mcps: Array.isArray(mcps) ? mcps : [], instructions });
+          const file = await saveAgentFile(project, name, scope, {
+            model: m,
+            tools,
+            mcps: Array.isArray(mcps) ? mcps : [],
+            skills: Array.isArray(skills) ? skills : null,
+            instructions,
+          });
           await syncAfterConfigChange(harness, { scope, projectName: project, agentName: name });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, name, scope, file }));
@@ -468,7 +489,7 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           res.end(JSON.stringify({ project, assistant: await loadAssistant(project) }));
           return;
         }
-        const { project, model: m, agents, instructions } = await readBody(req);
+        const { project, model: m, tools, mcps, skills, agents, instructions } = await readBody(req);
         if (!project) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "缺少 project" }));
@@ -481,7 +502,24 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         const globalNames = new Set((await listGlobalAgents()).map((agent) => agent.name));
         const selectedGlobals = Array.isArray(agents) ? agents.filter((name) => globalNames.has(name)) : [];
         try {
-          const file = await saveAssistantFile(project, { model: m, agents: selectedGlobals, instructions });
+          // 同时完成内置工具名与 MCP 可用性的校验；subagent 由后端强制附加，不落入用户配置。
+          resolveAssistantTools(tools, mcps);
+          const { skills: resolvedSkills, missing, invalid } = await resolveSkills(skills, project);
+          if (missing.length > 0) {
+            throw new Error(`未知 Skill：${missing.join(", ")}（请先在系统设置 → Skills 中上传）`);
+          }
+          if (invalid.length > 0) {
+            throw new Error(`Skill 定义非法：${invalid.map((item) => `${item.name}（${item.error}）`).join("; ")}`);
+          }
+          ensureSkillReadTool(resolveAssistantTools(tools, mcps), resolvedSkills.length);
+          const file = await saveAssistantFile(project, {
+            model: m,
+            tools,
+            mcps,
+            skills: Array.isArray(skills) ? skills : null,
+            agents: selectedGlobals,
+            instructions,
+          });
           await syncAfterConfigChange(harness, { scope: "project", projectName: project, agentName: null });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, file }));
@@ -549,22 +587,69 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         }
       },
     },
-    // ── Skill 列表与启停 ─────────────────────────────────────────────────
+    // ── Skill 库：列表 / 上传 / 删除 / 全局启停 ─────────────────────────────
     "/api/skills": {
       method: "GET",
       async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const project = url.searchParams.get("project");
+        const skills = await scanSkills({ project, fresh: true });
+        const usage = project ? await skillUsage(project) : {};
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ skills: await listSkills() }));
+        res.end(JSON.stringify({
+          skills: skills.map((skill) => ({ ...skill, usedBy: usage[skill.name] ?? [] })),
+          dirs: {
+            builtin: BUILTIN_SKILLS_DIR,
+            user: USER_SKILLS_DIR,
+            project: projectSkillsDir(project),
+          },
+        }));
+      },
+    },
+    // 上传：{ name?, content, files?: [{path, content}], overwrite? } → 落到用户库
+    "/api/skills/upload": {
+      method: "POST",
+      async handler(req, res) {
+        try {
+          const skill = await installSkill(await readBody(req));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, skill }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    "/api/skills/delete": {
+      method: "POST",
+      async handler(req, res) {
+        const { name } = await readBody(req);
+        try {
+          await removeSkill(name);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, name }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
       },
     },
     "/api/skills/toggle": {
       method: "POST",
       async handler(req, res) {
         const { name, enabled } = await readBody(req);
-        if (!name) { res.writeHead(400); return res.end(JSON.stringify({ error: "缺少 name" })); }
-        await setSkillEnabled(name, !!enabled);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, name, enabled: !!enabled }));
+        if (!name) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "缺少 name" }));
+        }
+        try {
+          await setSkillEnabled(name, !!enabled);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, name, enabled: !!enabled }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
       },
     },
     // ── UI 偏好 ─────────────────────────────────────────────────────────
@@ -607,7 +692,7 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
             workspace: PROJECTS_DIR,
             dataDir: DATA_DIR,
             globalAgents: join(PROJECTS_DIR, ".pi-box", "agents"),
-            userSkills: "/home/agent/.pi/agent/skills",
+            userSkills: USER_SKILLS_DIR,
             mcp: "/home/agent/.pi/agent/mcp.json",
           },
           providers,

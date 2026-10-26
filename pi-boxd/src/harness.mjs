@@ -25,11 +25,14 @@ import {
   resolveAgentModel,
   loadAgentDef,
   resolveAgentTools,
+  resolveAssistantTools,
+  setAssistantRequiredTools,
   setMcpToolsByServer,
   AVAILABLE_TOOL_NAMES,
 } from "./agents.mjs";
 import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta } from "./extension.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
+import { SkillsExtension } from "./skills-extension.mjs";
 import { listSchedules } from "./schedules.mjs";
 
 const context = BACKGROUND_CONTEXT;
@@ -47,8 +50,11 @@ export async function createHarness() {
   // 先建一个占位扩展，工具里通过 getter 拿到它（解决循环引用）
   let piBoxExt = defineExtension({ name: "pi-box", tools: [], tasks: PiBoxTasks });
   const SubagentTool = makeSubagentTool(() => piBoxExt);
+  setAssistantRequiredTools([SubagentTool]);
   piBoxExt = defineExtension({ name: "pi-box", tools: [SubagentTool], tasks: PiBoxTasks });
   registry.install(piBoxExt);
+  // skill 注入单独一个扩展：子 agent spawn 时只 remove pi-box（防递归），skill 能力得以保留。
+  registry.install(SkillsExtension);
 
   // MCP 工具先注册为独立 extension；codemode/tool_search 使用 Durable 1.2 的嵌套工具机制调用它们。
   const mcpBridge = new McpDurableBridge(registry);
@@ -97,7 +103,12 @@ export async function ensureProjectConversations(harness) {
     const conv = await harness.createConversation(
       {
         ownership: { kind: "ownerless" },
-        agent: { model: resolveAgentModel(assistant.model), instructions: assistantInstructions(name, assistant, agents), cwd },
+        agent: {
+          model: resolveAgentModel(assistant.model),
+          instructions: assistantInstructions(name, assistant, agents),
+          tools: resolveAssistantTools(assistant.tools, assistant.mcps),
+          cwd,
+        },
         init: (tx, conversationId) => setConversationMeta(tx, conversationId, {
           project: name, actorType: "assistant", actorName: "助理", source: "main",
           title: "项目主会话", createdAt: new Date().toISOString(),
@@ -136,6 +147,7 @@ export async function createRoleConversation(harness, projectName, actorType, ac
     config = {
       model: resolveAgentModel(assistant.model),
       instructions: assistantInstructions(projectName, assistant, agents),
+      tools: resolveAssistantTools(assistant.tools, assistant.mcps),
       cwd,
     };
     resolvedActorName = "助理";
@@ -183,13 +195,20 @@ async function syncProjectAssistant(harness, projectName) {
   const agents = await listAgents(projectName);
   const instructions = assistantInstructions(projectName, assistant, agents);
   const assistantModel = resolveAgentModel(assistant.model);
+  const assistantTools = resolveAssistantTools(assistant.tools, assistant.mcps);
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
   let n = 0;
   for (const rec of records) {
-    if (rec.owner !== null && rec.owner !== undefined) continue; // 只看主会话
     const a = await harness.snapshot(AgentDoc, rec.id, context);
     if (a?.cwd !== cwd) continue;
-    await harness.commit((tx) => configure(tx, rec.id, { instructions, model: assistantModel }), context);
+    const meta = await harness.snapshot(ConversationMeta, rec.id, context);
+    const isLegacyMain = (rec.owner === null || rec.owner === undefined) && !meta?.actorType;
+    if (!isLegacyMain && meta?.actorType !== "assistant") continue;
+    await harness.commit((tx) => configure(tx, rec.id, {
+      instructions,
+      model: assistantModel,
+      tools: assistantTools,
+    }), context);
     n++;
   }
   if (n > 0) console.log(`[sync] 刷新${projectName === META_PROJECT ? "元项目" : "项目"}助理会话（${projectName}）：${n} 个`);

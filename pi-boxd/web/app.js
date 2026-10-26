@@ -177,9 +177,7 @@ function renderTree() {
     assistantSettings.setAttribute("aria-label", `设置 ${proj} 的助理`);
     assistantSettings.onclick = (ev) => {
       ev.stopPropagation();
-      selected = { type: "assistant", project: proj };
-      setMobilePanel("view");
-      render();
+      openAssistantEditor(proj);
     };
     if (isMeta) {
       assistantSettings.disabled = true;
@@ -408,7 +406,6 @@ function renderView() {
     return;
   }
   if (selected.type === "conversation") return renderConversation(view);
-  if (selected.type === "assistant") return renderAssistantForm(view);
 }
 
 function formatDateTime(value) {
@@ -1103,77 +1100,118 @@ function formRow(label, control) {
   return row;
 }
 
-function renderAssistantForm(view) {
-  const proj = selected.project;
+async function openAssistantEditor(proj) {
   const asst = state.assistantByProject?.[proj] ?? { agents: [], instructions: "", model: null };
   const catalog = state.agentCatalogByProject?.[proj] ?? { project: [], global: [] };
+  const mcpResponse = await fetch("/api/mcp");
+  const mcpConfig = mcpResponse.ok ? await mcpResponse.json() : { mcpServers: {} };
+  const mcpServers = Object.entries(mcpConfig.mcpServers ?? {});
+  const overlay = el("div", "drawer-submodal-backdrop");
+  const modal = el("div", "drawer-submodal agent-editor-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.appendChild(el("h3", "", `编辑项目助理 · ${proj}`));
+  modal.appendChild(formRow("名称", el("div", "fixed-field", "助理（系统默认角色，不可修改）")));
+  modal.appendChild(formRow("存放位置", el("div", "fixed-field", `项目专属（${proj}，不可移动或删除）`)));
+  const modelSelect = document.createElement("select");
+  populateAgentModelSelect(modelSelect, asst.model ?? "");
+  modal.appendChild(formRow("模型", modelSelect));
 
-  const head = el("div", "view-head");
-  head.appendChild(el("span", "view-title", `🤖 ${proj} · 项目助理`));
-  view.appendChild(head);
-
-  const form = el("div", "view-form");
-
-  // 提示词
-  const ta = document.createElement("textarea");
-  ta.className = "cfg-textarea";
-  ta.rows = 8;
-  ta.value = asst.instructions || "";
-  ta.placeholder = "项目助理的提示词（system prompt）";
-  form.appendChild(el("div", "form-label", "提示词"));
-  form.appendChild(ta);
-
-  // 项目 Agent 创建后始终启用；全局 Agent 由助理显式授权。
-  form.appendChild(el("div", "form-label", "可派发的子 agent"));
-  const box = el("div", "checkbox-box");
-  if (catalog.project.length === 0 && catalog.global.length === 0) {
-    box.appendChild(el("div", "muted", "（还没有 Agent；可在项目中新建，或在系统设置中创建全局 Agent）"));
-  }
-  if (catalog.project.length > 0) box.appendChild(el("div", "agent-choice-heading", "项目 Agent（始终启用）"));
-  for (const a of catalog.project) {
-    const lab = el("label", "checkbox-item");
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.value = a.name;
-    cb.checked = true;
-    cb.disabled = true;
-    cb.dataset.scope = "project";
-    lab.appendChild(cb);
-    lab.appendChild(el("span", "", `${a.name}（项目内置，不可关闭）`));
-    box.appendChild(lab);
-  }
-  if (catalog.global.length > 0) box.appendChild(el("div", "agent-choice-heading", "全局 Agent（按需启用）"));
-  for (const a of catalog.global) {
-    const lab = el("label", "checkbox-item global-agent-choice");
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.value = a.name;
-    cb.dataset.scope = "global";
-    cb.checked = asst.agents?.includes(a.name) ?? false;
-    lab.appendChild(cb);
-    lab.appendChild(el("span", "agent-avatar agent-avatar-global", "🤖"));
-    lab.appendChild(el("span", "", `${a.name}（全局）`));
-    box.appendChild(lab);
-  }
-  form.appendChild(box);
-
+  const selectedTools = new Set(asst.tools ?? state.availableTools ?? []);
+  const enabledMcpNames = new Set(mcpServers.filter(([, config]) => config.enabled !== false).map(([name]) => name));
+  const selectedMcps = new Set((asst.mcps ?? []).filter((name) => enabledMcpNames.has(name)));
+  const skillLibrary = (await fetchSkillLibrary(proj)).skills ?? [];
+  const selectedSkills = new Set(asst.skills ?? []);
+  const linkage = skillReadLinkage(selectedSkills, selectedTools);
+  linkage.sync(); // 已有 skill 引用时，把 read 补进将要提交的工具集，与界面展示保持一致
+  const toolsGroup = appendAgentCheckboxGroup(modal, {
+    title: "工具",
+    description: "选择助理可以直接调用的内置工具；任务派发工具由系统固定启用。启用 skill 时必须保留 read。",
+    choices: [
+      { value: "subagent", label: "subagent（系统必需，不可关闭）", required: true },
+      ...(state.availableTools ?? ["read", "write", "edit", "bash"]).map((tool) => ({ value: tool, label: tool })),
+    ],
+    selectedValues: selectedTools,
+    disabledWhen: linkage.toolDisabled,
+    checkedWhen: linkage.toolChecked,
+  });
+  appendAgentCheckboxGroup(modal, {
+    title: "Skills",
+    description: "从全局技能库启用；勾选后自动附带 read（Skill 正文由模型读取）。未勾选则不注入任何 skill。",
+    choices: skillChoicesFor(skillLibrary, asst.skills ?? []),
+    selectedValues: selectedSkills,
+    onChange: () => { linkage.sync(); toolsGroup.refresh(); },
+  });
+  appendAgentCheckboxGroup(modal, {
+    title: "MCP",
+    description: "选择助理可以使用的 MCP 服务；已停用的服务不可选择。",
+    choices: mcpServers.map(([name, config]) => ({ value: name, label: config.enabled === false ? `${name}（已停用）` : name, config })),
+    selectedValues: selectedMcps,
+    disabledWhen: (choice) => choice.config.enabled === false,
+  });
+  const selectedGlobals = new Set(asst.agents ?? []);
+  appendAgentCheckboxGroup(modal, {
+    title: "可派发的子 Agent",
+    description: "项目 Agent 创建后始终启用；全局 Agent 可按需授权给当前助理。",
+    choices: [
+      ...catalog.project.map((agent) => ({ value: `project:${agent.name}`, label: `${agent.name}（项目内置，不可关闭）`, required: true })),
+      ...catalog.global.map((agent) => ({ value: agent.name, label: `${agent.name}（全局）` })),
+    ],
+    selectedValues: selectedGlobals,
+    disabledWhen: (choice) => choice.required === true,
+    checkedWhen: (choice) => choice.required === true || selectedGlobals.has(choice.value),
+  });
+  modal.appendChild(el("div", "form-label", "提示词（instructions）"));
+  const instructions = document.createElement("textarea");
+  instructions.className = "cfg-textarea";
+  instructions.rows = 8;
+  instructions.value = asst.instructions || `你是项目「${proj}」的助理。理解用户意图，必要时将任务派发给合适的子 Agent，并汇总结果。`;
+  modal.appendChild(instructions);
   const status = el("div", "form-status", "");
-  const save = el("button", "btn-primary", "保存助理配置");
+  modal.appendChild(status);
+  const actions = el("div", "form-actions");
+  const cancel = el("button", "btn-secondary", "取消");
+  cancel.type = "button";
+  const save = el("button", "btn-primary", "保存");
+  save.type = "button";
+  actions.appendChild(cancel);
+  actions.appendChild(save);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  cancel.onclick = close;
+  overlay.onclick = (event) => { if (event.target === overlay) close(); };
   save.onclick = async () => {
-    const checked = [...box.querySelectorAll('input[data-scope="global"]:checked')].map((c) => c.value);
+    const prompt = instructions.value.trim();
+    if (!prompt) {
+      status.className = "form-status err";
+      status.textContent = "❌ 提示词不能为空";
+      return;
+    }
+    save.disabled = true;
     const res = await fetch("/api/assistant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project: proj, instructions: ta.value, agents: checked }),
+      body: JSON.stringify({
+        project: proj,
+        model: modelSelect.value || null,
+        tools: [...selectedTools],
+        mcps: [...selectedMcps],
+        skills: [...selectedSkills],
+        agents: [...selectedGlobals],
+        instructions: prompt,
+      }),
     });
-    status.className = "form-status ok";
-    status.textContent = res.ok ? "✅ 已保存（下次对话生效）" : "❌ 保存失败";
+    save.disabled = false;
+    if (!res.ok) {
+      status.className = "form-status err";
+      status.textContent = `❌ ${(await res.json()).error || "保存失败"}`;
+      return;
+    }
+    close();
+    await refresh();
   };
-  const bar = el("div", "form-actions");
-  bar.appendChild(save);
-  bar.appendChild(status);
-  form.appendChild(bar);
-  view.appendChild(form);
 }
 
 async function populateAgentModelSelect(select, selectedValue) {
@@ -1477,6 +1515,92 @@ async function renderDrawerAgents(panel) {
   }
 }
 
+function appendAgentCheckboxGroup(modal, {
+  title,
+  description,
+  choices,
+  selectedValues,
+  disabledWhen = () => false,
+  checkedWhen = (choice) => selectedValues.has(choice.value),
+  onChange = () => {},
+}) {
+  const section = el("section", "agent-editor-section");
+  section.appendChild(el("div", "agent-editor-section-title", title));
+  section.appendChild(el("div", "muted agent-editor-section-desc", description));
+  const grid = el("div", "agent-option-grid");
+  if (choices.length === 0) grid.appendChild(el("div", "muted", "（暂无可选项）"));
+  const items = [];
+  for (const choice of choices) {
+    const label = el("label", "agent-option");
+    if (choice.note) label.title = choice.note;
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = choice.value;
+    checkbox.onchange = () => {
+      if (checkbox.checked) selectedValues.add(choice.value);
+      else selectedValues.delete(choice.value);
+      onChange(choice);
+      refresh();
+    };
+    label.appendChild(checkbox);
+    const text = el("span", "agent-option-text", choice.label);
+    label.appendChild(text);
+    if (choice.note) label.appendChild(el("span", "agent-option-note", choice.note));
+    grid.appendChild(label);
+    items.push({ choice, label, checkbox });
+  }
+  // disabledWhen / checkedWhen 都是纯函数，统一在这里应用，便于联动（如启用 skill 后锁住 read）。
+  function refresh() {
+    for (const { choice, label, checkbox } of items) {
+      const disabled = disabledWhen(choice);
+      checkbox.disabled = disabled;
+      checkbox.checked = checkedWhen(choice);
+      label.classList.toggle("agent-option-disabled", disabled);
+    }
+  }
+  refresh();
+  section.appendChild(grid);
+  modal.appendChild(section);
+  return { refresh };
+}
+
+/** 拉取技能库（项目参数决定是否包含项目私有 skill）。 */
+async function fetchSkillLibrary(project) {
+  const url = project ? `/api/skills?project=${encodeURIComponent(project)}` : "/api/skills";
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return { skills: [] };
+    return await response.json();
+  } catch {
+    return { skills: [] };
+  }
+}
+
+/** 把技能库 + 当前角色已有引用整理成勾选项（失效引用也要列出来，否则用户无法取消）。 */
+function skillChoicesFor(library, referenced) {
+  const known = new Set(library.map((skill) => skill.name));
+  const missing = (referenced ?? []).filter((name) => !known.has(name));
+  return [
+    ...missing.map((name) => ({ value: name, label: `${name}（已不存在）`, note: "请取消勾选，或重新上传同名 skill" })),
+    ...library.map((skill) => ({
+      value: skill.name,
+      label: skill.enabled ? skill.name : `${skill.name}（已全局停用）`,
+      note: skill.error ? `⚠ ${skill.error}` : (skill.description || "（无描述）"),
+      config: skill,
+    })),
+  ];
+}
+
+/** 启用了 skill 就必须有 read：返回联动函数，供 tools / skills 两个分组共用。 */
+function skillReadLinkage(selectedSkills, selectedTools) {
+  const forced = () => selectedSkills.size > 0;
+  return {
+    toolDisabled: (choice) => choice.required === true || (choice.value === "read" && forced()),
+    toolChecked: (choice) => choice.required === true || (choice.value === "read" && forced()) || selectedTools.has(choice.value),
+    sync: () => { if (forced()) selectedTools.add("read"); },
+  };
+}
+
 async function openAgentEditor({ scope, project = null, existing = null, onSaved = null }) {
   if (scope === "meta" || existing?.locked) {
     alert(scope === "meta"
@@ -1512,41 +1636,32 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
   const selectedTools = new Set(existing ? (existing.tools ?? state.availableTools ?? []) : ["read", "bash"]);
   const enabledMcpNames = new Set(mcpServers.filter(([, config]) => config.enabled !== false).map(([name]) => name));
   const selectedMcps = new Set((existing?.mcps ?? []).filter((name) => enabledMcpNames.has(name)));
-  const addCheckboxGroup = (title, description, choices, selectedValues, disabledWhen = () => false) => {
-    const section = el("section", "agent-editor-section");
-    section.appendChild(el("div", "agent-editor-section-title", title));
-    section.appendChild(el("div", "muted agent-editor-section-desc", description));
-    const grid = el("div", "agent-option-grid");
-    if (choices.length === 0) grid.appendChild(el("div", "muted", "（暂无可选项）"));
-    for (const choice of choices) {
-      const label = el("label", "agent-option");
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.value = choice.value;
-      checkbox.checked = selectedValues.has(choice.value);
-      checkbox.disabled = disabledWhen(choice);
-      checkbox.onchange = () => checkbox.checked ? selectedValues.add(choice.value) : selectedValues.delete(choice.value);
-      if (checkbox.disabled) label.classList.add("agent-option-disabled");
-      label.appendChild(checkbox);
-      label.appendChild(el("span", "", choice.label));
-      grid.appendChild(label);
-    }
-    section.appendChild(grid);
-    modal.appendChild(section);
-  };
-  addCheckboxGroup(
-    "工具",
-    "选择该 Agent 可以直接调用的内置工具。",
-    (state.availableTools ?? ["read", "write", "edit", "bash"]).map((tool) => ({ value: tool, label: tool })),
-    selectedTools,
-  );
-  addCheckboxGroup(
-    "MCP",
-    "选择该 Agent 可以使用的 MCP 服务；已停用的服务不可选择。",
-    mcpServers.map(([name, config]) => ({ value: name, label: config.enabled === false ? `${name}（已停用）` : name, config })),
-    selectedMcps,
-    (choice) => choice.config.enabled === false,
-  );
+  const skillLibrary = (await fetchSkillLibrary(project)).skills ?? [];
+  const selectedSkills = new Set(existing?.skills ?? []);
+  const linkage = skillReadLinkage(selectedSkills, selectedTools);
+  linkage.sync(); // 已有 skill 引用时，把 read 补进将要提交的工具集，与界面展示保持一致
+  const toolsGroup = appendAgentCheckboxGroup(modal, {
+    title: "工具",
+    description: "选择该 Agent 可以直接调用的内置工具。启用 skill 时必须保留 read。",
+    choices: (state.availableTools ?? ["read", "write", "edit", "bash"]).map((tool) => ({ value: tool, label: tool })),
+    selectedValues: selectedTools,
+    disabledWhen: linkage.toolDisabled,
+    checkedWhen: linkage.toolChecked,
+  });
+  appendAgentCheckboxGroup(modal, {
+    title: "Skills",
+    description: "从全局技能库启用；勾选后自动附带 read（Skill 正文由模型读取）。未勾选则不注入任何 skill。",
+    choices: skillChoicesFor(skillLibrary, existing?.skills ?? []),
+    selectedValues: selectedSkills,
+    onChange: () => { linkage.sync(); toolsGroup.refresh(); },
+  });
+  appendAgentCheckboxGroup(modal, {
+    title: "MCP",
+    description: "选择该 Agent 可以使用的 MCP 服务；已停用的服务不可选择。",
+    choices: mcpServers.map(([name, config]) => ({ value: name, label: config.enabled === false ? `${name}（已停用）` : name, config })),
+    selectedValues: selectedMcps,
+    disabledWhen: (choice) => choice.config.enabled === false,
+  });
   modal.appendChild(el("div", "form-label", "提示词（instructions）"));
   const instructions = document.createElement("textarea");
   instructions.className = "cfg-textarea";
@@ -1614,6 +1729,7 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
         model: modelSelect.value || null,
         tools: [...selectedTools],
         mcps: [...selectedMcps],
+        skills: [...selectedSkills],
         instructions: prompt,
       }),
     });
@@ -1630,45 +1746,206 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
 }
 
 // ── Skills Tab ──
+// 技能库全局共享（文件只有一份）；角色在各自的配置页里勾选启用哪几个。
+const SKILL_SOURCE_LABEL = { builtin: "内置", user: "用户", project: "项目" };
+
 async function renderDrawerSkills(panel) {
   panel.innerHTML = `<div class="drawer-loading">加载中…</div>`;
   const render = async () => {
-    const { skills } = await (await fetch("/api/skills")).json();
+    const data = await fetchSkillLibrary();
+    const skills = data.skills ?? [];
     panel.innerHTML = "";
     const head = el("div", "drawer-section-head");
     head.appendChild(el("h3", "", "📚 Skills"));
-    head.appendChild(el("div", "muted", `${skills.length} 个（内置只读，用户可启停）`));
+    head.appendChild(el("div", "muted", `${skills.length} 个（启停是全局开关）`));
     panel.appendChild(head);
+    const bar = el("div", "drawer-row-actions");
+    const upload = el("button", "btn-primary", "＋ 上传 Skill");
+    upload.type = "button";
+    upload.onclick = () => openSkillUpload(() => render());
+    bar.appendChild(upload);
+    panel.appendChild(bar);
+    panel.appendChild(el("div", "muted drawer-hint", "启用哪个 Skill 由各 Agent / 助理在自己的配置页里决定；这里的开关是整个库的全局闸门，关掉后任何角色都无法使用。"));
+    if (data.dirs) {
+      panel.appendChild(el("div", "muted drawer-hint", `用户库：${data.dirs.user}`));
+    }
+    if (skills.length === 0) {
+      panel.appendChild(el("div", "drawer-empty muted", "技能库为空，点上方按钮上传 SKILL.md"));
+      return;
+    }
     for (const s of skills) {
       const row = el("div", "drawer-row");
       const left = el("div", "drawer-row-main");
       const title = el("div", "drawer-row-title");
-      title.textContent = `${s.source === "builtin" ? "🔒 " : ""}${s.name}`;
+      title.appendChild(el("span", "", s.name));
+      const tag = el("span", `tree-tag drawer-tag-${s.source}`);
+      tag.textContent = SKILL_SOURCE_LABEL[s.source] ?? s.source;
+      title.appendChild(tag);
+      if (!s.enabled) title.appendChild(el("span", "tree-tag drawer-danger", "已停用"));
       left.appendChild(title);
       const desc = el("div", "muted drawer-row-desc");
-      desc.textContent = s.description || "（无描述）";
+      desc.textContent = s.error ? `⚠ ${s.error}` : (s.description || "（无描述）");
+      if (s.error) desc.classList.add("drawer-danger");
       left.appendChild(desc);
-      const tag = el("span", `tree-tag drawer-tag-${s.source}`);
-      tag.textContent = s.source === "builtin" ? "内置" : "用户";
-      left.appendChild(tag);
+      const meta = el("div", "muted drawer-row-desc");
+      const parts = [];
+      if (s.bytes) parts.push(`${(s.bytes / 1024).toFixed(1)}KB`);
+      if (s.updatedAt) parts.push(`更新于 ${s.updatedAt.slice(0, 10)}`);
+      if (s.usedBy?.length) parts.push(`被 ${s.usedBy.map((item) => item.name).join("、")} 使用`);
+      else parts.push("暂无角色使用");
+      meta.textContent = parts.join(" · ");
+      left.appendChild(meta);
       row.appendChild(left);
+
+      const actions = el("div", "drawer-row-actions");
       const toggle = document.createElement("input");
       toggle.type = "checkbox";
+      toggle.title = "全局启用/停用";
       toggle.checked = s.enabled;
-      toggle.disabled = s.source === "builtin" && !s.wasBuiltin; // 内置且未被用户覆盖 → 只读
       toggle.onchange = async () => {
-        await fetch("/api/skills/toggle", {
+        const response = await fetch("/api/skills/toggle", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: s.name, enabled: toggle.checked }),
         });
-        settingsLoadedTabs.delete("skills"); render();
+        if (!response.ok) alert((await response.json()).error || "操作失败");
+        await render();
       };
-      row.appendChild(toggle);
+      actions.appendChild(toggle);
+      if (s.source === "user") {
+        const remove = el("button", "btn-danger mcp-test-button", "删除");
+        remove.type = "button";
+        remove.onclick = async () => {
+          const used = s.usedBy?.length ? `\n\n以下角色还在引用它：\n${s.usedBy.map((item) => `· ${item.name}`).join("\n")}` : "";
+          if (!confirm(`确认从技能库删除 “${s.name}”？${used}`)) return;
+          const response = await fetch("/api/skills/delete", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: s.name }),
+          });
+          if (!response.ok) alert((await response.json()).error || "删除失败");
+          await render();
+        };
+        actions.appendChild(remove);
+      }
+      row.appendChild(actions);
       panel.appendChild(row);
     }
   };
   await render();
 }
+
+/** 上传 SKILL.md（可选附带整目录的 scripts / references）。 */
+function openSkillUpload(onDone) {
+  const overlay = el("div", "drawer-submodal-backdrop");
+  const modal = el("div", "drawer-submodal agent-editor-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.appendChild(el("h3", "", "上传 Skill"));
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "pdf-tools（小写字母、数字、连字符）";
+  modal.appendChild(formRow("名称", nameInput));
+
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = ".md";
+  modal.appendChild(formRow("选择文件", picker));
+
+  modal.appendChild(el("div", "form-label", "SKILL.md 内容（含 frontmatter）"));
+  const content = document.createElement("textarea");
+  content.className = "cfg-textarea";
+  content.rows = 12;
+  content.placeholder = "---\nname: pdf-tools\ndescription: 从 PDF 提取文本与表格。读取、转换或检查 PDF 时使用。\n---\n\n# PDF tools\n……";
+  modal.appendChild(content);
+
+  const dirPicker = document.createElement("input");
+  dirPicker.type = "file";
+  dirPicker.multiple = true;
+  dirPicker.setAttribute("webkitdirectory", "");
+  modal.appendChild(formRow("附带目录", dirPicker));
+  const dirHint = el("div", "muted drawer-row-desc", "可选：选中 skill 目录整个上传 scripts/、references/ 等附属文件（SKILL.md 以左侧内容为准）。");
+  modal.appendChild(dirHint);
+
+  const overwriteRow = el("label", "agent-option");
+  const overwrite = document.createElement("input");
+  overwrite.type = "checkbox";
+  overwriteRow.appendChild(overwrite);
+  overwriteRow.appendChild(el("span", "agent-option-text", "同名用户 Skill 已存在时覆盖"));
+  modal.appendChild(overwriteRow);
+
+  const status = el("div", "form-status", "");
+  modal.appendChild(status);
+  const actions = el("div", "form-actions");
+  const cancel = el("button", "btn-secondary", "取消");
+  cancel.type = "button";
+  const submit = el("button", "btn-primary", "上传");
+  submit.type = "button";
+  actions.appendChild(cancel);
+  actions.appendChild(submit);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  cancel.onclick = close;
+  overlay.onclick = (event) => { if (event.target === overlay) close(); };
+
+  // 选了 SKILL.md 就填进 textarea；frontmatter 的 name 自动回填到名称框。
+  picker.onchange = async () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    content.value = await file.text();
+    autoFillName();
+  };
+  const autoFillName = () => {
+    if (nameInput.value.trim()) return;
+    const declared = content.value.match(/^---\r?\n[\s\S]*?^name:\s*([^\n]+)/m);
+    if (declared) nameInput.value = declared[1].trim();
+  };
+  content.onblur = autoFillName;
+
+  let attached = [];
+  dirPicker.onchange = async () => {
+    const files = [...(dirPicker.files ?? [])];
+    attached = [];
+    for (const file of files) {
+      // webkitRelativePath 形如 pdf-tools/scripts/a.sh → 去掉顶层目录名
+      const relative = (file.webkitRelativePath || file.name).split("/").slice(1).join("/") || file.name;
+      if (relative === "SKILL.md") {
+        if (!content.value.trim()) { content.value = await file.text(); autoFillName(); }
+        continue;
+      }
+      attached.push({ path: relative, content: await file.text() });
+    }
+    dirHint.textContent = attached.length
+      ? `将一并上传 ${attached.length} 个附属文件：${attached.map((file) => file.path).join("、")}`
+      : "未选择附属文件。";
+  };
+
+  submit.onclick = async () => {
+    status.className = "form-status";
+    status.textContent = "上传中…";
+    submit.disabled = true;
+    const response = await fetch("/api/skills/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: nameInput.value.trim() || undefined,
+        content: content.value,
+        files: attached,
+        overwrite: overwrite.checked,
+      }),
+    });
+    submit.disabled = false;
+    if (!response.ok) {
+      status.className = "form-status err";
+      status.textContent = `❌ ${(await response.json()).error || "上传失败"}`;
+      return;
+    }
+    close();
+    if (onDone) await onDone();
+  };
+}
+
 
 // ── MCP Tab ──
 async function renderDrawerMcp(panel) {
