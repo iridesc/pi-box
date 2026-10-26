@@ -1863,7 +1863,7 @@ function openSkillUpload(onDone) {
   dirPicker.multiple = true;
   dirPicker.setAttribute("webkitdirectory", "");
   modal.appendChild(formRow("附带目录", dirPicker));
-  const dirHint = el("div", "muted drawer-row-desc", "可选：选中 skill 目录整个上传 scripts/、references/ 等附属文件（SKILL.md 以左侧内容为准）。");
+  const dirHint = el("div", "muted drawer-row-desc", "可选：选中 skill 目录整个上传 scripts/、references/ 等附属文件（仅支持文本文件；SKILL.md 以左侧内容为准）。");
   modal.appendChild(dirHint);
 
   const overwriteRow = el("label", "agent-option");
@@ -1907,18 +1907,24 @@ function openSkillUpload(onDone) {
   dirPicker.onchange = async () => {
     const files = [...(dirPicker.files ?? [])];
     attached = [];
+    let skippedSkillMd = 0;
     for (const file of files) {
       // webkitRelativePath 形如 pdf-tools/scripts/a.sh → 去掉顶层目录名
       const relative = (file.webkitRelativePath || file.name).split("/").slice(1).join("/") || file.name;
-      if (relative === "SKILL.md") {
-        if (!content.value.trim()) { content.value = await file.text(); autoFillName(); }
+      const base = relative.split("/").pop();
+      if (base === "SKILL.md") {
+        // 目录里可能包含多个 skill；第一个充当正文，其余忽略（避免把别人的 SKILL.md 当附属文件上传）。
+        if (!content.value.trim()) content.value = await file.text();
+        else skippedSkillMd += 1;
+        autoFillName();
         continue;
       }
       attached.push({ path: relative, content: await file.text() });
     }
-    dirHint.textContent = attached.length
-      ? `将一并上传 ${attached.length} 个附属文件：${attached.map((file) => file.path).join("、")}`
-      : "未选择附属文件。";
+    const notes = [];
+    if (attached.length) notes.push(`将一并上传 ${attached.length} 个附属文件：${attached.map((file) => file.path).join("、")}`);
+    if (skippedSkillMd) notes.push(`忽略 ${skippedSkillMd} 个额外的 SKILL.md`);
+    dirHint.textContent = notes.length ? notes.join("；") : "未选择附属文件。";
   };
 
   submit.onclick = async () => {

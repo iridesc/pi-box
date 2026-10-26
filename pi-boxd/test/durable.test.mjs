@@ -446,7 +446,10 @@ test("agent frontmatter round-trips the skills whitelist", () => {
   assert.deepEqual(parseAgentDef(text).skills, ["demo-skill"]);
   // 不写 skills → null（不启用任何 skill），与 tools 的"null = 继承"语义不同，必须显式区分。
   assert.equal(parseAgentDef("---\nmodel: gpt-4o\n---\n\n正文\n").skills, null);
-  assert.equal(parseAgentDef(serializeAgentDef({ model: null, tools: null, mcps: null, skills: [], agents: [], instructions: "x" })).skills, []);
+  assert.deepEqual(
+    parseAgentDef(serializeAgentDef({ model: null, tools: null, mcps: null, skills: [], agents: [], instructions: "x" })).skills,
+    [],
+  );
 });
 
 test("skill names and relative paths are validated per the Agent Skills spec", () => {
@@ -491,10 +494,16 @@ test("uploaded skills are scanned, resolved and rendered for the prompt", async 
 test("upload rejects traversal, duplicate names and missing description", async () => {
   await assert.rejects(() => installSkill({ name: "demo-skill", content: SKILL_MD }), /已存在/);
   await assert.rejects(
-    () => installSkill({ name: "bad-skill", content: SKILL_MD, files: [{ path: "../../escape.sh", content: "x" }] }),
+    () => installSkill({
+      name: "bad-skill",
+      content: "---\nname: bad-skill\ndescription: 演示\n---\n\nbody\n",
+      files: [{ path: "../../escape.sh", content: "x" }],
+    }),
     /\.\./,
   );
   await assert.rejects(() => installSkill({ name: "Bad_Name", content: SKILL_MD }), /小写字母/);
+  // frontmatter 的 name 必须与目录名一致（可移植性）；不一致时显式拒绝
+  await assert.rejects(() => installSkill({ name: "other-name", content: SKILL_MD }), /不一致/);
   await assert.rejects(
     () => installSkill({ name: "no-desc", content: "---\nname: no-desc\n---\n\nbody\n" }),
     /description/,
@@ -588,7 +597,7 @@ test("project-private skills shadow user skills of the same name", async () => {
   assert.equal(other.skills[0].source, "user");
 });
 
-test("removeSkill refuses non-user sources", async () => {
-  assert.throws(() => removeSkill("does-not-exist"), /不存在/);
-  assert.throws(() => removeSkill("../escape"), /小写字母/);
+test("removeSkill refuses unknown and unsafe names", async () => {
+  await assert.rejects(() => removeSkill("does-not-exist"), /不存在/);
+  await assert.rejects(() => removeSkill("../escape"), /小写字母/);
 });

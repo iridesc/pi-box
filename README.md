@@ -55,6 +55,7 @@ services:
     └── .pi/
         ├── assistant.md       # 项目助理配置
         ├── agents/*.md        # 项目 Agent
+        ├── skills/*/SKILL.md  # 项目私有 Skill（可选，同名覆盖用户/内置）
         └── schedules.json     # 项目定时任务及运行记录
 ```
 
@@ -128,6 +129,59 @@ podman compose restart
 
 `locked: true` 只能宿主机改；被锁定的 Agent 在 UI 中显示 🔒、不能编辑、不能删除、不能通过 API 改写。“软停用”只需将其 frontmatter `tools:` 改为空数组 `[]`，助理仍然在但子 agent 不会被 spawn。
 
+## Skill 管理
+
+Skill 是「按需加载的专项说明」：系统提示词里只登记名字、描述和文件路径，模型判断任务匹配时才用 `read` 读取正文，不会一直占满上下文。
+
+### 技能库（文件只有一份）
+
+```text
+/opt/pi-box/skills/<name>/SKILL.md          # 内置（只读，镜像自带）
+/home/agent/.pi/agent/skills/<name>/SKILL.md # 用户库（界面上的「上传」落在这里）
+<项目>/.pi/skills/<name>/SKILL.md           # 项目私有（同名覆盖用户/内置）
+```
+
+Skill 目录可以带 `scripts/`、`references/` 等附属文件，正文里的相对路径按 SKILL.md 所在目录解析。
+
+### 谁在用哪些 Skill
+
+“启用哪些 skill”是**角色级**配置，写在各自的 `.md` frontmatter 里：
+
+```markdown
+---
+model: gpt-4o
+tools: [read, bash]        # 启用 skill 必须保留 read
+skills: [pdf-tools]        # 不写 = 不启用任何 skill
+---
+```
+
+- 助理写 `.pi/assistant.md`，子 Agent 写 `.pi/agents/<name>.md`；主会话与子会话各自按自己的清单注入。
+- 系统设置 → Skills 里的开关是**全局闸门**：关掉后任何角色都无法使用（用户库里写一个 `.disabled` 标记）。
+- 最终生效 = 全局启用 ∧ 属于该角色的清单。上传一个 skill 不会自动对所有角色生效。
+- 引用不存在的 skill 会在保存配置时被拒绝；skill 被删除后，其他角色会跳过它并记录日志。
+
+### read 是硬依赖
+
+Skill 正文靠 `read` 工具加载，因此配置了 skill 就必须启用 `read`：界面勾选 skill 时会自动勾上并锁定 `read`，后端保存时也会校验（`tools` 未配置时视为继承默认工具集，天然含 `read`，不报错）。
+
+### 注入机制
+
+Skill 由独立的 Durable 扩展 `pi-box-skills` 的 prompt section 注入，**每次请求现算**：改 frontmatter、改全局开关、重新上传，下一轮对话立即生效，不需要重启，也不需要同步已有会话（包括已 spawn 的子 Agent 和定时任务的隔离会话）。子 Agent spawn 时只移除 `pi-box` 扩展（防递归），不影响 skill 注入。
+
+### 上传与管理
+
+在「系统设置 → Skills」上传单个 `SKILL.md`（可附选整个目录一并上传 `scripts/`、`references/` 等文本文件）。也可以直接调 API：
+
+```bash
+curl -s -X POST http://127.0.0.1:8790/api/skills/upload \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"pdf-tools","content":"---\nname: pdf-tools\ndescription: 从 PDF 提取文本与表格。\n---\n\n正文"}'
+```
+
+名称须符合 Agent Skills 规范（小写字母/数字/连字符，≤64 字符），`description` 必填（≤1024 字符），且 frontmatter 的 `name` 必须与目录名一致。
+
+> ⚠️ Skill 可以指示模型执行脚本，上传等同于授予在本容器内执行的权限；请只安装可信来源。
+
 ## 项目定时任务
 
 定时任务在项目设置页面配置。支持每隔一段时间、每天、工作日、每周、每月以及指定时间仅运行一次。每项任务可以单独设置时区、启用状态和任务说明，也可以手动立即运行。
@@ -165,6 +219,8 @@ podman compose down
 
 - `TZ`：容器时区，默认 `Asia/Shanghai`。
 - `PI_BOXD_DATA_DIR`：Durable 数据目录；镜像默认 `/home/agent/.pi-boxd`。
+- `PI_BOX_USER_SKILLS_DIR`：用户 Skill 库；默认 `~/.pi/agent/skills`。
+- `PI_BOX_BUILTIN_SKILLS_DIR`：内置 Skill 库；默认 `/opt/pi-box/skills`。
 - `PORT`：HTTP 监听端口；镜像默认 `8790`。
 - `PI_BOX_AUTH_USERNAME` / `PI_BOX_AUTH_PASSWORD`：应用层 HTTP Basic Auth；密码为空时禁用认证。
 
