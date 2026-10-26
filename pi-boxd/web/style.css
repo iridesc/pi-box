@@ -492,6 +492,8 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 .mcp-tool-description { color: #8b949e; line-height: 1.4; }
 .drawer-tag-builtin { color: #d29922; }
 .drawer-tag-user { color: #58a6ff; }
+.drawer-tag-project { color: #3fb950; }
+.drawer-hint { font-size: 12px; margin: 4px 0 10px; line-height: 1.5; }
 .drawer-danger { color: #f85149 !important; }
 .kv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .kv-table td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
@@ -538,6 +540,13 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 .agent-option:has(input:checked) { border-color: #1f6feb; background: rgba(31, 111, 235, .14); }
 .agent-option input { margin: 0; }
 .agent-option-disabled { opacity: .5; cursor: not-allowed; }
+.agent-option-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 带说明的选项（skill）：标题一行，说明换行并限制两行 */
+.agent-option:has(.agent-option-note) { align-items: flex-start; flex-wrap: wrap; }
+.agent-option-note {
+  flex-basis: 100%; margin-top: 2px; font-size: 11px; color: #8b949e; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .drawer-submodal h3 { margin: 0 0 16px; font-size: 14px; color: #c9d1d9; }
 .drawer-submodal .form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .drawer-submodal .form-row label { width: 100px; flex-shrink: 0; color: #8b949e; font-size: 12px; }
