@@ -9,7 +9,7 @@
 import { readdir, readFile, writeFile, mkdir, unlink, rename, stat } from "node:fs/promises";
 import { basename, join, dirname } from "node:path";
 import { PROJECTS_DIR, GLOBAL_AGENTS_DIR, META_PROJECT, META_DIR, META_AGENTS_DIR } from "./paths.mjs";
-import { models, currentModel } from "./model.mjs";
+import { models, currentModel, resolveModelRef } from "./model.mjs";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 
 const TOOL_BY_NAME = new Map((CodingTools.tools ?? []).map((tool) => [tool.name, tool]));
@@ -252,17 +252,23 @@ export function assistantInstructions(projectName, assistant, agents) {
 
 /** 解析 agent 定义里的 model 字段，跟当前全局 model 派生实际配置。
  * 支持两种写法：
- *   model: gpt-4o            （纯 modelId，provider 跟当前配置）
+ *   model: gpt-4o            （纯 modelId，先在全局默认厂商里找，再在所有已加载厂商里找唯一匹配）
  *   model: openai/gpt-4o     （provider/modelId）
  * 解析不到可用模型，回退到全局 model。 */
 export function resolveAgentModel(defModel) {
   const fallback = currentModel;
   if (!defModel) return fallback;
-  if (defModel.includes("/")) {
-    const [provider, modelId] = defModel.split("/");
-    if (models.getModel(provider, modelId)) return { provider, modelId };
+  const raw = String(defModel).trim();
+  if (!raw) return fallback;
+  if (raw.includes("/")) {
+    const slash = raw.indexOf("/");
+    const provider = raw.slice(0, slash);
+    const modelId = raw.slice(slash + 1);
+    return resolveModelRef(provider, modelId) ?? fallback;
   }
-  if (models.getModel(fallback.provider, defModel)) return { provider: fallback.provider, modelId: defModel };
+  if (models.getModel(fallback.provider, raw)) return { provider: fallback.provider, modelId: raw };
+  const matches = models.getProviders().filter((p) => models.getModel(p.id, raw));
+  if (matches.length === 1) return { provider: matches[0].id, modelId: raw };
   return fallback;
 }
 

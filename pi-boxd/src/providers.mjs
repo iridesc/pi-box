@@ -41,18 +41,21 @@ export async function getAllProviderModels() {
 
 // 构造 pi-ai 的 authContext：让 auth resolve 从 config.json 读 key（回退到 process.env）
 import { stat } from "node:fs/promises";
-import { loadConfig, activeProviderConfig } from "./io.mjs";
+import { loadConfig, providerConfig, configuredProviders } from "./io.mjs";
 
 export function makeAuthContext() {
   return {
     async env(name) {
       const cfg = await loadConfig();
-      const active = activeProviderConfig(cfg);
-      if (active?.apiKey) {
-        const def = PROVIDERS[active.provider];
-        if (def && name === def.keyEnv) return active.apiKey;
+      // 多个厂商可以同时存在：按 env 名匹配各自保存的 key（回退 process.env）。
+      for (const id of configuredProviders(cfg)) {
+        const saved = providerConfig(cfg, id);
+        if (!saved.apiKey) continue;
+        const def = PROVIDERS[id];
+        if (!def) continue;
+        if (name === def.keyEnv) return saved.apiKey;
         // anthropic 协议还可能查 ANTHROPIC_AUTH_TOKEN
-        if (def && def.keyEnv === "ANTHROPIC_API_KEY" && name === "ANTHROPIC_AUTH_TOKEN") return active.apiKey;
+        if (def.keyEnv === "ANTHROPIC_API_KEY" && name === "ANTHROPIC_AUTH_TOKEN") return saved.apiKey;
       }
       return process.env[name];
     },

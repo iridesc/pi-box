@@ -38,15 +38,37 @@
         <section id="drawer-content" class="drawer-content">
           <!-- 模型 Tab 复用原设置表单（去掉原 modal-head） -->
           <div id="tab-models" class="drawer-tab">
-            <div class="form-row"><label for="cfg-provider">Provider</label><select id="cfg-provider"></select></div>
-            <div class="form-row"><label for="cfg-model">Model ID</label><select id="cfg-model"></select><button id="fetch-models" class="btn-secondary" type="button">获取列表</button></div>
+            <div class="form-row">
+              <label for="cfg-provider">Provider</label>
+              <select id="cfg-provider"></select>
+              <label class="cfg-inline"><input id="cfg-active" type="checkbox"> 设为默认</label>
+            </div>
             <div class="form-row"><label for="cfg-key">API Key</label><input id="cfg-key" type="password" placeholder="未改动时留空保留原 key"></div>
             <div class="form-row"><label for="cfg-baseurl">Base URL</label><input id="cfg-baseurl" type="text" placeholder="可选"></div>
+            <div class="form-row cfg-models-row">
+              <label>已配置模型</label>
+              <div class="cfg-models">
+                <div id="cfg-models-chips" class="cfg-models-chips"></div>
+                <div class="cfg-models-add">
+                  <input id="cfg-model-add" type="text" placeholder="模型 ID，如 gpt-4o-mini" />
+                  <button id="cfg-model-add-btn" class="btn-secondary" type="button">添加</button>
+                  <button id="cfg-model-catalog-btn" class="btn-secondary" type="button">从目录选择</button>
+                </div>
+                <div id="cfg-model-catalog" class="cfg-models-catalog hidden">
+                  <select id="cfg-model-select" size="8"></select>
+                  <div class="cfg-models-catalog-actions">
+                    <button id="cfg-model-pick" class="btn-secondary" type="button">添加选中项</button>
+                    <button id="fetch-models" class="btn-secondary" type="button">刷新目录</button>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div id="cfg-status" class="form-status"></div>
             <div class="form-actions">
-              <span class="modal-hint">每个厂商的配置会分别保存在持久目录</span>
+              <span class="modal-hint">每个厂商的配置与模型列表会分别持久保存</span>
+              <button id="cfg-delete" class="btn-secondary" type="button">删除此 Provider</button>
               <button id="test-settings" class="btn-secondary" type="button">测试连接</button>
-              <button id="save-settings" type="button">保存并启用</button>
+              <button id="save-settings" type="button">保存</button>
             </div>
           </div>
           <div id="tab-agents" class="drawer-tab hidden"></div>

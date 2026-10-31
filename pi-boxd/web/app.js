@@ -29,7 +29,9 @@ let scheduleRunsCache = {}; // project -> 最近运行记录
 const conversationDetailCache = new Map(); // conversation id -> 按需加载的完整 entries
 const conversationDetailRequests = new Map();
 let cfgProviders = [];
-let cfgSettings = { activeProvider: "openai", providers: {} };
+let cfgSettings = { activeProvider: "openai", providers: {}, currentModel: null };
+let cfgSelectedModels = [];
+let cfgModelsCatalog = [];
 const MASKED_API_KEY = "********";
 const MOBILE_PANELS = new Set(["tree", "sessions", "view", "tasks"]);
 let activeMobilePanel = "tree";
@@ -1223,26 +1225,40 @@ async function populateAgentModelSelect(select, selectedValue) {
   select.disabled = true;
   try {
     const settings = await (await fetch("/api/settings")).json();
-    const provider = settings.activeProvider;
     const providersData = await (await fetch("/api/providers")).json();
-    const meta = providersData.providers.find((p) => p.id === provider);
-    const result = await (await fetch("/api/models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider }),
-    })).json();
-    const models = result.models ?? [];
+    const metaById = Object.fromEntries((providersData.providers ?? []).map((p) => [p.id, p]));
     select.innerHTML = "";
     const inherit = document.createElement("option");
     inherit.value = "";
-    inherit.textContent = `跟随全局模型（${state.model.provider}/${state.model.modelId}）`;
+    const fallbackLabel = settings.currentModel
+      ? `${settings.currentModel.provider}/${settings.currentModel.modelId}`
+      : "（未配置）";
+    inherit.textContent = `跟随全局模型（${fallbackLabel}）`;
     select.appendChild(inherit);
-    const values = selectedValue && !models.includes(selectedValue) ? [selectedValue, ...models] : models;
-    for (const modelId of values) {
-      const option = document.createElement("option");
-      option.value = modelId;
-      option.textContent = `${meta?.name ?? provider} / ${modelId}`;
-      select.appendChild(option);
+    const groups = Object.entries(settings.providers ?? {}).filter(([, v]) => v.hasKey);
+    if (groups.length === 0) {
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "（尚未配置任何厂商，请先在 ⚙ 设置 → 模型中配置）";
+      empty.disabled = true;
+      select.appendChild(empty);
+    }
+    for (const [provider, saved] of groups) {
+      const name = metaById[provider]?.name ?? provider;
+      const models = Array.isArray(saved.models) && saved.models.length > 0 ? saved.models : [];
+      for (const modelId of models) {
+        const option = document.createElement("option");
+        option.value = `${provider}/${modelId}`;
+        option.textContent = `${name} / ${modelId}`;
+        select.appendChild(option);
+      }
+    }
+    // 保留当前已保存但可能不再在列表里的值（例如厂商被删或模型被移出）
+    if (selectedValue && ![...select.options].some((o) => o.value === selectedValue)) {
+      const keep = document.createElement("option");
+      keep.value = selectedValue;
+      keep.textContent = selectedValue;
+      select.appendChild(keep);
     }
     select.value = selectedValue || "";
   } catch {
@@ -1324,27 +1340,59 @@ for (const button of document.querySelectorAll("[data-mobile-panel]")) {
 setMobilePanel(activeMobilePanel);
 
 // ─── 设置弹窗（模型）────────────────────────────────────────────────────────
-function fillModelList(meta, sel2) {
-  const sel = document.getElementById("cfg-model");
+function renderModelChips() {
+  const box = document.getElementById("cfg-models-chips");
+  box.innerHTML = "";
+  if (cfgSelectedModels.length === 0) {
+    box.appendChild(el("div", "muted", "（还没有配置模型；至少添加一个）"));
+    return;
+  }
+  cfgSelectedModels.forEach((modelId, index) => {
+    const chip = el("span", "cfg-chip");
+    const label = el("span", "", index === 0 ? `${modelId}（默认）` : modelId);
+    chip.appendChild(label);
+    const rm = el("button", "cfg-chip-remove", "×");
+    rm.type = "button";
+    rm.title = "移除";
+    rm.onclick = () => {
+      cfgSelectedModels = cfgSelectedModels.filter((m) => m !== modelId);
+      renderModelChips();
+    };
+    chip.appendChild(rm);
+    box.appendChild(chip);
+  });
+}
+
+function fillModelCatalog() {
+  const sel = document.getElementById("cfg-model-select");
   sel.innerHTML = "";
-  const ms = meta.models || [];
-  const list = sel2 && !ms.includes(sel2) ? [sel2, ...ms] : ms;
-  for (const m of list) {
+  const available = cfgModelsCatalog.filter((m) => !cfgSelectedModels.includes(m));
+  for (const m of available) {
     const o = document.createElement("option");
     o.value = m;
     o.textContent = m;
     sel.appendChild(o);
   }
-  if (sel2) sel.value = sel2;
+}
+
+function addModel(modelId) {
+  const id = (modelId || "").trim();
+  if (!id) return;
+  if (!cfgSelectedModels.includes(id)) {
+    cfgSelectedModels.push(id);
+    renderModelChips();
+    fillModelCatalog();
+  }
 }
 
 function selectedProviderPayload() {
   const keyInput = document.getElementById("cfg-key");
   return {
     provider: document.getElementById("cfg-provider").value,
-    modelId: document.getElementById("cfg-model").value,
+    models: [...cfgSelectedModels],
     apiKey: keyInput.dataset.masked === "true" ? undefined : keyInput.value || undefined,
     baseUrl: document.getElementById("cfg-baseurl").value,
+    setActive: document.getElementById("cfg-active").checked,
   };
 }
 
@@ -1359,11 +1407,17 @@ function loadProviderForm(provider) {
   const meta = cfgProviders.find((p) => p.id === provider);
   const saved = cfgSettings.providers?.[provider] ?? {};
   if (!meta) return;
-  fillModelList(meta, saved.modelId || meta.defaultModel);
+  cfgSelectedModels = Array.isArray(saved.models) && saved.models.length > 0
+    ? [...saved.models]
+    : [meta.defaultModel || ""];
+  renderModelChips();
   document.getElementById("cfg-baseurl").value = saved.baseUrl || meta.defaultBaseUrl || "";
   const key = document.getElementById("cfg-key");
   showStoredKey(key, saved.hasKey);
-  document.getElementById("cfg-status").textContent = provider === cfgSettings.activeProvider ? "当前启用" : "";
+  document.getElementById("cfg-active").checked = provider === cfgSettings.activeProvider;
+  const isDefault = cfgSettings.currentModel && cfgSettings.currentModel.provider === provider;
+  document.getElementById("cfg-status").textContent = isDefault ? "当前默认" : "";
+  fillModelCatalog();
 }
 
 async function openSettings() {
@@ -2250,38 +2304,81 @@ cfgKeyInput.onblur = () => {
 cfgKeyInput.oninput = () => {
   cfgKeyInput.dataset.masked = "false";
 };
-document.getElementById("fetch-models").onclick = async () => {
+async function fetchModelCatalog() {
   const status = document.getElementById("cfg-status");
   status.className = "form-status";
-  status.textContent = "正在获取模型列表…";
-  const payload = selectedProviderPayload();
-  const r = await fetch("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  status.textContent = "正在获取模型目录…";
+  const provider = document.getElementById("cfg-provider").value;
+  const r = await fetch("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });
   const data = await r.json();
   if (!r.ok) {
     status.className = "form-status err";
     status.textContent = `❌ ${data.error || "获取失败"}`;
-    return;
+    return false;
   }
-  const meta = cfgProviders.find((p) => p.id === payload.provider);
-  meta.models = data.models;
-  fillModelList(meta, data.models.includes(payload.modelId) ? payload.modelId : data.models[0] || meta.defaultModel);
+  cfgModelsCatalog = data.models ?? [];
+  fillModelCatalog();
+  document.getElementById("cfg-model-catalog").classList.remove("hidden");
   status.className = "form-status ok";
-  status.textContent = `✅ 获取到 ${data.models.length} 个模型`;
+  status.textContent = `✅ 目录包含 ${cfgModelsCatalog.length} 个模型`;
+  return true;
+}
+document.getElementById("cfg-model-add-btn").onclick = () => addModel(document.getElementById("cfg-model-add").value);
+document.getElementById("cfg-model-add").onkeydown = (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); addModel(ev.target.value); }
 };
+document.getElementById("cfg-model-catalog-btn").onclick = async () => {
+  const box = document.getElementById("cfg-model-catalog");
+  box.classList.toggle("hidden");
+  if (!box.classList.contains("hidden") && cfgModelsCatalog.length === 0) await fetchModelCatalog();
+};
+document.getElementById("cfg-model-pick").onclick = () => {
+  const sel = document.getElementById("cfg-model-select");
+  addModel(sel.value);
+};
+document.getElementById("fetch-models").onclick = fetchModelCatalog;
 document.getElementById("test-settings").onclick = async () => {
   const status = document.getElementById("cfg-status");
   status.className = "form-status";
   status.textContent = "正在发起真实模型请求…";
-  const r = await fetch("/api/settings/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(selectedProviderPayload()) });
+  const payload = selectedProviderPayload();
+  const testModel = payload.models[0];
+  const r = await fetch("/api/settings/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, modelId: testModel }),
+  });
   const data = await r.json();
   status.className = `form-status ${r.ok ? "ok" : "err"}`;
   status.textContent = r.ok ? `✅ 连接成功 · ${data.provider}/${data.modelId} · ${data.latencyMs}ms` : `❌ ${data.error || "连接失败"}`;
+};
+document.getElementById("cfg-delete").onclick = async () => {
+  const provider = document.getElementById("cfg-provider").value;
+  const meta = cfgProviders.find((p) => p.id === provider);
+  if (!confirm(`删除 ${meta?.name ?? provider} 的已保存配置（API Key 等）？`)) return;
+  const r = await fetch("/api/settings/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    alert(data.error || "删除失败");
+    return;
+  }
+  closeSettings();
+  refresh();
 };
 document.getElementById("save-settings").onclick = async () => {
   const status = document.getElementById("cfg-status");
   status.className = "form-status";
   status.textContent = "保存中…";
   const payload = selectedProviderPayload();
+  if (!payload.models.length) {
+    status.className = "form-status err";
+    status.textContent = "❌ 至少需要配置一个模型";
+    return;
+  }
   const r = await fetch("/api/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2290,7 +2387,7 @@ document.getElementById("save-settings").onclick = async () => {
   const data = await r.json();
   if (r.ok) {
     status.className = "form-status ok";
-    status.textContent = `✅ 已保存 · ${data.effectiveProvider}/${data.modelId}`;
+    status.textContent = `✅ 已保存 · ${payload.models.length} 个模型${payload.setActive ? " · 已设为默认" : ""}`;
     setTimeout(() => {
       closeSettings();
       refresh();

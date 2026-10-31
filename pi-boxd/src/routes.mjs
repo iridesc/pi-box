@@ -3,7 +3,7 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
-import { readBody, loadConfig, saveConfig, loadMcpConfig, saveMcpConfig, loadPrefs, savePrefs } from "./io.mjs";
+import { readBody, loadConfig, saveConfig, providerConfig, loadMcpConfig, saveMcpConfig, loadPrefs, savePrefs } from "./io.mjs";
 import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, resolveSkills, projectSkillsDir, USER_SKILLS_DIR, BUILTIN_SKILLS_DIR } from "./skills.mjs";
 import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
@@ -289,42 +289,72 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
           const cfg = await loadConfig();
           const providers = Object.fromEntries(
             Object.entries(cfg.providers ?? {}).map(([id, value]) => [id, {
-              modelId: value.modelId ?? "",
+              models: Array.isArray(value.models) ? value.models : [],
               baseUrl: value.baseUrl ?? "",
               hasKey: !!value.apiKey,
             }]),
           );
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ activeProvider: cfg.activeProvider, providers }));
+          res.end(JSON.stringify({ activeProvider: cfg.activeProvider, providers, currentModel }));
           return;
         }
-        let { provider, modelId, apiKey, baseUrl } = await readBody(req);
-        if (!provider) provider = "openai";
+        const input = await readBody(req);
+        const provider = input.provider;
         const meta = PROVIDER_LIST.find((p) => p.id === provider);
-        if (!modelId) modelId = meta?.defaultModel || "gpt-4o";
-        if (baseUrl === undefined) baseUrl = meta?.defaultBaseUrl || "";
-        const modelsByProvider = await getAllProviderModels();
-        const available = modelsByProvider[provider] ?? [];
-        if (available.length > 0 && modelId && !available.includes(modelId)) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: `模型 "${modelId}" 不在 ${provider} 的可用列表中`, available: available.slice(0, 30) }));
-          return;
+        if (!meta) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: `未知 Provider：${provider}` }));
         }
         const old = await loadConfig();
-        const previous = old.providers?.[provider] ?? {};
+        const previous = providerConfig(old, provider);
         // 兼容前端掩码：星号绝不能被当作真实密钥保存。
+        let apiKey = input.apiKey;
         if (apiKey === undefined || apiKey === null || apiKey === "" || /^\*+$/.test(apiKey)) apiKey = previous.apiKey || "";
+        const baseUrl = input.baseUrl === undefined ? (previous.baseUrl || meta.defaultBaseUrl || "") : input.baseUrl;
+        // 模型列表：支持批量配置；空则回退默认模型。保留用户手写的自定义 modelId（自建/兼容端点）。
+        let models = Array.isArray(input.models)
+          ? [...new Set(input.models.map((m) => String(m).trim()).filter(Boolean))]
+          : (input.modelId ? [String(input.modelId)] : []);
+        if (models.length === 0) models = previous.models?.length ? previous.models : [meta.defaultModel || "gpt-4o"];
+        // 默认厂商：显式勾选「设为默认」，或当前默认厂商尚未配置 key（首个可用厂商自动成为默认）。
+        const oldActiveHasKey = !!old.providers?.[old.activeProvider]?.apiKey;
+        const activeProvider = input.setActive || !oldActiveHasKey ? provider : old.activeProvider;
         const next = {
-          version: 2,
-          activeProvider: provider,
-          providers: { ...(old.providers ?? {}), [provider]: { modelId, apiKey, baseUrl } },
+          version: 3,
+          activeProvider,
+          providers: { ...(old.providers ?? {}), [provider]: { apiKey, baseUrl, models } },
         };
         await saveConfig(next);
         const newHasKey = await refreshProvider();
         // 按各项目/agent 定义重新解析，而不是把所有会话粗暴覆盖成全局模型。
         await syncAllConfig(harness);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, hasKey: newHasKey, provider, modelId, baseUrl, effectiveProvider: currentModel.provider }));
+        res.end(JSON.stringify({
+          ok: true, hasKey: newHasKey, provider, models, baseUrl,
+          activeProvider: next.activeProvider, effectiveProvider: currentModel.provider,
+        }));
+      },
+    },
+    // 删除某个厂商的已保存配置（API Key 等），不影响其他厂商。
+    "/api/settings/delete": {
+      method: "POST",
+      async handler(req, res) {
+        const { provider } = await readBody(req);
+        const old = await loadConfig();
+        if (!old.providers?.[provider]) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: `未配置过 Provider：${provider}` }));
+        }
+        const next = { ...old, providers: { ...(old.providers ?? {}) } };
+        delete next.providers[provider];
+        if (next.activeProvider === provider) {
+          next.activeProvider = Object.keys(next.providers)[0] ?? "openai";
+        }
+        await saveConfig(next);
+        await refreshProvider();
+        await syncAllConfig(harness);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, provider, activeProvider: next.activeProvider }));
       },
     },
     // agent 列表 / 保存
@@ -675,7 +705,7 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         const cfg = await loadConfig();
         const providers = PROVIDER_LIST.map((p) => ({
           id: p.id,
-          label: p.label,
+          label: p.name,
           configured: !!cfg.providers?.[p.id]?.apiKey,
         }));
         res.writeHead(200, { "Content-Type": "application/json" });

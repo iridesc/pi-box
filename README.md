@@ -28,6 +28,16 @@ podman compose up -d --build
 
 打开 <http://127.0.0.1:8790>，在系统设置中配置模型厂商、模型、API Key、MCP 与全局 Agent。
 
+## 模型与厂商配置
+
+系统设置 → 模型支持同时配置多个厂商（OpenAI / DeepSeek / Anthropic / Gemini / Groq / OpenRouter / MiniMax 等），每个厂商可配置多个模型 ID、各自的 API Key 与 Base URL，全部持久化到 `agent-home/.pi-boxd/config.json`（`version: 3`，旧版单模型配置会自动迁移）。
+
+- 每个厂商勾选「设为默认」后即成为全局默认模型；未显式指定模型的角色回退到它。
+- 助理 / 子 Agent 的 frontmatter 用 `model` 字段指定模型，两种写法都支持：
+  - `model: gpt-4o-mini` —— 纯 modelId，先在全局默认厂商里找，再在所有已配置厂商里唯一匹配；
+  - `model: anthropic/claude-sonnet-4-5` —— `provider/modelId`，精确指定厂商与模型。
+- 解析不到可用模型时回退到全局默认模型；所有厂商会同时加载，互不影响。
+
 管理台采用四栏布局：第一栏选择项目、助理或 Agent，第二栏展示该角色的全部会话及实时状态，第三栏展示当前会话内容，第四栏只展示当前会话及其派生子会话的 Durable 任务图。运行状态属于具体会话，同一个 Agent 可以同时拥有多个会话。
 
 生产环境推荐只拉取已发布镜像，并删除 Compose 中的 `build: .`：
