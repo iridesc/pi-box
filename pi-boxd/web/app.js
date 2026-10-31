@@ -32,6 +32,8 @@ let cfgProviders = [];
 let cfgSettings = { activeProvider: "openai", providers: {}, currentModel: null };
 let cfgSelectedModels = [];
 let cfgModelsCatalog = [];
+let cfgCurrentProvider = null; // 当前选中的提供商 id
+let cfgProviderTabs = [];      // 左侧二级菜单显示的提供商 id 列表
 const MASKED_API_KEY = "********";
 const MOBILE_PANELS = new Set(["tree", "sessions", "view", "tasks"]);
 let activeMobilePanel = "tree";
@@ -1388,7 +1390,7 @@ function addModel(modelId) {
 function selectedProviderPayload() {
   const keyInput = document.getElementById("cfg-key");
   return {
-    provider: document.getElementById("cfg-provider").value,
+    provider: cfgCurrentProvider,
     models: [...cfgSelectedModels],
     apiKey: keyInput.dataset.masked === "true" ? undefined : keyInput.value || undefined,
     baseUrl: document.getElementById("cfg-baseurl").value,
@@ -1403,10 +1405,39 @@ function showStoredKey(key, hasKey) {
   key.placeholder = hasKey ? "已保存；输入新值可替换" : "填入你的 API Key";
 }
 
+// 左侧二级菜单：一个提供商一个 tab
+function renderProviderNav() {
+  const nav = document.getElementById("provider-tabs");
+  nav.innerHTML = "";
+  for (const pid of cfgProviderTabs) {
+    const meta = cfgProviders.find((p) => p.id === pid);
+    const saved = cfgSettings.providers?.[pid];
+    const hasKey = !!saved?.hasKey;
+    const isDefault = cfgSettings.activeProvider === pid
+      || (cfgSettings.currentModel && cfgSettings.currentModel.provider === pid);
+    const tab = el("button", "provider-tab" + (pid === cfgCurrentProvider ? " active" : ""));
+    tab.type = "button";
+    tab.appendChild(el("span", "provider-tab-name", meta?.name ?? pid));
+    if (hasKey) tab.appendChild(el("span", "provider-tab-badge", "✓"));
+    if (isDefault) tab.appendChild(el("span", "provider-tab-badge default", "默认"));
+    tab.onclick = () => selectProvider(pid);
+    nav.appendChild(tab);
+  }
+}
+
+function selectProvider(pid) {
+  cfgCurrentProvider = pid;
+  renderProviderNav();
+  loadProviderForm(pid);
+}
+
 function loadProviderForm(provider) {
   const meta = cfgProviders.find((p) => p.id === provider);
   const saved = cfgSettings.providers?.[provider] ?? {};
   if (!meta) return;
+  document.getElementById("provider-form").classList.remove("hidden");
+  document.getElementById("provider-empty").classList.add("hidden");
+  document.getElementById("provider-form-title").textContent = meta.name;
   cfgSelectedModels = Array.isArray(saved.models) && saved.models.length > 0
     ? [...saved.models]
     : [meta.defaultModel || ""];
@@ -1417,6 +1448,7 @@ function loadProviderForm(provider) {
   document.getElementById("cfg-active").checked = provider === cfgSettings.activeProvider;
   const isDefault = cfgSettings.currentModel && cfgSettings.currentModel.provider === provider;
   document.getElementById("cfg-status").textContent = isDefault ? "当前默认" : "";
+  cfgModelsCatalog = []; // 目录与 provider 相关，切换时清空
   fillModelCatalog();
 }
 
@@ -1442,23 +1474,15 @@ async function openSettingsModal(tab) {
   if (cfgProviders.length === 0) {
     const d = await (await fetch("/api/providers")).json();
     cfgProviders = d.providers;
-    const sel = document.getElementById("cfg-provider");
-    sel.innerHTML = "";
-    for (const p of cfgProviders) {
-      const o = document.createElement("option");
-      o.value = p.id;
-      o.textContent = p.name;
-      sel.appendChild(o);
-    }
-    sel.onchange = () => loadProviderForm(sel.value);
   }
   cfgSettings = await (await fetch("/api/settings")).json();
-  for (const option of document.getElementById("cfg-provider").options) {
-    const meta = cfgProviders.find((p) => p.id === option.value);
-    option.textContent = `${meta.name}${cfgSettings.providers?.[option.value]?.hasKey ? " ✓" : ""}`;
-  }
-  document.getElementById("cfg-provider").value = cfgSettings.activeProvider || cfgProviders[0]?.id;
-  loadProviderForm(document.getElementById("cfg-provider").value);
+  // 左侧 tab = 已保存过的提供商；至少包含默认厂商
+  cfgProviderTabs = Object.keys(cfgSettings.providers ?? {});
+  if (!cfgProviderTabs.includes(cfgSettings.activeProvider)) cfgProviderTabs.push(cfgSettings.activeProvider);
+  if (cfgProviderTabs.length === 0 && cfgProviders.length > 0) cfgProviderTabs.push(cfgProviders[0].id);
+  cfgCurrentProvider = cfgSettings.activeProvider || cfgProviderTabs[0] || cfgProviders[0]?.id;
+  renderProviderNav();
+  selectProvider(cfgCurrentProvider);
 }
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !document.getElementById("settings-modal").classList.contains("hidden")) closeSettings();
@@ -2308,7 +2332,7 @@ async function fetchModelCatalog() {
   const status = document.getElementById("cfg-status");
   status.className = "form-status";
   status.textContent = "正在获取模型目录…";
-  const provider = document.getElementById("cfg-provider").value;
+  const provider = cfgCurrentProvider;
   const r = await fetch("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });
   const data = await r.json();
   if (!r.ok) {
@@ -2318,7 +2342,6 @@ async function fetchModelCatalog() {
   }
   cfgModelsCatalog = data.models ?? [];
   fillModelCatalog();
-  document.getElementById("cfg-model-catalog").classList.remove("hidden");
   status.className = "form-status ok";
   status.textContent = `✅ 目录包含 ${cfgModelsCatalog.length} 个模型`;
   return true;
@@ -2327,16 +2350,36 @@ document.getElementById("cfg-model-add-btn").onclick = () => addModel(document.g
 document.getElementById("cfg-model-add").onkeydown = (ev) => {
   if (ev.key === "Enter") { ev.preventDefault(); addModel(ev.target.value); }
 };
-document.getElementById("cfg-model-catalog-btn").onclick = async () => {
-  const box = document.getElementById("cfg-model-catalog");
-  box.classList.toggle("hidden");
-  if (!box.classList.contains("hidden") && cfgModelsCatalog.length === 0) await fetchModelCatalog();
-};
 document.getElementById("cfg-model-pick").onclick = () => {
   const sel = document.getElementById("cfg-model-select");
   addModel(sel.value);
 };
 document.getElementById("fetch-models").onclick = fetchModelCatalog;
+// 左侧二级菜单：添加提供商
+function renderAddProviderPanel() {
+  const panel = document.getElementById("add-provider-panel");
+  panel.innerHTML = "";
+  const candidates = cfgProviders.filter((p) => !cfgProviderTabs.includes(p.id));
+  if (candidates.length === 0) {
+    panel.appendChild(el("div", "muted", "所有提供商都已添加"));
+    return;
+  }
+  for (const p of candidates) {
+    const b = el("button", "provider-add-item", p.name);
+    b.type = "button";
+    b.onclick = () => {
+      cfgProviderTabs.push(p.id);
+      panel.classList.add("hidden");
+      selectProvider(p.id);
+    };
+    panel.appendChild(b);
+  }
+}
+document.getElementById("add-provider").onclick = () => {
+  const panel = document.getElementById("add-provider-panel");
+  renderAddProviderPanel();
+  panel.classList.toggle("hidden");
+};
 document.getElementById("test-settings").onclick = async () => {
   const status = document.getElementById("cfg-status");
   status.className = "form-status";
@@ -2353,7 +2396,7 @@ document.getElementById("test-settings").onclick = async () => {
   status.textContent = r.ok ? `✅ 连接成功 · ${data.provider}/${data.modelId} · ${data.latencyMs}ms` : `❌ ${data.error || "连接失败"}`;
 };
 document.getElementById("cfg-delete").onclick = async () => {
-  const provider = document.getElementById("cfg-provider").value;
+  const provider = cfgCurrentProvider;
   const meta = cfgProviders.find((p) => p.id === provider);
   if (!confirm(`删除 ${meta?.name ?? provider} 的已保存配置（API Key 等）？`)) return;
   const r = await fetch("/api/settings/delete", {
@@ -2366,7 +2409,11 @@ document.getElementById("cfg-delete").onclick = async () => {
     alert(data.error || "删除失败");
     return;
   }
-  closeSettings();
+  cfgProviderTabs = cfgProviderTabs.filter((id) => id !== provider);
+  cfgSettings = await (await fetch("/api/settings")).json();
+  if (cfgProviderTabs.length === 0) cfgProviderTabs.push(cfgSettings.activeProvider);
+  renderProviderNav();
+  selectProvider(cfgProviderTabs[0] ?? cfgSettings.activeProvider);
   refresh();
 };
 document.getElementById("save-settings").onclick = async () => {
