@@ -63,6 +63,11 @@ function el(tag, className, text) {
   return e;
 }
 
+/** 会话是否正在处理中（有正在运行或等待工具的任务）。 */
+function conversationBusy(conversation) {
+  return ["running", "waiting-tool", "pending"].includes(conversation?.status);
+}
+
 /** agent 状态 → 中文提示词（用于圆点 tooltip / flash hint）。 */
 function agentStatusLabel(status) {
   return {
@@ -1077,6 +1082,30 @@ function renderConversation(view) {
   const head = el("div", "view-head");
   head.appendChild(el("span", "view-title", title));
   head.appendChild(el("span", "view-sub", sub));
+  const stopBtn = el("button", "btn-danger view-stop", "终止会话");
+  stopBtn.type = "button";
+  stopBtn.title = "终止当前会话正在进行的任务";
+  stopBtn.disabled = !conversationBusy(conv);
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true;
+    try {
+      const res = await fetch("/api/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: conv.id }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || "终止失败");
+        stopBtn.disabled = false;
+      }
+      // 成功后保持禁用，SSE 会按新状态重渲染并刷新按钮。
+    } catch (error) {
+      alert(error.message);
+      stopBtn.disabled = false;
+    }
+  };
+  head.appendChild(stopBtn);
   mount(head);
 
   const detail = conversationDetailCache.get(String(conv.id));
@@ -1106,6 +1135,7 @@ function renderConversation(view) {
 
 // 输入框按会话复用同一个 DOM 节点：切换会话 / SSE 刷新都不重建，
 // 因此焦点、光标位置、输入法组合状态都不会丢，草稿另行按会话缓存。
+// 发送按钮在会话处理中会切换为「发送（排队）+ 引导（插话）」组合。
 function getComposer(convKey, conv) {
   let composer = composerCache.get(convKey);
   if (!composer) {
@@ -1113,36 +1143,69 @@ function getComposer(convKey, conv) {
     form.className = "view-input";
     const input = document.createElement("input");
     input.autocomplete = "off";
-    const btn = el("button", "", "发送");
-    btn.type = "submit";
+    const sendBtn = el("button", "", "发送");
+    sendBtn.type = "submit";
+    const steerBtn = el("button", "view-steer", "引导");
+    steerBtn.type = "button";
+    steerBtn.hidden = true;
     form.appendChild(input);
-    form.appendChild(btn);
+    form.appendChild(sendBtn);
+    form.appendChild(steerBtn);
+
+    const updateButtons = () => {
+      const busy = conversationBusy(composer.conv);
+      const hasContent = input.value.trim().length > 0;
+      steerBtn.hidden = !(busy && hasContent);
+      sendBtn.title = busy && hasContent ? "发送：当前回答结束后处理" : "发送";
+      steerBtn.title = "引导：立即插话，让 Agent 据此调整当前回复";
+    };
+
     input.addEventListener("input", () => {
       draftCache.set(convKey, input.value);
+      updateButtons();
     });
-    form.addEventListener("submit", async (ev) => {
-      ev.preventDefault();
+
+    const send = async (whenBusy) => {
       const content = input.value.trim();
       if (!content) return;
       input.value = "";
       draftCache.delete(convKey);
-      await fetch("/api/submit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId: convKey, content }),
-      });
-    });
-    composer = { form, input, btn };
+      updateButtons();
+      try {
+        const res = await fetch("/api/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversationId: convKey, content, whenBusy }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || "发送失败");
+        }
+      } catch (error) {
+        draftCache.set(convKey, content);
+        if (input.isConnected) input.value = content;
+        updateButtons();
+        alert(error.message);
+      }
+    };
+
+    form.onsubmit = (ev) => { ev.preventDefault(); send("followUp"); };
+    steerBtn.onclick = () => send("steer");
+
+    composer = { form, input, btn: sendBtn, steerBtn, updateButtons };
     composerCache.set(convKey, composer);
   }
+  composer.conv = conv;
   composer.input.placeholder = conv.actorType === "agent"
     ? `和子 Agent ${conv.actorName || ""} 对话…`
     : "和项目助理对话…";
   composer.input.disabled = !state.hasKey;
   composer.btn.disabled = !state.hasKey;
+  composer.steerBtn.disabled = !state.hasKey;
   const draft = draftCache.get(convKey) ?? "";
   // 仅在内容不一致时写回，避免打断正在进行的输入法组合输入。
   if (composer.input.value !== draft) composer.input.value = draft;
+  composer.updateButtons();
   return composer;
 }
 

@@ -40,6 +40,40 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         res.end(JSON.stringify({ id: String(id), entries }));
       },
     },
+    // 发送消息：whenBusy 决定会话忙碌时是排队（followUp）还是插话引导（steer）。
+    "/api/send": {
+      method: "POST",
+      async handler(req, res) {
+        const { conversationId, content, whenBusy } = await readBody(req);
+        const conversation = conversationId ? await harness.conversation(String(conversationId), context) : undefined;
+        if (!conversation) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "会话不存在" }));
+        }
+        const submission = await conversation.submit(
+          { type: "input", content: String(content ?? ""), whenBusy: whenBusy === "steer" ? "steer" : "followUp" },
+          context,
+        );
+        submission.wait(context).catch(() => {});
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, submissionId: String(submission.id) }));
+      },
+    },
+    // 终止会话：中止当前运行（跨后台边界，撤回排队中的输入）。
+    "/api/abort": {
+      method: "POST",
+      async handler(req, res) {
+        const { conversationId } = await readBody(req);
+        const conversation = conversationId ? await harness.conversation(String(conversationId), context) : undefined;
+        if (!conversation) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "会话不存在" }));
+        }
+        await conversation.abort(context, { background: true }).catch(() => {});
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      },
+    },
     // 页面为当前助理或 Agent 新建独立持久会话。
     "/api/role-conversations": {
       method: "POST",

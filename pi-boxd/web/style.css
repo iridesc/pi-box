@@ -141,6 +141,9 @@ section:last-child { border-right: none; }
   border-radius: 4px; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 12px;
 }
 .view-input button:disabled { background: #21262d; border-color: #30363d; color: #484f58; cursor: not-allowed; }
+.view-input button.view-steer { background: #21262d; border-color: #d29922; color: #d29922; }
+.view-input button.view-steer:hover:not(:disabled) { background: #2d2416; border-color: #e3b341; color: #e3b341; }
+.view-stop { margin-left: auto; flex-shrink: 0; padding: 3px 10px; font-size: 11px; }
 
 /* 对话：一条用户输入 + Agent 的完整处理过程 = 一个视觉单元。 */
 .conversation-user-wrap {
@@ -235,6 +238,7 @@ section:last-child { border-right: none; }
   border-radius: 4px; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 12px;
 }
 .btn-danger:hover { background: #3d1418; }
+.btn-danger:disabled { border-color: #30363d; color: #484f58; background: #21262d; cursor: not-allowed; }
 .form-status { font-size: 12px; color: #8b949e; }
 .form-status.ok { color: #7ee787; }
 .form-status.err { color: #f85149; }
