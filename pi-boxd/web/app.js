@@ -381,8 +381,8 @@ function renderSessions() {
     const dot = el("span", `session-dot session-dot-${conversation.status ?? "idle"}`);
     dot.title = agentStatusLabel(conversation.status ?? "idle");
     item.appendChild(dot);
-    item.appendChild(el("div", "session-title", conversationDisplayTitle(conversation)));
-    item.appendChild(el("div", "session-meta", `${sessionSourceLabel(conversation)} · #${conversation.id}${conversation.createdAt ? ` · ${formatDateTime(conversation.createdAt)}` : ""}`));
+    const titleDiv = el("div", "session-title");
+    titleDiv.appendChild(el("span", "session-title-text", conversationDisplayTitle(conversation)));
     const renameBtn = el("button", "session-rename", "✎");
     renameBtn.type = "button";
     renameBtn.title = "重命名会话";
@@ -390,7 +390,9 @@ function renderSessions() {
       ev.stopPropagation();
       renameConversation(conversation);
     };
-    item.appendChild(renameBtn);
+    titleDiv.appendChild(renameBtn);
+    item.appendChild(titleDiv);
+    item.appendChild(el("div", "session-meta", `${sessionSourceLabel(conversation)} · #${conversation.id}${conversation.createdAt ? ` · ${formatDateTime(conversation.createdAt)}` : ""}`));
     item.onclick = () => {
       selected = { type: "conversation", project: conversation.project, id: conversation.id };
       setMobilePanel("view");
@@ -1118,12 +1120,13 @@ function renderConversation(view) {
   const anchor = cachedComposer && cachedComposer.form.parentElement === view ? cachedComposer.form : null;
   const mount = (node) => (anchor ? view.insertBefore(node, anchor) : view.appendChild(node));
   const head = el("div", "view-head");
-  head.appendChild(el("span", "view-title", title));
+  const titleSpan = el("span", "view-title", title);
   const renameBtn = el("button", "view-rename", "✎");
   renameBtn.type = "button";
   renameBtn.title = "重命名会话";
   renameBtn.onclick = () => renameConversation(conv);
-  head.appendChild(renameBtn);
+  titleSpan.appendChild(renameBtn);
+  head.appendChild(titleSpan);
   head.appendChild(el("span", "view-sub", sub));
   const stopBtn = el("button", "btn-danger view-stop", "终止会话");
   stopBtn.type = "button";

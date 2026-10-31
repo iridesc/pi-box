@@ -55,9 +55,9 @@ section:last-child { border-right: none; }
 .session-empty { padding: 24px 12px; color: #6e7681; line-height: 1.7; text-align: center; }
 .session-context { padding: 8px 10px; margin-bottom: 6px; color: #8b949e; border-bottom: 1px solid #21262d; }
 .session-context strong { display: block; margin-bottom: 3px; color: #e6edf3; }
-.session-item { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 3px 6px; padding: 9px 8px; margin-bottom: 4px; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+.session-item { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 3px 6px; padding: 9px 8px; margin-bottom: 4px; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
 .session-rename {
-  grid-row: 1 / span 2; align-self: center;
+  flex-shrink: 0;
   background: transparent; border: none; color: #8b949e; cursor: pointer;
   font-size: 12px; padding: 2px 4px; opacity: 0; transition: opacity .1s;
 }
@@ -69,7 +69,8 @@ section:last-child { border-right: none; }
 .session-dot-running { background: #3fb950; animation: agent-pulse 1s ease-in-out infinite; }
 .session-dot-waiting-tool { background: #d29922; animation: agent-pulse 1.3s ease-in-out infinite; }
 .session-dot-error { background: #f85149; }
-.session-title { overflow: hidden; color: #c9d1d9; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.session-title { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; color: #c9d1d9; font-weight: 600; }
+.session-title-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
 .session-meta { overflow: hidden; color: #6e7681; font-size: 9px; line-height: 1.35; white-space: nowrap; text-overflow: ellipsis; }
 .session-history-group { margin: 7px 0 3px; border-top: 1px solid #21262d; }
 .session-history-summary {
@@ -134,7 +135,7 @@ section:last-child { border-right: none; }
 .view-title { font-weight: 600; color: #c9d1d9; }
 .view-rename {
   background: transparent; border: none; color: #8b949e; cursor: pointer;
-  font-size: 12px; padding: 2px 4px; flex-shrink: 0;
+  font-size: 12px; padding: 2px 4px; margin-left: 4px;
 }
 .view-rename:hover { color: #58a6ff; }
 .view-sub { color: #8b949e; font-size: 11px; }
