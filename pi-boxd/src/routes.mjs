@@ -74,6 +74,31 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         res.end(JSON.stringify({ ok: true }));
       },
     },
+    // 重命名会话（只改显示名，不动角色/项目归属）。
+    "/api/conversation/rename": {
+      method: "POST",
+      async handler(req, res) {
+        const { conversationId, title } = await readBody(req);
+        const id = conversationId ? String(conversationId) : undefined;
+        const value = String(title ?? "").trim();
+        if (!id || !value) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "缺少 conversationId 或名称" }));
+        }
+        if (value.length > 120) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "名称过长（最多 120 字符）" }));
+        }
+        const conversation = await harness.conversation(id, context);
+        if (!conversation) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "会话不存在" }));
+        }
+        await harness.commit((tx) => setConversationMeta(tx, id, { title: value }), context);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, title: value }));
+      },
+    },
     // 页面为当前助理或 Agent 新建独立持久会话。
     "/api/role-conversations": {
       method: "POST",

@@ -68,6 +68,35 @@ function conversationBusy(conversation) {
   return ["running", "waiting-tool", "pending"].includes(conversation?.status);
 }
 
+/** 会话显示名（重命名前的默认值）。 */
+function conversationDisplayTitle(conversation) {
+  return conversation.title || (conversation.actorType === "assistant" ? "助理会话" : conversation.actorName) || `会话 #${conversation.id}`;
+}
+
+/** 重命名会话：只改显示名。 */
+async function renameConversation(conversation) {
+  const current = conversationDisplayTitle(conversation);
+  const title = prompt("会话名称：", current);
+  if (title === null) return;
+  const value = title.trim();
+  if (!value) {
+    alert("名称不能为空");
+    return;
+  }
+  if (value === current) return;
+  const response = await fetch("/api/conversation/rename", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversationId: conversation.id, title: value }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    alert(data.error || "重命名失败");
+    return;
+  }
+  await refresh();
+}
+
 /** agent 状态 → 中文提示词（用于圆点 tooltip / flash hint）。 */
 function agentStatusLabel(status) {
   return {
@@ -352,8 +381,16 @@ function renderSessions() {
     const dot = el("span", `session-dot session-dot-${conversation.status ?? "idle"}`);
     dot.title = agentStatusLabel(conversation.status ?? "idle");
     item.appendChild(dot);
-    item.appendChild(el("div", "session-title", conversation.title || (conversation.actorType === "assistant" ? "助理会话" : conversation.actorName) || `会话 #${conversation.id}`));
+    item.appendChild(el("div", "session-title", conversationDisplayTitle(conversation)));
     item.appendChild(el("div", "session-meta", `${sessionSourceLabel(conversation)} · #${conversation.id}${conversation.createdAt ? ` · ${formatDateTime(conversation.createdAt)}` : ""}`));
+    const renameBtn = el("button", "session-rename", "✎");
+    renameBtn.type = "button";
+    renameBtn.title = "重命名会话";
+    renameBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      renameConversation(conversation);
+    };
+    item.appendChild(renameBtn);
     item.onclick = () => {
       selected = { type: "conversation", project: conversation.project, id: conversation.id };
       setMobilePanel("view");
@@ -1071,9 +1108,10 @@ function renderConversation(view) {
     return;
   }
   const isAgentView = conv.actorType === "agent";
+  const displayTitle = conversationDisplayTitle(conv);
   const title = isAgentView
-    ? `🤖 子 Agent · ${conv.actorName || "未命名"}（会话 #${conv.id}）`
-    : `🤖 ${conv.title || "助理会话"}（#${conv.id}）`;
+    ? `🤖 子 Agent · ${displayTitle}（#${conv.id}）`
+    : `🤖 ${displayTitle}（#${conv.id}）`;
   const sub = `${conv.project} · ${sessionSourceLabel(conv)}`;
   // 输入框若已挂在视图里，新内容插到它前面，避免 append 移动节点导致失焦。
   const cachedComposer = composerCache.get(String(conv.id));
@@ -1081,6 +1119,11 @@ function renderConversation(view) {
   const mount = (node) => (anchor ? view.insertBefore(node, anchor) : view.appendChild(node));
   const head = el("div", "view-head");
   head.appendChild(el("span", "view-title", title));
+  const renameBtn = el("button", "view-rename", "✎");
+  renameBtn.type = "button";
+  renameBtn.title = "重命名会话";
+  renameBtn.onclick = () => renameConversation(conv);
+  head.appendChild(renameBtn);
   head.appendChild(el("span", "view-sub", sub));
   const stopBtn = el("button", "btn-danger view-stop", "终止会话");
   stopBtn.type = "button";
