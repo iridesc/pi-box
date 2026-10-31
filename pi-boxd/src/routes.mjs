@@ -1,11 +1,11 @@
 // HTTP 路由（6 个 extraRoutes）
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
 import { readBody, loadConfig, saveConfig, providerConfig, loadMcpConfig, saveMcpConfig, loadPrefs, savePrefs } from "./io.mjs";
 import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, resolveSkills, projectSkillsDir, USER_SKILLS_DIR, BUILTIN_SKILLS_DIR } from "./skills.mjs";
-import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR } from "./paths.mjs";
+import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR, WEB_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
 import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, agentFilePath, ensureSkillReadTool } from "./agents.mjs";
@@ -19,6 +19,20 @@ const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
 
 export function buildExtraRoutes(harness, context, mcpBridge) {
   return {
+    // 浏览器标签页图标（index.html 里的 <link rel="icon"> 指向这里）。
+    "/favicon.svg": {
+      method: "GET",
+      async handler(req, res) {
+        try {
+          const body = await readFile(join(WEB_DIR, "favicon.svg"));
+          res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" });
+          res.end(body);
+        } catch {
+          res.writeHead(404);
+          res.end("not found");
+        }
+      },
+    },
     // 会话历史按需加载，避免 SSE 周期性传输所有旧消息。
     "/api/conversation": {
       method: "GET",
