@@ -27,6 +27,11 @@ let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject�
 let schedulesCache = {}; // project -> schedule 列表
 let scheduleRunsCache = {}; // project -> 最近运行记录
 const conversationDetailCache = new Map(); // conversation id -> 按需加载的完整 entries
+// 每个会话独立的输入框节点与草稿：SSE 全局刷新时复用节点，避免清空输入、打断输入法。
+const composerCache = new Map(); // conversation id -> { form, input, btn }
+const draftCache = new Map(); // conversation id -> 未发送的输入文本
+let viewScrollState = { top: 0, atBottom: true }; // 当前视图的滚动位置
+let lastViewKey = "";
 const conversationDetailRequests = new Map();
 let cfgProviders = [];
 let cfgSettings = { activeProvider: "openai", providers: {}, currentModel: null };
@@ -396,7 +401,24 @@ document.getElementById("new-conversation").onclick = async () => {
 // ─── 第三栏：对话 / 配置视图 ────────────────────────────────────────────────
 function renderView() {
   const view = document.getElementById("view");
-  view.innerHTML = "";
+  // 切换到不同视图时重置滚动状态；同一视图内刷新则保留原滚动位置。
+  const key = selected ? `${selected.type}:${selected.id ?? selected.project ?? ""}` : "";
+  const sameView = key !== "" && key === lastViewKey;
+  lastViewKey = key;
+  const oldBody = view.querySelector(".view-body");
+  if (sameView && oldBody) {
+    const atBottom = oldBody.scrollHeight - oldBody.scrollTop - oldBody.clientHeight < 40;
+    viewScrollState = { top: oldBody.scrollTop, atBottom };
+  } else {
+    viewScrollState = { top: 0, atBottom: true };
+  }
+  // 同一会话内刷新时保留输入框节点：直接 innerHTML="" 会把聚焦的输入框从 DOM 摘掉，
+  // 导致焦点、光标位置和输入法组合状态丢失。
+  const convKey = selected?.type === "conversation" ? String(selected.id) : "";
+  const keep = convKey ? composerCache.get(convKey)?.form : undefined;
+  for (const child of [...view.children]) {
+    if (child !== keep) child.remove();
+  }
   if (!selected) {
     view.className = "view-empty";
     view.textContent = "pi-box";
@@ -1048,14 +1070,18 @@ function renderConversation(view) {
     ? `🤖 子 Agent · ${conv.actorName || "未命名"}（会话 #${conv.id}）`
     : `🤖 ${conv.title || "助理会话"}（#${conv.id}）`;
   const sub = `${conv.project} · ${sessionSourceLabel(conv)}`;
+  // 输入框若已挂在视图里，新内容插到它前面，避免 append 移动节点导致失焦。
+  const cachedComposer = composerCache.get(String(conv.id));
+  const anchor = cachedComposer && cachedComposer.form.parentElement === view ? cachedComposer.form : null;
+  const mount = (node) => (anchor ? view.insertBefore(node, anchor) : view.appendChild(node));
   const head = el("div", "view-head");
   head.appendChild(el("span", "view-title", title));
   head.appendChild(el("span", "view-sub", sub));
-  view.appendChild(head);
+  mount(head);
 
   const detail = conversationDetailCache.get(String(conv.id));
   if (!detail) {
-    view.appendChild(el("div", "conversation-loading", "正在加载会话记录…"));
+    mount(el("div", "conversation-loading", "正在加载会话记录…"));
     loadConversationDetail(conv.id).then(() => {
       if (selected?.type === "conversation" && selected.id === conv.id) renderView();
     }).catch((error) => {
@@ -1069,32 +1095,55 @@ function renderConversation(view) {
 
   const body = el("div", "view-body");
   for (const turn of conversationTurns(detail.entries ?? [])) body.appendChild(renderConversationTurn(turn));
-  view.appendChild(body);
-  body.scrollTop = body.scrollHeight;
+  mount(body);
+  // 用户已经往上翻时不要被后台推送拉回底部。
+  body.scrollTop = viewScrollState.atBottom ? body.scrollHeight : viewScrollState.top;
 
-  const form = document.createElement("form");
-  form.className = "view-input";
-  const input = document.createElement("input");
-  input.placeholder = isAgentView ? `和子 Agent ${conv.actorName || ""} 对话…` : "和项目助理对话…";
-  input.autocomplete = "off";
-  input.disabled = !state.hasKey;
-  const btn = el("button", "", "发送");
-  btn.type = "submit";
-  btn.disabled = !state.hasKey;
-  form.appendChild(input);
-  form.appendChild(btn);
-  form.onsubmit = async (ev) => {
-    ev.preventDefault();
-    const content = input.value.trim();
-    if (!content) return;
-    input.value = "";
-    await fetch("/api/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversationId: conv.id, content }),
+  const composer = getComposer(String(conv.id), conv);
+  // 已经在视图里就保持原位（不重新 append），否则挂到末尾。
+  if (composer.form.parentElement !== view) view.appendChild(composer.form);
+}
+
+// 输入框按会话复用同一个 DOM 节点：切换会话 / SSE 刷新都不重建，
+// 因此焦点、光标位置、输入法组合状态都不会丢，草稿另行按会话缓存。
+function getComposer(convKey, conv) {
+  let composer = composerCache.get(convKey);
+  if (!composer) {
+    const form = document.createElement("form");
+    form.className = "view-input";
+    const input = document.createElement("input");
+    input.autocomplete = "off";
+    const btn = el("button", "", "发送");
+    btn.type = "submit";
+    form.appendChild(input);
+    form.appendChild(btn);
+    input.addEventListener("input", () => {
+      draftCache.set(convKey, input.value);
     });
-  };
-  view.appendChild(form);
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const content = input.value.trim();
+      if (!content) return;
+      input.value = "";
+      draftCache.delete(convKey);
+      await fetch("/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: convKey, content }),
+      });
+    });
+    composer = { form, input, btn };
+    composerCache.set(convKey, composer);
+  }
+  composer.input.placeholder = conv.actorType === "agent"
+    ? `和子 Agent ${conv.actorName || ""} 对话…`
+    : "和项目助理对话…";
+  composer.input.disabled = !state.hasKey;
+  composer.btn.disabled = !state.hasKey;
+  const draft = draftCache.get(convKey) ?? "";
+  // 仅在内容不一致时写回，避免打断正在进行的输入法组合输入。
+  if (composer.input.value !== draft) composer.input.value = draft;
+  return composer;
 }
 
 function formRow(label, control) {
