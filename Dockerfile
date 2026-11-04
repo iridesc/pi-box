@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # pi-boxd 持久化多 Agent 管理台
 FROM node:24-slim
 
@@ -19,6 +20,18 @@ COPY pi-boxd/src/ /home/pi-boxd/app/src/
 COPY pi-boxd/web/ /home/pi-boxd/app/web/
 # 元项目 seed（首启由 entrypoint 复制到 /home/agent/.pi/agent/meta/）
 COPY pi-boxd/seed/ /home/pi-boxd/seed/
+
+# msg-hub（stdio 版消息渠道 MCP）：构建期从独立仓库拉取最新源码内置到镜像。
+# msg-hub 在 iridesc/msg-hub 独立开源迭代，pi-box 只在打包时取最新版（不 vendor）。
+# MSG_HUB_REF 可指定分支/标签/commit；离线或内网构建可用 --build-arg MSG_HUB_REPO=<镜像地址>。
+ARG MSG_HUB_REPO=https://github.com/iridesc/msg-hub.git
+ARG MSG_HUB_REF=main
+RUN set -eu; \
+    git clone --depth 1 --branch "$MSG_HUB_REF" "$MSG_HUB_REPO" /opt/msg-hub; \
+    rm -rf /opt/msg-hub/.git /opt/msg-hub/data /opt/msg-hub/tests \
+           /opt/msg-hub/Dockerfile /opt/msg-hub/compose.yaml /opt/msg-hub/.github; \
+    python3 -c "import sys; sys.path.insert(0, '/opt/msg-hub/src'); import msg_hub; print('[build] msg-hub', msg_hub.__version__)"; \
+    python3 -c "import sys; sys.path.insert(0, '/opt/msg-hub/src'); from msg_hub.settings import Settings; from msg_hub.service import Hub; print('[build] msg-hub 类型:', [t['type'] for t in Hub(Settings()).types()])"
 
 # rootless 容器（podman）中 root 即宿主机当前用户，bind mount 目录天然可写。
 ENV HOME=/home/agent

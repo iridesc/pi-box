@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "msg-hub": {
+      "command": "python3",
+      "args": ["/opt/msg-hub/src/msg_hub/stdio.py"],
+      "env": {
+        "MSG_HUB_DATA_DIR": "/home/agent/.pi-boxd/msg-hub",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "description": "消息渠道中心：渠道增删改查 + 统一发送（企业微信群机器人 / 邮箱）。说「把某个群加成渠道」或「往某某群发条消息」即可。",
+      "exposure": "direct",
+      "timeout": 60
+    }
+  }
+}

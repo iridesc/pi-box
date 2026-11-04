@@ -53,6 +53,9 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          # 构建期拉取 msg-hub 最新源码内置进镜像（开源仓库，无需凭证）
+          build-args: |
+            MSG_HUB_REF=main
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

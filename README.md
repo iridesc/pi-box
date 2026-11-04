@@ -28,6 +28,34 @@ podman compose up -d --build
 
 打开 <http://127.0.0.1:8790>，在系统设置中配置模型厂商、模型、API Key、MCP 与全局 Agent。
 
+## 内置消息渠道（msg-hub）
+
+镜像内置 [msg-hub](https://github.com/iridesc/msg-hub) 的 **stdio 版**，作为 MCP server 由 pi-boxd 以子进程方式拉起，用于「把某个群加成渠道」和「往某某群发条消息」。
+
+- **源码位置**：`/opt/msg-hub`（构建期从上游仓库拉取，**不 vendor**，见 `Dockerfile` 的 `MSG_HUB_REPO` / `MSG_HUB_REF`）
+- **默认配置**：`pi-boxd/seed/mcp.json`，首启自动复制到 `~/.pi/agent/mcp.json`（已存在则**不覆盖**）
+- **数据目录**：`agent-home/.pi-boxd/msg-hub/`（渠道索引 `channels.json`、凭据 `config/<id>.json` 0600、审计 `logs/*.jsonl`）
+- **依赖**：零第三方依赖，只要 `python3`（镜像自带 3.11）
+
+```json
+{
+  "mcpServers": {
+    "msg-hub": {
+      "command": "python3",
+      "args": ["/opt/msg-hub/src/msg_hub/stdio.py"],
+      "env": { "MSG_HUB_DATA_DIR": "/home/agent/.pi-boxd/msg-hub" },
+      "exposure": "direct"
+    }
+  }
+}
+```
+
+支持两种渠道类型：`wecom_bot`（企业微信群机器人 webhook，支持 markdown / @成员 / @所有人）与 `email`（SMTP，支持 SSL/STARTTLS/SOCKS5 代理）。要给某个助理或 Agent 用，在它的 `.md` frontmatter 里加 `mcps: [msg-hub]`。
+
+**升级 msg-hub**：上游发布新版本后，重新构建 pi-box 镜像即可（`podman compose build && podman compose up -d`）。想钉住版本就用 `--build-arg MSG_HUB_REF=v0.2.0`。
+
+> msg-hub 的渠道数据在 `agent-home` 里，与 Durable SQLite、mcp.json 同域备份；不要把渠道凭据放进 `workspace`。
+
 ## 模型与厂商配置
 
 系统设置 → 模型支持同时配置多个厂商（OpenAI / DeepSeek / Anthropic / Gemini / Groq / OpenRouter / MiniMax 等），每个厂商可配置多个模型 ID、各自的 API Key 与 Base URL，全部持久化到 `agent-home/.pi-boxd/config.json`（`version: 3`，旧版单模型配置会自动迁移）。

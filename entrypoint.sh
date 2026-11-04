@@ -4,6 +4,16 @@ set -e
 ln -sf "/usr/share/zoneinfo/${TZ:-Asia/Shanghai}" /etc/localtime
 mkdir -p /workspace /home/agent/.pi-boxd /home/agent/.pi/agent
 
+# 首启安装默认 MCP 配置（内置 msg-hub 消息渠道 MCP）。
+# 已存在则不覆盖，避免抹掉用户自己加的 MCP / 删除 msg-hub 的意图。
+MCP_CFG="/home/agent/.pi/agent/mcp.json"
+MCP_SEED="/home/pi-boxd/seed/mcp.json"
+if [ -f "$MCP_SEED" ] && [ ! -f "$MCP_CFG" ]; then
+  cp "$MCP_SEED" "$MCP_CFG"
+  chmod 600 "$MCP_CFG"
+  echo "[startup] 已安装默认 MCP 配置（含 msg-hub）"
+fi
+
 # 首启安装元项目 seed：复制到 /home/agent/.pi/agent/meta/；已存在则跳过整体目录，
 # 但允许单个 agent 文件不存在时被补齐（新增子 agent 时不破坏用户已修改内容）。
 SEED_DIR="/home/pi-boxd/seed/meta"
