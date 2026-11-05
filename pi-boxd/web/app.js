@@ -63,6 +63,47 @@ function el(tag, className, text) {
   return e;
 }
 
+// ─── 品牌（浏览器标签页标题 / 图标） ────────────────────────────────────────
+const DEFAULT_APP_TITLE = "pi-box · 多 Agent 平台";
+const APP_ICON_MODES = [
+  ["default", "默认图标"],
+  ["emoji", "Emoji"],
+  ["upload", "上传图片"],
+];
+
+function escapeXml(value) {
+  return String(value).replace(/[<>&"']/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;" })[c]);
+}
+
+/** 由图标偏好算出 <link rel="icon"> 的 href。 */
+function appIconHref(icon) {
+  if (icon?.type === "emoji" && icon.emoji) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><text x="32" y="52" font-size="52" text-anchor="middle">${escapeXml(icon.emoji)}</text></svg>`;
+    return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+  }
+  if (icon?.type === "upload") return `/api/branding/icon?v=${icon.version ?? Date.now()}`;
+  return "/favicon.svg";
+}
+
+/** 应用标题 / 图标 / 主题 / 密度（页面初次加载与保存后都走这里）。 */
+function applyBranding(prefs) {
+  document.title = prefs?.appTitle || DEFAULT_APP_TITLE;
+  const link = document.getElementById("app-favicon");
+  if (link) link.href = appIconHref(prefs?.appIcon);
+  if (prefs?.density) document.body.classList.toggle("density-compact", prefs.density === "compact");
+  if (prefs?.theme) document.body.classList.toggle("theme-light", prefs.theme === "light");
+}
+
+async function savePrefsPatch(patch) {
+  const r = await fetch("/api/prefs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "保存失败");
+  return r.json();
+}
+
 /** 会话是否正在处理中（有正在运行或等待工具的任务）。 */
 function conversationBusy(conversation) {
   return ["running", "waiting-tool", "pending"].includes(conversation?.status);
@@ -2469,9 +2510,170 @@ async function renderDrawerSystem(panel) {
   themeRow.appendChild(themeSel);
   sec4.appendChild(themeRow);
   panel.appendChild(sec4);
-  // 应用偏好
-  document.body.classList.toggle("density-compact", prefs.density === "compact");
-  document.body.classList.toggle("theme-light", prefs.theme === "light");
+
+  // 品牌：浏览器标签页标题 + 图标（品牌名 h1 不可修改）
+  const sec5 = el("div", "drawer-section");
+  sec5.appendChild(el("h3", "", "🏷 品牌"));
+  sec5.appendChild(el("div", "muted", "只影响浏览器标签页的标题与图标；页面左上角品牌名固定为 pi-box。"));
+
+  const titleRow = el("div", "form-row");
+  titleRow.appendChild(el("label", "", "页面标题"));
+  const titleInput = document.createElement("input");
+  titleInput.type = "text";
+  titleInput.maxLength = 120;
+  titleInput.placeholder = DEFAULT_APP_TITLE;
+  titleInput.value = prefs.appTitle ?? "";
+  titleRow.appendChild(titleInput);
+  sec5.appendChild(titleRow);
+
+  const iconRow = el("div", "form-row");
+  iconRow.appendChild(el("label", "", "图标"));
+  const iconBox = el("div", "brand-icon");
+  const preview = document.createElement("img");
+  preview.className = "brand-icon-preview";
+  preview.alt = "图标预览";
+  iconBox.appendChild(preview);
+
+  const iconSel = document.createElement("select");
+  for (const [value, label] of APP_ICON_MODES) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = label;
+    iconSel.appendChild(o);
+  }
+  iconBox.appendChild(iconSel);
+
+  const emojiInput = document.createElement("input");
+  emojiInput.type = "text";
+  emojiInput.className = "brand-emoji";
+  emojiInput.maxLength = 8;
+  emojiInput.placeholder = "🚀";
+  iconBox.appendChild(emojiInput);
+
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.className = "brand-file";
+  fileInput.accept = ".png,.jpg,.jpeg,.webp,.svg,.ico,image/png,image/jpeg,image/webp,image/svg+xml,image/x-icon";
+  iconBox.appendChild(fileInput);
+  iconRow.appendChild(iconBox);
+  sec5.appendChild(iconRow);
+
+  // 待保存的图标草稿：{ kind: "emoji", emoji } | { kind: "upload", dataUrl, href } | null
+  let iconDraft = null;
+  const currentIcon = () => prefs.appIcon ?? { type: "default" };
+
+  function renderIconPreview() {
+    let icon = currentIcon();
+    if (iconSel.value === "emoji") icon = { type: "emoji", emoji: emojiInput.value.trim() };
+    else if (iconSel.value === "upload") icon = iconDraft?.kind === "upload" ? { type: "upload", version: 0 } : currentIcon();
+    preview.src = iconDraft?.kind === "upload" && iconSel.value === "upload" ? iconDraft.href : appIconHref(icon);
+  }
+  function syncIconMode() {
+    const mode = iconSel.value;
+    emojiInput.classList.toggle("hidden", mode !== "emoji");
+    fileInput.classList.toggle("hidden", mode !== "upload");
+    if (mode === "emoji" && !emojiInput.value) {
+      emojiInput.value = currentIcon().type === "emoji" ? currentIcon().emoji : "";
+    }
+    if (mode === "upload" && currentIcon().type === "upload") iconDraft = null;
+    renderIconPreview();
+  }
+
+  iconSel.value = ["default", "emoji", "upload"].includes(currentIcon().type) ? currentIcon().type : "default";
+  iconSel.onchange = syncIconMode;
+  emojiInput.oninput = renderIconPreview;
+  fileInput.onchange = () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    if (file.size > 512 * 1024) {
+      status.className = "form-status err";
+      status.textContent = "❌ 图标不能超过 512KB";
+      fileInput.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      iconDraft = { kind: "upload", dataUrl: String(reader.result), href: String(reader.result) };
+      renderIconPreview();
+      status.className = "form-status";
+      status.textContent = `已选择 ${file.name}，点「保存」后生效`;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const brandActions = el("div", "form-actions");
+  const status = el("div", "form-status");
+  brandActions.appendChild(status);
+  const resetIcon = el("button", "btn-secondary", "恢复默认图标");
+  resetIcon.type = "button";
+  resetIcon.onclick = async () => {
+    try {
+      const r = await fetch("/api/branding/icon", { method: "DELETE" });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "恢复失败");
+      prefs.appIcon = data.appIcon;
+      iconDraft = null;
+      fileInput.value = "";
+      iconSel.value = "default";
+      syncIconMode();
+      applyBranding(prefs);
+      status.className = "form-status ok";
+      status.textContent = "✅ 已恢复默认图标";
+    } catch (error) {
+      status.className = "form-status err";
+      status.textContent = `❌ ${error.message}`;
+    }
+  };
+  brandActions.appendChild(resetIcon);
+  const saveBrand = el("button", "", "保存");
+  saveBrand.type = "button";
+  saveBrand.onclick = async () => {
+    status.className = "form-status";
+    status.textContent = "保存中…";
+    try {
+      let appIcon = currentIcon();
+      const mode = iconSel.value;
+      if (mode === "upload") {
+        if (iconDraft?.kind === "upload") {
+          const r = await fetch("/api/branding/icon", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dataUrl: iconDraft.dataUrl }),
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || "图标上传失败");
+          appIcon = data.appIcon;
+        } else if (appIcon.type !== "upload") {
+          throw new Error("请先选择图标文件");
+        }
+      } else if (mode === "emoji") {
+        const emoji = emojiInput.value.trim();
+        if (!emoji) throw new Error("请填写 Emoji");
+        appIcon = { type: "emoji", emoji };
+      } else {
+        if (appIcon.type === "upload") await fetch("/api/branding/icon", { method: "DELETE" });
+        appIcon = { type: "default" };
+      }
+      const saved = await savePrefsPatch({ appTitle: titleInput.value.trim(), appIcon });
+      prefs.appTitle = saved.appTitle;
+      prefs.appIcon = saved.appIcon;
+      iconDraft = null;
+      syncIconMode();
+      applyBranding(prefs);
+      status.className = "form-status ok";
+      status.textContent = "✅ 已保存";
+    } catch (error) {
+      status.className = "form-status err";
+      status.textContent = `❌ ${error.message}`;
+    }
+  };
+  brandActions.appendChild(saveBrand);
+  sec5.appendChild(brandActions);
+  panel.appendChild(sec5);
+
+  syncIconMode();
+  // 应用偏好（标题 / 图标 / 主题 / 密度）
+  applyBranding(prefs);
 }
 const cfgKeyInput = document.getElementById("cfg-key");
 cfgKeyInput.onfocus = () => {
@@ -2623,4 +2825,14 @@ es.onerror = () => {
 };
 es.onopen = () => updateSseIndicator("ok");
 
+// 启动时先拉一次偏好，应用标题 / 图标 / 主题 / 密度（失败则保持默认外观）
+async function initPrefs() {
+  try {
+    applyBranding(await (await fetch("/api/prefs")).json());
+  } catch {
+    // 偏好读取失败不影响主流程
+  }
+}
+
+initPrefs();
 refresh();

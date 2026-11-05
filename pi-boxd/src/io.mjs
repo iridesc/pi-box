@@ -82,10 +82,19 @@ export function configuredProviders(cfg) {
   return Object.keys(cfg?.providers ?? {}).filter((id) => !!cfg.providers[id]?.apiKey);
 }
 
-/** 读取 HTTP 请求体并 JSON 解析 */
-export async function readBody(req) {
+/** 读取 HTTP 请求体并 JSON 解析；可选 maxBytes 限制（超出时抛 code=PAYLOAD_TOO_LARGE） */
+export async function readBody(req, maxBytes = 0) {
   let body = "";
-  for await (const chunk of req) body += chunk;
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (maxBytes > 0 && size > maxBytes) {
+      const error = new Error(`请求体超过 ${maxBytes} 字节`);
+      error.code = "PAYLOAD_TOO_LARGE";
+      throw error;
+    }
+    body += chunk;
+  }
   return JSON.parse(body || "{}");
 }
 
@@ -107,15 +116,58 @@ export async function saveMcpConfig(cfg) {
 }
 
 // ── UI 偏好 ─────────────────────────────────────────────────────────────
-const DEFAULT_PREFS = { theme: "dark", density: "comfortable" };
+export const DEFAULT_PREFS = {
+  theme: "dark",
+  density: "comfortable",
+  // 浏览器标签页标题
+  appTitle: "pi-box · 多 Agent 平台",
+  // 标签页图标：default（内置 svg）| emoji | upload（用户上传到 DATA_DIR/branding/）
+  appIcon: { type: "default" },
+};
+export const APP_TITLE_MAX = 120;
+export const APP_ICON_EXTS = ["png", "jpg", "webp", "svg", "ico"];
+
+/** 图标合法扩展名 → MIME */
+export const APP_ICON_MIME = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  ico: "image/x-icon",
+};
+
+function normalizeAppIcon(icon) {
+  if (icon && typeof icon === "object") {
+    if (icon.type === "emoji" && typeof icon.emoji === "string" && icon.emoji.trim()) {
+      // 只取前若干个字符，避免超长文本塞进 favicon
+      return { type: "emoji", emoji: [...icon.emoji.trim()].slice(0, 8).join("") };
+    }
+    if (icon.type === "upload" && APP_ICON_EXTS.includes(icon.ext) && Number.isFinite(icon.version)) {
+      return { type: "upload", ext: icon.ext, version: Number(icon.version) };
+    }
+  }
+  return { type: "default" };
+}
+
+/** 补齐默认值并做字段校验（写入与读取都走这里，保证 prefs.json 结构稳定） */
+function normalizePrefs(raw) {
+  const merged = { ...DEFAULT_PREFS, ...(raw && typeof raw === "object" ? raw : {}) };
+  const title = typeof merged.appTitle === "string" ? merged.appTitle.trim() : "";
+  merged.appTitle = title ? title.slice(0, APP_TITLE_MAX) : DEFAULT_PREFS.appTitle;
+  merged.appIcon = normalizeAppIcon(merged.appIcon);
+  return merged;
+}
+
 export async function loadPrefs() {
   try {
-    return { ...DEFAULT_PREFS, ...JSON.parse(await readFile(prefsPath, "utf-8")) };
+    return normalizePrefs(JSON.parse(await readFile(prefsPath, "utf-8")));
   } catch {
-    return { ...DEFAULT_PREFS };
+    return normalizePrefs({});
   }
 }
 export async function savePrefs(p) {
+  const normalized = normalizePrefs(p);
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(prefsPath, JSON.stringify(p, null, 2), "utf-8");
+  await writeFile(prefsPath, JSON.stringify(normalized, null, 2), "utf-8");
+  return normalized;
 }

@@ -1,9 +1,9 @@
 // HTTP 路由（6 个 extraRoutes）
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
-import { readBody, loadConfig, saveConfig, providerConfig, loadMcpConfig, saveMcpConfig, loadPrefs, savePrefs } from "./io.mjs";
+import { readBody, loadConfig, saveConfig, providerConfig, loadMcpConfig, saveMcpConfig, loadPrefs, savePrefs, APP_ICON_EXTS, APP_ICON_MIME } from "./io.mjs";
 import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, resolveSkills, projectSkillsDir, USER_SKILLS_DIR, BUILTIN_SKILLS_DIR } from "./skills.mjs";
 import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR, WEB_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
@@ -16,6 +16,50 @@ import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upse
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
+
+// ── 自定义品牌图标（浏览器标签页 icon）存储 ───────────────────────────────
+const BRANDING_DIR = join(DATA_DIR, "branding");
+const ICON_MAX_BYTES = 512 * 1024;
+// dataURL 的 MIME → 落盘扩展名（只允许位图与 SVG）
+const ICON_MIME_EXT = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/x-icon": "ico",
+  "image/vnd.microsoft.icon": "ico",
+};
+
+function sendJson(res, status, payload) {
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(payload));
+}
+
+/** 删除 branding 目录下除 keep 之外的所有图标文件 */
+async function clearBrandingIcons(keep) {
+  for (const ext of APP_ICON_EXTS) {
+    if (ext === keep) continue;
+    await unlink(join(BRANDING_DIR, `icon.${ext}`)).catch(() => {});
+  }
+}
+
+/** 基于 dataURL 保存自定义图标，返回新的 appIcon 偏好。 */
+async function saveBrandingIcon(dataUrl) {
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(String(dataUrl ?? "").trim());
+  if (!match) throw Object.assign(new Error("图标格式不正确，需要 base64 编码的 dataURL"), { status: 400 });
+  const ext = ICON_MIME_EXT[match[1].toLowerCase()];
+  if (!ext) throw Object.assign(new Error(`不支持的图标类型：${match[1]}（支持 png / jpeg / webp / svg / ico）`), { status: 400 });
+  const data = Buffer.from(match[2], "base64");
+  if (data.length === 0) throw Object.assign(new Error("图标内容为空"), { status: 400 });
+  if (data.length > ICON_MAX_BYTES) throw Object.assign(new Error("图标不能超过 512KB"), { status: 413 });
+  await mkdir(BRANDING_DIR, { recursive: true });
+  await clearBrandingIcons(ext);
+  await writeFile(join(BRANDING_DIR, `icon.${ext}`), data);
+  const prefs = await loadPrefs();
+  const saved = await savePrefs({ ...prefs, appIcon: { type: "upload", ext, version: Date.now() } });
+  return saved.appIcon;
+}
 
 export function buildExtraRoutes(harness, context, mcpBridge) {
   return {
@@ -760,15 +804,62 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
       methods: ["GET", "POST"],
       async handler(req, res) {
         if (req.method === "GET") {
-          res.writeHead(200, { "Content-Type": "application/json" });
+          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
           return res.end(JSON.stringify(await loadPrefs()));
         }
         const incoming = await readBody(req);
         const current = await loadPrefs();
-        const merged = { ...current, ...incoming };
-        await savePrefs(merged);
+        const saved = await savePrefs({ ...current, ...incoming });
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(merged));
+        res.end(JSON.stringify(saved));
+      },
+    },
+    // ── 自定义品牌图标（浏览器标签页 icon） ─────────────────────────────────
+    "/api/branding/icon": {
+      methods: ["GET", "POST", "DELETE"],
+      async handler(req, res) {
+        try {
+          if (req.method === "GET") {
+            const prefs = await loadPrefs();
+            const icon = prefs.appIcon;
+            if (icon.type === "upload") {
+              try {
+                const body = await readFile(join(BRANDING_DIR, `icon.${icon.ext}`));
+                res.writeHead(200, {
+                  "Content-Type": APP_ICON_MIME[icon.ext] ?? "application/octet-stream",
+                  "Cache-Control": "public, max-age=31536000, immutable",
+                  // 用户上传的 SVG 可能带脚本；以 sandbox CSP 限制，避免被直接打开时执行
+                  "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                  "X-Content-Type-Options": "nosniff",
+                });
+                return res.end(body);
+              } catch {
+                // 文件缺失时回退到内置图标
+              }
+            }
+            try {
+              const body = await readFile(join(WEB_DIR, "favicon.svg"));
+              res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" });
+              return res.end(body);
+            } catch {
+              res.writeHead(404);
+              return res.end("not found");
+            }
+          }
+          if (req.method === "DELETE") {
+            await clearBrandingIcons(null);
+            const prefs = await loadPrefs();
+            const saved = await savePrefs({ ...prefs, appIcon: { type: "default" } });
+            return sendJson(res, 200, { appIcon: saved.appIcon });
+          }
+          // POST：上传图标（dataURL），容量按 base64 膨胀预留余量
+          const body = await readBody(req, Math.ceil(ICON_MAX_BYTES * 1.4) + 4096);
+          const appIcon = await saveBrandingIcon(body.dataUrl);
+          return sendJson(res, 200, { appIcon });
+        } catch (error) {
+          if (error?.code === "PAYLOAD_TOO_LARGE") return sendJson(res, 413, { error: "图标不能超过 512KB" });
+          return sendJson(res, error?.status ?? 400, { error: String(error?.message ?? error) });
+        }
       },
     },
     // ── 系统信息（容器 / workspace / 凭据总览） ───────────────────────────────

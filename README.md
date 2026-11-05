@@ -81,6 +81,19 @@ services:
       - ./agent-home:/home/agent
 ```
 
+## 品牌（标签页标题与图标）
+
+系统设置 → 系统 → 🏷 品牌可自定义浏览器标签页的外观，全局单份（所有访客一致），页面左上角的品牌名固定为 `pi-box`：
+
+- **页面标题**：写入 `<title>`，最长 120 字符，留空回退默认 `pi-box · 多 Agent 平台`。
+- **图标**：三种模式——默认（内置 `favicon.svg`）/ Emoji（任意一个 emoji，前端内联成 SVG data URL）/ 上传图片（png、jpeg、webp、svg、ico，≤ 512KB）。
+
+持久化与接口：
+
+- 偏好存 `agent-home/.pi-boxd/prefs.json` 的 `appTitle` / `appIcon` 字段；上传的图标落在 `agent-home/.pi-boxd/branding/icon.<ext>`（随 `agent-home` 一起持久化）。
+- `POST /api/branding/icon`（`{ dataUrl }`）上传、`DELETE /api/branding/icon` 恢复默认、`GET /api/branding/icon` 读取（未上传时回退内置 SVG）。上传的 SVG 以 `Content-Security-Policy: sandbox` + `nosniff` 提供，避免被直接打开时执行脚本。
+- 标题与图标在页面启动时由 `/api/prefs` 应用，保存后立即生效，无需刷新。
+
 ## 项目数据
 
 `/workspace` 下每个非隐藏一级目录都是一个项目：
