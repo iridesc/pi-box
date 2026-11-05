@@ -2,16 +2,19 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Cron } from "croner";
-import { configure } from "@earendil-works/pi-durable";
 
-import { assistantInstructions, listAgents, loadAssistant, resolveAgentModel, resolveAssistantTools } from "./agents.mjs";
-import { AnchorTask, setConversationMeta } from "./extension.mjs";
+import { loadEnabledAgentDef } from "./agents.mjs";
+import { loadCleanupConfig } from "./cleanup.mjs";
+import { ScheduleCommandTask } from "./extension.mjs";
 import { META_DIR, META_PROJECT, PROJECTS_DIR } from "./paths.mjs";
 
-const MAX_RUNS = 100;
+const DEFAULT_MAX_RUNS = 300;
 const DEFAULT_TIMEZONE = process.env.TZ || "Asia/Shanghai";
 const RULE_TYPES = new Set(["interval", "daily", "weekdays", "weekly", "monthly", "once"]);
 const SESSION_MODES = new Set(["assistant", "isolated"]);
+const DEFAULT_LOG_RETENTION_DAYS = 7;
+const MAX_LOG_RETENTION_DAYS = 365;
+const MAX_COMMAND_TIMEOUT_SEC = 86_400;
 
 function projectCwd(project) {
   return project === META_PROJECT ? META_DIR : join(PROJECTS_DIR, project);
@@ -25,7 +28,7 @@ function normalizeStore(raw) {
   return {
     version: 1,
     schedules: Array.isArray(raw?.schedules) ? raw.schedules : [],
-    runs: Array.isArray(raw?.runs) ? raw.runs.slice(0, MAX_RUNS) : [],
+    runs: Array.isArray(raw?.runs) ? raw.runs : [],
   };
 }
 
@@ -169,12 +172,86 @@ export function scheduleDescription(schedule) {
   return `每${rule.weekdays.map((day) => names[day]).join("、")} ${rule.time}`;
 }
 
+function clampInt(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+/**
+ * 归一化执行配置：命令段与 LLM 段都可选，但至少一个。
+ * 旧数据（只有 prompt / sessionMode）自动视为“仅 LLM 段”，保持升级兼容。
+ */
+export function normalizeExecution(input) {
+  let command = null;
+  const rawCommand = input.command;
+  if (rawCommand && typeof rawCommand === "object") {
+    const run = String(rawCommand.run ?? "").trim();
+    if (!run) throw new Error("执行命令不能为空");
+    command = {
+      run,
+      cwd: rawCommand.cwd ? String(rawCommand.cwd).trim() : null,
+      timeoutSec: clampInt(rawCommand.timeoutSec, 1, MAX_COMMAND_TIMEOUT_SEC, 900),
+      concurrency: rawCommand.concurrency === "queue" ? "queue" : "skip",
+    };
+  } else if (typeof rawCommand === "string" && rawCommand.trim()) {
+    command = { run: rawCommand.trim(), cwd: null, timeoutSec: 900, concurrency: "skip" };
+  }
+
+  const rawLlm = input.llm && typeof input.llm === "object" ? input.llm : null;
+  const legacyPrompt = String(input.prompt ?? "").trim();
+  const promptText = String(rawLlm?.prompt ?? legacyPrompt).trim();
+  // 旧数据没有 llm 字段：有 prompt 就当纯 LLM 任务。
+  const wantsLlm = rawLlm ? rawLlm.enabled !== false : !command && Boolean(promptText);
+  let llm = null;
+  if (wantsLlm) {
+    if (!promptText) throw new Error("LLM 段的提示词不能为空");
+    const agent = String(rawLlm?.agent ?? "assistant").trim() || "assistant";
+    const session =
+      rawLlm?.session === "persistent"
+        ? "persistent"
+        : rawLlm?.session === "ephemeral"
+          ? "ephemeral"
+          : input.sessionMode === "assistant"
+            ? "persistent"
+            : "ephemeral";
+    const rawReportTo = String(rawLlm?.reportTo ?? "none");
+    const reportTo =
+      rawReportTo === "main" || rawReportTo === "none" || rawReportTo.startsWith("channel:") ? rawReportTo : "none";
+    if (session === "persistent" && agent !== "assistant") {
+      throw new Error("指定 Agent 的 LLM 段只支持 ephemeral 会话（每次新建），避免与其他对话混在一起");
+    }
+    llm = {
+      agent,
+      session,
+      prompt: promptText,
+      reportTo,
+      onCommandFailure: rawLlm?.onCommandFailure === "skip" ? "skip" : "run",
+    };
+  }
+
+  if (!command && !llm) throw new Error("请至少配置一条执行命令或一段提示词");
+  return {
+    command,
+    llm,
+    log: { retentionDays: clampInt(input.log?.retentionDays, 0, MAX_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS) },
+  };
+}
+
+/** 任务形态：command / llm / command+llm（用于运行记录与 UI 展示）。 */
+export function scheduleKind(schedule) {
+  const hasCommand = Boolean(schedule?.command?.run);
+  const hasLlm = Boolean(schedule?.llm?.prompt);
+  if (hasCommand && hasLlm) return "command+llm";
+  if (hasCommand) return "command";
+  return "llm";
+}
+
 export function validateScheduleInput(input) {
   const name = String(input.name ?? "").trim();
-  const prompt = String(input.prompt ?? "").trim();
   const timezone = String(input.timezone ?? DEFAULT_TIMEZONE).trim();
   if (!name) throw new Error("定时任务名称不能为空");
-  if (!prompt) throw new Error("给助理的任务说明不能为空");
+  const execution = normalizeExecution(input);
   const compiled = input.rule ? compileScheduleRule(input.rule, timezone) : { rule: inferLegacyRule(input.cron), cron: String(input.cron ?? "").trim() };
   if (!compiled.cron && !["once", "interval"].includes(compiled.rule?.type)) throw new Error("执行规则不能为空");
   try {
@@ -183,9 +260,24 @@ export function validateScheduleInput(input) {
   } catch (error) {
     throw new Error(`执行规则或时区无效：${error.message}`);
   }
-  const sessionMode = String(input.sessionMode ?? "isolated");
+  const sessionMode = execution.llm
+    ? execution.llm.session === "persistent"
+      ? "assistant"
+      : "isolated"
+    : "isolated";
   if (!SESSION_MODES.has(sessionMode)) throw new Error("请选择有效的会话方式");
-  return { name, prompt, ...compiled, timezone, enabled: input.enabled !== false, sessionMode };
+  return {
+    name,
+    // prompt / sessionMode 保留给旧前端与旧数据读取；执行以 command / llm 为准。
+    prompt: execution.llm?.prompt ?? "",
+    ...compiled,
+    timezone,
+    enabled: input.enabled !== false,
+    sessionMode,
+    command: execution.command,
+    llm: execution.llm,
+    log: execution.log,
+  };
 }
 
 export async function listSchedules(project) {
@@ -197,6 +289,7 @@ export async function listSchedules(project) {
       sessionMode: schedule.sessionMode ?? "assistant",
       rule: schedule.rule ?? inferLegacyRule(schedule.cron),
       description: scheduleDescription(schedule),
+      kind: scheduleKind(schedule),
       nextRunAt: nextScheduleRun(schedule),
     })),
     runs: store.runs,
@@ -205,6 +298,12 @@ export async function listSchedules(project) {
 
 export async function upsertSchedule(project, input) {
   const clean = validateScheduleInput(input);
+  // LLM 段指定的角色必须在项目里可用（创建时就拒绝，别等执行时才失败）。
+  if (clean.llm?.agent && clean.llm.agent !== "assistant") {
+    const agentName = String(clean.llm.agent).replace(/^agent:/, "");
+    const def = await loadEnabledAgentDef(project, agentName);
+    if (!def) throw new Error(`Agent“${agentName}”不存在或未在当前项目启用`);
+  }
   const store = await loadScheduleStore(project);
   const index = input.id ? store.schedules.findIndex((item) => item.id === input.id) : -1;
   const now = new Date().toISOString();
@@ -214,7 +313,7 @@ export async function upsertSchedule(project, input) {
   if (index >= 0) store.schedules[index] = schedule;
   else store.schedules.push(schedule);
   await saveScheduleStore(project, store);
-  return { ...schedule, nextRunAt: nextScheduleRun(schedule) };
+  return { ...schedule, kind: scheduleKind(schedule), description: scheduleDescription(schedule), nextRunAt: nextScheduleRun(schedule) };
 }
 
 export async function deleteSchedule(project, id) {
@@ -230,7 +329,8 @@ async function appendRun(project, run, updateSchedule) {
   const schedule = store.schedules.find((item) => item.id === run.scheduleId);
   if (schedule && updateSchedule) Object.assign(schedule, updateSchedule);
   store.runs.unshift(run);
-  store.runs = store.runs.slice(0, MAX_RUNS);
+  const config = await loadCleanupConfig();
+  store.runs = store.runs.slice(0, config.runs?.maxEntries ?? DEFAULT_MAX_RUNS);
   await saveScheduleStore(project, store);
 }
 
@@ -246,71 +346,52 @@ async function projectConversation(harness, project, context) {
   return undefined;
 }
 
-async function isolatedScheduleConversation(harness, project, schedule, run, context) {
-  const main = await projectConversation(harness, project, context);
-  if (!main) throw new Error(`找不到项目“${project}”的助理会话`);
-  const assistant = await loadAssistant(project);
-  const agents = await listAgents(project);
-  // Anchor 会立即 terminal，因此必须和 owned conversation 在同一个 transaction 内原子创建。
-  const conversationId = await harness.commit(async (tx) => {
-    const anchor = await tx.createTask(AnchorTask, null, {
-      ownership: { kind: "conversation" },
-      conversationId: main.id,
-      background: true,
-    });
-    const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
-    await configure(tx, child.id, {
-      model: resolveAgentModel(assistant.model),
-      instructions: assistantInstructions(project, assistant, agents),
-      tools: resolveAssistantTools(assistant.tools, assistant.mcps),
-      cwd: projectCwd(project),
-    });
-    await setConversationMeta(tx, child.id, {
-      project,
-      actorType: "assistant",
-      actorName: "助理",
-      source: "schedule",
-      title: schedule.name,
-      parentConversationId: String(main.id),
-      scheduleId: schedule.id,
-      scheduleRunId: run.id,
-      createdAt: run.triggeredAt,
-    });
-    return child.id;
-  }, context);
-  const conversation = await harness.conversation(conversationId, context);
-  if (!conversation) throw new Error(`未能创建项目“${project}”的独立定时任务会话`);
-  return conversation;
-}
-
 export async function triggerSchedule(harness, context, project, schedule, options = {}) {
   const scheduledAt = options.scheduledAt ?? new Date().toISOString();
   const occurrenceId = options.occurrenceId ?? `${schedule.id}:${scheduledAt}`;
   const requestId = `pibox-schedule:${project}:${occurrenceId}`;
+  const execution = normalizeExecution(schedule);
+  const kind = scheduleKind(execution);
   const run = {
     id: randomUUID(), scheduleId: schedule.id, scheduleName: schedule.name,
     scheduledAt, triggeredAt: new Date().toISOString(), status: "submitted", requestId,
-    manual: options.manual === true,
-    sessionMode: schedule.sessionMode ?? "assistant",
+    manual: options.manual === true, kind, occurrenceId,
+    sessionMode: execution.llm?.session === "persistent" ? "assistant" : "isolated",
   };
   try {
-    const conversation = run.sessionMode === "isolated"
-      ? await isolatedScheduleConversation(harness, project, schedule, run, context)
-      : await projectConversation(harness, project, context);
-    if (!conversation) throw new Error(`找不到项目“${project}”的助理会话`);
-    run.conversationId = String(conversation.id);
-    const submission = await conversation.submit({
-      type: "input",
-      content: schedule.prompt,
-      requestId,
-      whenBusy: "followUp",
-      entry: {
-        kind: "pibox.schedule",
-        data: { scheduleId: schedule.id, scheduleName: schedule.name, scheduledAt, occurrenceId, sessionMode: run.sessionMode },
-      },
-    }, context);
-    run.submissionId = String(submission.id);
-    submission.wait(context).catch((error) => console.error(`[schedule] ${project}/${schedule.name}:`, error.message));
+    const main = await projectConversation(harness, project, context);
+    if (!main) throw new Error(`找不到项目“${project}”的助理会话`);
+    // 整条任务（命令段 + LLM 段）交给一个 durable task：
+    // - background: true     不阻塞会话空闲等待，也不受人工 Esc/abort 影响
+    // - abandonOnRestart    进程重启时中断而非重跑，保护有副作用的命令
+    const taskId = await harness.commit(async (tx) =>
+      tx.createTask(
+        ScheduleCommandTask,
+        {
+          project,
+          scheduleId: schedule.id,
+          scheduleName: schedule.name,
+          occurrenceId,
+          runId: run.id,
+          scheduledAt,
+          manual: options.manual === true,
+          kind,
+          command: execution.command,
+          llm: execution.llm,
+          prompt: execution.llm?.prompt ?? "",
+          projectCwd: projectCwd(project),
+          // durable 的 ConversationId 必须是 number（文档/提交地址都要求整数）
+          mainConversationId: main.id,
+          logRetentionDays: execution.log.retentionDays,
+        },
+        {
+          ownership: { kind: "conversation" },
+          conversationId: main.id,
+          background: true,
+          abandonOnRestart: true,
+        },
+      ), context);
+    run.taskId = String(taskId);
     const update = options.advanceCursor ? { cursorAt: options.advanceCursor, lastRunAt: run.triggeredAt } : { lastRunAt: run.triggeredAt };
     if (schedule.rule?.type === "once") update.enabled = false;
     await appendRun(project, run, update);
@@ -320,6 +401,20 @@ export async function triggerSchedule(harness, context, project, schedule, optio
     run.error = error instanceof Error ? error.message : String(error);
     await appendRun(project, run, options.advanceCursor ? { cursorAt: options.advanceCursor } : undefined);
     throw error;
+  }
+}
+
+/** 定时任务结束时回写运行记录（由 durable task 的 phase 调用，失败不影响任务本身）。 */
+export async function finalizeRun(project, runId, patch) {
+  if (!runId) return;
+  try {
+    const store = await loadScheduleStore(project);
+    const run = store.runs.find((item) => item.id === runId);
+    if (!run) return;
+    Object.assign(run, patch, { finishedAt: new Date().toISOString() });
+    await saveScheduleStore(project, store);
+  } catch (error) {
+    console.error(`[schedule] 回写运行记录失败 ${project}/${runId}:`, error?.message ?? error);
   }
 }
 

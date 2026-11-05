@@ -555,6 +555,28 @@ async function reloadSchedules(project) {
   return data;
 }
 
+const SCHEDULE_KIND_LABEL = {
+  command: "命令",
+  llm: "LLM",
+  "command+llm": "命令 + LLM",
+};
+
+function scheduleKindLabel(schedule) {
+  const kind = schedule.kind ?? (schedule.command ? (schedule.llm ? "command+llm" : "command") : "llm");
+  return SCHEDULE_KIND_LABEL[kind] ?? kind;
+}
+
+function runStatusLabel(run) {
+  if (!run) return null;
+  if (run.status === "skipped-running") return "跳过（上一轮仍在运行）";
+  if (run.status === "submitted") return "已提交";
+  const parts = [run.status === "completed" ? "完成" : run.status === "aborted" ? "中断" : "失败"];
+  if (run.exitCode !== undefined && run.exitCode !== null) parts.push(`exit ${run.exitCode}`);
+  if (typeof run.durationMs === "number") parts.push(`${(run.durationMs / 1000).toFixed(1)}s`);
+  if (run.llmStatus && run.llmStatus !== "none") parts.push(`LLM ${run.llmStatus}`);
+  return parts.join(" · ");
+}
+
 function fillScheduleList(body, project, schedules) {
   body.replaceChildren();
   if (schedules.length === 0) {
@@ -566,17 +588,41 @@ function fillScheduleList(body, project, schedules) {
     if (selected?.scheduleId === schedule.id) card.classList.add("selected");
     const title = el("div", "schedule-card-title");
     title.appendChild(el("span", schedule.enabled ? "schedule-badge enabled" : "schedule-badge", schedule.enabled ? "已启用" : "已停用"));
+    title.appendChild(el("span", "schedule-kind", scheduleKindLabel(schedule)));
     title.appendChild(el("strong", "", schedule.name));
     card.appendChild(title);
     card.appendChild(el("div", "schedule-cron", schedule.description || "自定义时间规则"));
     card.appendChild(el("div", "muted schedule-timezone", `时区：${timezoneLabel(schedule.timezone)}（${schedule.timezone}）`));
-    card.appendChild(el("div", "muted schedule-session-mode", schedule.sessionMode === "isolated" ? "会话：每次创建独立会话" : "会话：继续使用项目助理会话"));
-    card.appendChild(el("div", "schedule-prompt", schedule.prompt));
-    card.appendChild(el("div", "muted", `上次触发：${formatDateTime(schedule.lastRunAt)}　下次执行：${formatDateTime(schedule.nextRunAt)}`));
-    const latestRun = (scheduleRunsCache[project] ?? []).find((item) => item.scheduleId === schedule.id);
-    if (latestRun?.conversationId) {
-      card.appendChild(el("div", "muted schedule-last-run", `最近运行会话：#${latestRun.conversationId}${latestRun.sessionMode === "isolated" ? "（独立）" : "（项目助理）"}`));
+
+    if (schedule.command?.run) {
+      card.appendChild(el("div", "schedule-prompt schedule-command", `命令：${schedule.command.run}`));
     }
+    if (schedule.llm?.prompt) {
+      const agentLabel = schedule.llm.agent && schedule.llm.agent !== "assistant"
+        ? String(schedule.llm.agent).replace(/^agent:/, "")
+        : "项目助理";
+      const sessionLabel = schedule.llm.session === "persistent" ? "沿用助理会话" : "每次新建会话";
+      card.appendChild(el("div", "muted schedule-session-mode", `LLM：${agentLabel} · ${sessionLabel}`));
+      card.appendChild(el("div", "schedule-prompt", schedule.llm.prompt));
+    } else if (!schedule.command?.run) {
+      card.appendChild(el("div", "schedule-prompt", schedule.prompt || ""));
+    }
+    if (schedule.log?.retentionDays !== undefined) {
+      card.appendChild(el("div", "muted", `日志保留：${schedule.log.retentionDays} 天`));
+    }
+    card.appendChild(el("div", "muted", `上次触发：${formatDateTime(schedule.lastRunAt)}　下次执行：${formatDateTime(schedule.nextRunAt)}`));
+
+    const runs = (scheduleRunsCache[project] ?? []).filter((item) => item.scheduleId === schedule.id);
+    const latestRun = runs[0];
+    if (latestRun) {
+      const line = el("div", "muted schedule-last-run", `最近运行：${runStatusLabel(latestRun) ?? latestRun.status}`);
+      if (latestRun.finishedAt) line.textContent += `　${formatDateTime(latestRun.finishedAt)}`;
+      card.appendChild(line);
+    }
+    if (latestRun?.llmConversationId) {
+      card.appendChild(el("div", "muted schedule-last-run", `最近运行会话：#${latestRun.llmConversationId}`));
+    }
+
     const actions = el("div", "schedule-actions");
     const run = el("button", "btn-secondary", "立即运行");
     run.onclick = async () => {
@@ -593,12 +639,14 @@ function fillScheduleList(body, project, schedules) {
     };
     const edit = el("button", "btn-secondary", "编辑");
     edit.onclick = () => openScheduleEditor(project, schedule);
-    actions.append(run, edit);
-    if (latestRun?.conversationId) {
+    const logs = el("button", "btn-secondary", "日志");
+    logs.onclick = () => openScheduleLog(project, schedule);
+    actions.append(run, edit, logs);
+    if (latestRun?.llmConversationId) {
       const viewRun = el("button", "btn-secondary", "查看最近会话");
       viewRun.onclick = async () => {
-        if (!state.conversations.some((item) => item.id === String(latestRun.conversationId))) await refresh();
-        selected = { type: "conversation", project, id: String(latestRun.conversationId) };
+        if (!state.conversations.some((item) => item.id === String(latestRun.llmConversationId))) await refresh();
+        selected = { type: "conversation", project, id: String(latestRun.llmConversationId) };
         setMobilePanel("view");
         render();
       };
@@ -607,6 +655,66 @@ function fillScheduleList(body, project, schedules) {
     card.appendChild(actions);
     body.appendChild(card);
   }
+}
+
+/** 定时任务运行日志抽屉：可按最近运行记录切换。 */
+async function openScheduleLog(project, schedule) {
+  const overlay = el("div", "drawer-submodal-backdrop");
+  const modal = el("div", "drawer-submodal schedule-log-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.appendChild(el("h3", "", `运行日志 · ${schedule.name}`));
+
+  const runs = (scheduleRunsCache[project] ?? []).filter((item) => item.scheduleId === schedule.id).slice(0, 20);
+  const picker = document.createElement("select");
+  const latestOption = document.createElement("option");
+  latestOption.value = "";
+  latestOption.textContent = "最近一次运行（latest.log）";
+  picker.appendChild(latestOption);
+  for (const item of runs) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = `${formatDateTime(item.triggeredAt)} · ${runStatusLabel(item) ?? item.status}`;
+    picker.appendChild(option);
+  }
+  modal.appendChild(formRow("运行记录", picker));
+
+  const meta = el("div", "muted schedule-log-meta", "加载中…");
+  const pre = el("pre", "schedule-log-body", "");
+  modal.append(meta, pre);
+
+  const load = async (runId) => {
+    meta.textContent = "加载中…";
+    pre.textContent = "";
+    const query = new URLSearchParams({ project, scheduleId: schedule.id, tail: "500" });
+    if (runId) query.set("runId", runId);
+    const response = await fetch(`/api/schedules/logs?${query}`);
+    const result = await response.json();
+    if (!response.ok) {
+      meta.textContent = `❌ ${result.error || "读取日志失败"}`;
+      return;
+    }
+    // 去掉 ANSI 控制序列，避免终端颜色码污染页面
+    const text = (result.lines ?? []).join("\n").replace(/\u001b\[[0-9;]*[a-zA-Z]/g, "").replace(/\r/g, "");
+    pre.textContent = text || "（日志为空）";
+    meta.textContent = `${(result.bytes / 1024).toFixed(1)} KB${result.truncatedFromStart ? "（只显示末尾 512 KB）" : ""}　${result.path}`;
+    pre.scrollTop = pre.scrollHeight;
+  };
+  picker.onchange = () => load(picker.value);
+
+  const actions = el("div", "form-actions");
+  const reload = el("button", "btn-secondary", "刷新");
+  reload.onclick = () => load(picker.value);
+  const close = el("button", "btn-primary", "关闭");
+  close.onclick = () => overlay.remove();
+  actions.append(reload, close);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  overlay.onclick = (event) => {
+    if (event.target === overlay) overlay.remove();
+  };
+  document.body.appendChild(overlay);
+  await load("");
 }
 
 function openScheduleEditor(project, existing = null) {
@@ -646,25 +754,6 @@ function openScheduleEditor(project, existing = null) {
   }
   timezone.value = existing?.timezone ?? browserTimezone;
   modal.appendChild(formRow("时区", timezone));
-
-  const sessionMode = document.createElement("select");
-  for (const [value, label] of [["isolated", "每次创建独立会话（推荐）"], ["assistant", "继续使用项目助理会话"]]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    sessionMode.appendChild(option);
-  }
-  sessionMode.value = existing?.sessionMode ?? (existing ? "assistant" : "isolated");
-  modal.appendChild(formRow("会话方式", sessionMode));
-  const sessionHelp = el("div", "muted schedule-session-help");
-  const updateSessionHelp = () => {
-    sessionHelp.textContent = sessionMode.value === "isolated"
-      ? "使用相同的项目助理配置，但不读取或污染主会话历史；结果保存在本次独立会话中。"
-      : "可以读取之前的项目助理对话，执行过程和结果会进入项目助理主会话。";
-  };
-  sessionMode.onchange = updateSessionHelp;
-  updateSessionHelp();
-  modal.appendChild(sessionHelp);
 
   let readRule = () => initialRule;
   const renderRuleFields = () => {
@@ -732,6 +821,150 @@ function openScheduleEditor(project, existing = null) {
   frequency.onchange = renderRuleFields;
   renderRuleFields();
 
+  // ── 执行方式：命令 / LLM / 命令 + LLM ──────────────────────────────
+  const hasCommand = Boolean(existing?.command?.run);
+  const hasLlm = Boolean(existing?.llm?.prompt);
+  const initialKind = hasCommand && hasLlm ? "command+llm" : hasCommand ? "command" : "llm";
+
+  const kindSelect = document.createElement("select");
+  for (const [value, label, help] of [
+    ["command", "只执行命令（不调用模型）", "定时直接跑命令，不创建会话，不消耗 token。"],
+    ["llm", "只调用模型（LLM 任务）", "把提示词交给模型执行，会产生会话。"],
+    ["command+llm", "执行命令，再交给模型处理", "先跑命令，再把输出作为上下文交给模型出结论/报告。"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    option.dataset.help = help;
+    kindSelect.appendChild(option);
+  }
+  kindSelect.className = "schedule-kind-select";
+  kindSelect.value = initialKind;
+  modal.appendChild(formRow("执行方式", kindSelect));
+  const kindHelp = el("div", "muted schedule-session-help", "");
+  modal.appendChild(kindHelp);
+
+  // 命令段
+  const commandWrap = el("div", "schedule-section");
+  const commandText = document.createElement("textarea");
+  commandText.className = "cfg-textarea code-textarea schedule-command-input";
+  commandText.rows = 4;
+  commandText.placeholder = "例如：/workspace/demo/run.sh /workspace/.venv/bin/python script.py";
+  commandText.value = existing?.command?.run ?? "";
+  commandWrap.appendChild(el("div", "form-label", "执行命令（由 bash -c 执行，工作目录默认是项目目录）"));
+  commandWrap.appendChild(commandText);
+
+  const commandOptions = el("div", "schedule-inline-rule");
+  const timeout = document.createElement("input");
+  timeout.type = "number";
+  timeout.min = "1";
+  timeout.max = "86400";
+  timeout.value = String(existing?.command?.timeoutSec ?? 900);
+  const concurrency = document.createElement("select");
+  for (const [value, label] of [["skip", "跳过本次"], ["queue", "允许并行"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    concurrency.appendChild(option);
+  }
+  concurrency.value = existing?.command?.concurrency ?? "skip";
+  commandOptions.append(el("span", "", "超时"), timeout, el("span", "", "秒；同一任务重叠时"), concurrency);
+  commandWrap.appendChild(commandOptions);
+  commandWrap.appendChild(el("div", "muted", "输出写入项目 .pi/schedule-logs/，单次上限 20MB。环境变量沿用容器全局配置。"));
+  modal.appendChild(commandWrap);
+
+  // LLM 段
+  const llmWrap = el("div", "schedule-section");
+  llmWrap.appendChild(el("div", "form-label", "交给哪个角色执行"));
+
+  const agentSelect = document.createElement("select");
+  agentSelect.className = "schedule-agent-select";
+  const assistantOption = document.createElement("option");
+  assistantOption.value = "assistant";
+  assistantOption.textContent = "项目助理";
+  agentSelect.appendChild(assistantOption);
+  agentSelect.value = existing?.llm?.agent && existing.llm.agent !== "assistant" ? String(existing.llm.agent) : "assistant";
+  llmWrap.appendChild(agentSelect);
+  fetch(`/api/agents?project=${encodeURIComponent(project)}`)
+    .then((response) => (response.ok ? response.json() : { agents: [] }))
+    .then((data) => {
+      for (const agent of data.agents ?? []) {
+        const option = document.createElement("option");
+        option.value = `agent:${agent.name}`;
+        option.textContent = `${agent.name}（项目子 Agent）`;
+        agentSelect.appendChild(option);
+      }
+      agentSelect.value = existing?.llm?.agent && existing.llm.agent !== "assistant" ? String(existing.llm.agent) : "assistant";
+    })
+    .catch(() => {});
+
+  const sessionMode = document.createElement("select");
+  for (const [value, label] of [["ephemeral", "每次新建会话（推荐）"], ["persistent", "沿用该角色的持久会话"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    sessionMode.appendChild(option);
+  }
+  sessionMode.value = existing?.llm?.session ?? (existing?.sessionMode === "assistant" ? "persistent" : "ephemeral");
+  llmWrap.appendChild(formRow("会话方式", sessionMode));
+
+  const onCommandFailure = document.createElement("select");
+  for (const [value, label] of [["run", "继续交给模型处理"], ["skip", "跳过 LLM 段"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    onCommandFailure.appendChild(option);
+  }
+  onCommandFailure.value = existing?.llm?.onCommandFailure ?? "run";
+  llmWrap.appendChild(formRow("命令失败时", onCommandFailure));
+
+  llmWrap.appendChild(el("div", "form-label", "提示词（可用 {{stdout}} / {{exitCode}} / {{logPath}} / {{durationMs}} 引用命令结果）"));
+  const prompt = document.createElement("textarea");
+  prompt.className = "cfg-textarea schedule-prompt-input";
+  prompt.rows = 7;
+  prompt.value = existing?.llm?.prompt ?? existing?.prompt ?? "请检查当前项目的状态，完成需要处理的工作，并汇报结果。";
+  llmWrap.appendChild(prompt);
+  llmWrap.appendChild(el("div", "muted", "模型可以派发当前项目中已启用的子 Agent；结果写入运行日志，需要回流主会话时可在任务里配置 reportTo。"));
+  modal.appendChild(llmWrap);
+
+  const logRetention = document.createElement("input");
+  logRetention.type = "number";
+  logRetention.min = "0";
+  logRetention.max = "365";
+  logRetention.value = String(existing?.log?.retentionDays ?? 7);
+  modal.appendChild(formRow("日志保留（天）", logRetention));
+
+  const updateKindVisibility = () => {
+    const kind = kindSelect.value;
+    const help = kindSelect.selectedOptions[0]?.dataset.help ?? "";
+    kindHelp.textContent = help;
+    commandWrap.style.display = kind === "llm" ? "none" : "";
+    llmWrap.style.display = kind === "command" ? "none" : "";
+  };
+  kindSelect.onchange = updateKindVisibility;
+  updateKindVisibility();
+
+  const readExecution = () => {
+    const kind = kindSelect.value;
+    const command = kind === "llm"
+      ? null
+      : {
+          run: commandText.value.trim(),
+          timeoutSec: Number(timeout.value) || 900,
+          concurrency: concurrency.value,
+        };
+    let llm = null;
+    if (kind !== "command") {
+      llm = {
+        prompt: prompt.value.trim(),
+        agent: agentSelect.value,
+        session: sessionMode.value,
+        onCommandFailure: onCommandFailure.value,
+        reportTo: existing?.llm?.reportTo ?? "none",
+      };
+    }
+    return { command, llm };
+  };
   const enabledWrap = el("label", "checkbox-item schedule-enabled");
   const enabled = document.createElement("input");
   enabled.type = "checkbox";
@@ -739,13 +972,6 @@ function openScheduleEditor(project, existing = null) {
   enabledWrap.append(enabled, el("span", "", "启用这个定时任务"));
   modal.appendChild(enabledWrap);
 
-  modal.appendChild(el("div", "form-label", "给项目助理的任务说明"));
-  const prompt = document.createElement("textarea");
-  prompt.className = "cfg-textarea";
-  prompt.rows = 7;
-  prompt.value = existing?.prompt ?? "请检查当前项目的状态，完成需要处理的工作，并汇报结果。";
-  modal.appendChild(prompt);
-  modal.appendChild(el("div", "muted", "无论选择哪种会话方式，助理都可以派发当前项目中已启用的子 Agent。"));
   const status = el("div", "form-status");
   modal.appendChild(status);
 
@@ -773,7 +999,16 @@ function openScheduleEditor(project, existing = null) {
     status.textContent = "正在保存…";
     const response = await fetch("/api/schedules", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project, id: existing?.id, name: name.value, rule: readRule(), timezone: timezone.value, sessionMode: sessionMode.value, enabled: enabled.checked, prompt: prompt.value }),
+      body: JSON.stringify({
+        project,
+        id: existing?.id,
+        name: name.value,
+        rule: readRule(),
+        timezone: timezone.value,
+        enabled: enabled.checked,
+        ...readExecution(),
+        log: { retentionDays: Number(logRetention.value) || 0 },
+      }),
     });
     const result = await response.json();
     save.disabled = false;
@@ -875,7 +1110,7 @@ function renderProjectForm(view) {
   };
   summary.append(summaryTitle, count, addSchedule);
   scheduleSection.appendChild(summary);
-  scheduleSection.appendChild(el("div", "muted schedule-intro", "到点后由项目助理处理任务；可选择继续主会话或为每次运行创建独立会话，助理可以调用项目中全部已启用的子 Agent。"));
+  scheduleSection.appendChild(el("div", "muted schedule-intro", "任务分三类：只执行命令（不调用模型）、只调用模型、先执行命令再把输出交给模型。运行日志与退出码可在卡片上的「日志」里查看。"));
   const scheduleList = el("div", "schedule-list project-schedule-list");
   fillScheduleList(scheduleList, oldName, schedulesCache[oldName] ?? []);
   scheduleSection.appendChild(scheduleList);
@@ -1691,7 +1926,7 @@ async function switchSettingsTab(tab) {
   for (const btn of document.querySelectorAll(".drawer-nav-item")) {
     btn.classList.toggle("active", btn.dataset.tab === tab);
   }
-  for (const id of ["tab-models", "tab-agents", "tab-skills", "tab-mcp", "tab-system"]) {
+  for (const id of ["tab-models", "tab-agents", "tab-skills", "tab-mcp", "tab-cleanup", "tab-system"]) {
     document.getElementById(id).classList.toggle("hidden", id !== `tab-${tab}`);
   }
   if (tab === "models") return;
@@ -1701,6 +1936,7 @@ async function switchSettingsTab(tab) {
     if (tab === "agents") await renderDrawerAgents(panel);
     if (tab === "skills") await renderDrawerSkills(panel);
     if (tab === "mcp") await renderDrawerMcp(panel);
+    if (tab === "cleanup") await renderDrawerCleanup(panel);
     if (tab === "system") await renderDrawerSystem(panel);
   }
 }
@@ -2433,6 +2669,246 @@ function openMcpForm(existing, onSaved) {
     close();
     settingsLoadedTabs.delete("mcp"); await onSaved();
   };
+}
+
+// ── 数据清理 Tab ──
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 100 || index === 0 ? Math.round(size) : size.toFixed(1)} ${units[index]}`;
+}
+
+function cleanupStepLabel(step) {
+  return (
+    {
+      "stopping-scheduler": "停止定时任务调度",
+      "aborting-tasks": "中断运行中的任务",
+      "closing-harness": "关闭后台 Harness",
+      "cleaning-database": "清理并压缩数据库",
+      "starting-harness": "重新启动 Harness",
+    }[step] ?? step
+  );
+}
+
+async function renderDrawerCleanup(panel, flash) {
+  panel.innerHTML = `<div class="drawer-loading">加载中…</div>`;
+  let status;
+  try {
+    status = await (await fetch("/api/cleanup/status")).json();
+  } catch (error) {
+    panel.innerHTML = `<div class="drawer-section">读取失败：${error.message}</div>`;
+    return;
+  }
+  const { config, database, logs, maintenance } = status;
+  panel.innerHTML = "";
+  if (flash) panel.appendChild(el("div", "cleanup-flash", flash));
+
+  // ① 占用概览
+  const sec1 = el("div", "drawer-section");
+  sec1.appendChild(el("h3", "", "📊 占用概览"));
+  const table = el("table", "kv-table");
+  const rows = [
+    ["数据库文件", formatBytes(database.sqlite)],
+    ["WAL / SHM", formatBytes(database.wal + database.shm)],
+    ["数据库合计", formatBytes(database.total)],
+    ["运行日志", `${formatBytes(logs.total)}（${logs.files} 个文件）`],
+  ];
+  for (const [k, v] of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "k", k));
+    tr.appendChild(el("td", "v", v));
+    table.appendChild(tr);
+  }
+  sec1.appendChild(table);
+  sec1.appendChild(el("div", "muted", "运行中的数据主要在 WAL 里，服务正常关闭时会合并进主库；「清理并压缩」后才会真正缩小文件。"));
+  const refresh = el("button", "btn-secondary", "刷新");
+  refresh.onclick = () => renderDrawerCleanup(panel);
+  sec1.appendChild(refresh);
+  if (maintenance) {
+    sec1.appendChild(el("div", "cleanup-busy", `维护进行中：${cleanupStepLabel(maintenance.step)}…`));
+  }
+  panel.appendChild(sec1);
+
+  const save = async (patch, hint) => {
+    const response = await fetch("/api/cleanup/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      alert(`保存失败：${result.error || "未知错误"}`);
+      return;
+    }
+    if (hint) hint(result.config);
+  };
+
+  // ② 日志文件清理
+  const sec2 = el("div", "drawer-section");
+  sec2.appendChild(el("h3", "", "🗂 日志文件清理"));
+  const logDays = document.createElement("input");
+  logDays.type = "number";
+  logDays.min = "0";
+  logDays.max = "365";
+  logDays.value = String(config.logs.retentionDays);
+  logDays.onchange = () => save({ logs: { retentionDays: Number(logDays.value) } });
+  sec2.appendChild(formRow("默认保留天数", logDays));
+  sec2.appendChild(el("div", "muted", "0 = 不自动删除。单个定时任务可在任务里单独设置保留天数，优先生效。"));
+
+  const maxMb = document.createElement("input");
+  maxMb.type = "number";
+  maxMb.min = "1";
+  maxMb.max = "1024";
+  maxMb.value = String(Math.round(config.logs.maxRunBytes / 1024 / 1024));
+  maxMb.onchange = () => save({ logs: { maxRunBytes: Number(maxMb.value) * 1024 * 1024 } });
+  sec2.appendChild(formRow("单次输出上限", maxMb));
+  sec2.appendChild(el("div", "muted", "单位 MB。命令输出超过该值后截断，避免单个任务撑爆磁盘。"));
+
+  const autoPrune = document.createElement("input");
+  autoPrune.type = "checkbox";
+  autoPrune.checked = config.logs.autoPrune !== false;
+  autoPrune.onchange = () => save({ logs: { autoPrune: autoPrune.checked } });
+  const autoPruneWrap = el("label", "checkbox-item");
+  autoPruneWrap.append(autoPrune, el("span", "", "按规则自动清理日志（每 6 小时检查一次，不中断服务）"));
+  sec2.appendChild(autoPruneWrap);
+
+  const pruneBtn = el("button", "btn-secondary", "立即清理日志");
+  const logResult = el("div", "form-status");
+  pruneBtn.onclick = async () => {
+    pruneBtn.disabled = true;
+    logResult.className = "form-status";
+    logResult.textContent = "正在清理…";
+    const response = await fetch("/api/cleanup/logs", { method: "POST" });
+    const result = await response.json();
+    pruneBtn.disabled = false;
+    if (!response.ok) {
+      logResult.className = "form-status err";
+      logResult.textContent = `❌ ${result.error || "清理失败"}`;
+      return;
+    }
+    await renderDrawerCleanup(
+      panel,
+      `✅ 日志清理完成：删除 ${result.result.removedFiles} 个文件，释放 ${formatBytes(result.result.freedBytes)}`,
+    );
+  };
+  sec2.append(pruneBtn, logResult);
+  panel.appendChild(sec2);
+
+  // ③ 数据库清理
+  const sec3 = el("div", "drawer-section");
+  sec3.appendChild(el("h3", "", "🗄 数据库清理"));
+  const dbDays = document.createElement("input");
+  dbDays.type = "number";
+  dbDays.min = "0";
+  dbDays.max = "3650";
+  dbDays.value = String(config.database.retentionDays);
+  dbDays.onchange = () => save({ database: { retentionDays: Number(dbDays.value) } });
+  sec3.appendChild(formRow("保留天数", dbDays));
+  sec3.appendChild(el("div", "muted", "删除早于该天数的已结束任务，以及它们拥有的独立会话（日志里的一次运行一个会话）。0 = 不删除。"));
+
+  const vacuum = document.createElement("input");
+  vacuum.type = "checkbox";
+  vacuum.checked = config.database.vacuum !== false;
+  vacuum.onchange = () => save({ database: { vacuum: vacuum.checked } });
+  const vacuumWrap = el("label", "checkbox-item");
+  vacuumWrap.append(vacuum, el("span", "", "清理后压缩数据库（VACUUM，需要约等于库大小的临时磁盘空间）"));
+  sec3.appendChild(vacuumWrap);
+
+  const autoClean = document.createElement("input");
+  autoClean.type = "checkbox";
+  autoClean.checked = config.database.autoClean !== false;
+  autoClean.onchange = () => save({ database: { autoClean: autoClean.checked } });
+  const autoCleanWrap = el("label", "checkbox-item");
+  autoCleanWrap.append(autoClean, el("span", "", "每天自动清理（仅在确认没有任务运行时执行）"));
+  sec3.appendChild(autoCleanWrap);
+
+  const autoAt = document.createElement("input");
+  autoAt.type = "time";
+  autoAt.value = config.database.autoCleanAt;
+  autoAt.onchange = () => save({ database: { autoCleanAt: autoAt.value } });
+  sec3.appendChild(formRow("自动清理时间", autoAt));
+
+  const compactBtn = el("button", "btn-primary", "立即清理并压缩");
+  const dbResult = el("div", "form-status");
+  compactBtn.onclick = async () => {
+    if (!confirm("执行期间会短暂停止后台任务（运行中的命令与模型生成会被中断），并在清理后自动恢复。继续？")) return;
+    compactBtn.disabled = true;
+    dbResult.className = "form-status";
+    dbResult.textContent = "正在清理：停止调度 → 中断任务 → 关闭 Harness → 清理压缩 → 重启…";
+    try {
+      const response = await fetch("/api/cleanup/database", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retentionDays: Number(dbDays.value), vacuum: vacuum.checked }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        dbResult.className = "form-status err";
+        dbResult.textContent = `❌ ${result.error || "清理失败"}`;
+        return;
+      }
+      const r = result.result ?? {};
+      await renderDrawerCleanup(
+        panel,
+        `✅ 数据库清理完成（${result.durationMs} ms）：删除任务 ${r.tasks ?? 0}、会话 ${r.conversations ?? 0}、` +
+          `消息 ${r.entries ?? 0}、提交 ${r.submissions ?? 0}、文档 ${r.documents ?? 0}；` +
+          `${formatBytes(r.sizeBefore)} → ${formatBytes(r.sizeAfter)}` +
+          (r.error ? `（${r.error}）` : ""),
+      );
+    } catch (error) {
+      dbResult.className = "form-status err";
+      dbResult.textContent = `❌ ${error.message}`;
+    } finally {
+      compactBtn.disabled = false;
+    }
+  };
+  sec3.append(compactBtn, dbResult);
+  panel.appendChild(sec3);
+
+  // ④ 运行记录保留
+  const sec4 = el("div", "drawer-section");
+  sec4.appendChild(el("h3", "", "📜 运行记录"));
+  const maxRuns = document.createElement("input");
+  maxRuns.type = "number";
+  maxRuns.min = "20";
+  maxRuns.max = "5000";
+  maxRuns.value = String(config.runs.maxEntries);
+  maxRuns.onchange = () => save({ runs: { maxEntries: Number(maxRuns.value) } });
+  sec4.appendChild(formRow("运行记录条数", maxRuns));
+  sec4.appendChild(el("div", "muted", "每个定时任务在 schedules.json 里保留的最近运行记录数量。"));
+  panel.appendChild(sec4);
+
+  // ⑤ 上次执行
+  const sec5 = el("div", "drawer-section");
+  sec5.appendChild(el("h3", "", "🕒 上次执行"));
+  const lastLogs = config.lastRuns?.logs;
+  const lastDb = config.lastRuns?.database;
+  sec5.appendChild(
+    el(
+      "div",
+      "muted",
+      lastLogs
+        ? `日志：${formatDateTime(lastLogs.at)} 删除 ${lastLogs.removedFiles} 个文件，释放 ${formatBytes(lastLogs.freedBytes)}`
+        : "日志：尚未执行",
+    ),
+  );
+  sec5.appendChild(
+    el(
+      "div",
+      "muted",
+      lastDb
+        ? `数据库：${formatDateTime(lastDb.at)} 删除任务 ${lastDb.tasks ?? 0} / 会话 ${lastDb.conversations ?? 0}，${formatBytes(lastDb.sizeBefore)} → ${formatBytes(lastDb.sizeAfter)}${lastDb.error ? `（${lastDb.error}）` : ""}`
+        : "数据库：尚未执行",
+    ),
+  );
+  panel.appendChild(sec5);
 }
 
 // ── 系统 Tab ──

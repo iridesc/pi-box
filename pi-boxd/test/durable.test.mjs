@@ -55,7 +55,7 @@ test.after(async () => {
 test("custom durable tasks are registered by stable kind", () => {
   assert.deepEqual(
     PiBoxTasks.map((task) => task.definition.name),
-    ["pibox.anchor", "pibox.reporter"],
+    ["pibox.anchor", "pibox.reporter", "pibox.schedule.command", "pibox.schedule.llm"],
   );
 });
 
@@ -326,6 +326,27 @@ test("human schedule rules compile, describe and preserve legacy schedules", asy
   assert.deepEqual(listed.rule.weekdays, [1, 3, 5]);
 });
 
+/** 定时任务用的最小 harness mock：记录 createTask 收到的定义 / input / options。 */
+function makeScheduleHarness(project) {
+  const calls = {};
+  const harness = {
+    calls,
+    commit: async (operation) =>
+      operation({
+        scanConversations: async () => ({ items: [{ id: 42, owner: null }] }),
+        createTask: async (definition, input, options) => {
+          calls.taskDefinition = definition.definition?.name ?? definition.name;
+          calls.taskInput = input;
+          calls.taskOptions = options;
+          return 77;
+        },
+      }),
+    snapshot: async () => ({ cwd: join(process.env.PI_BOX_WORKSPACE, project) }),
+    conversation: async (id) => (id === 42 ? { id: 42, submit: async () => ({ id: 7, wait: async () => ({ status: "done" }) }) } : undefined),
+  };
+  return harness;
+}
+
 test("one-time schedules use the selected timezone and disable after submission", async () => {
   const project = "once-schedule-test";
   await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
@@ -336,83 +357,51 @@ test("one-time schedules use the selected timezone and disable after submission"
     sessionMode: "assistant",
   });
   assert.match(schedule.rule.runAt, /T01:00:00\.000Z$/);
-  const harness = {
-    commit: async (read) => read({ scanConversations: async () => ({ items: [{ id: 84, owner: null }] }) }),
-    snapshot: async () => ({ cwd: join(process.env.PI_BOX_WORKSPACE, project) }),
-    conversation: async () => ({ submit: async () => ({ id: 8, wait: async () => ({ status: "done" }) }) }),
-  };
+  const harness = makeScheduleHarness(project);
   await triggerSchedule(harness, {}, project, schedule, { scheduledAt: schedule.rule.runAt });
   assert.equal((await listSchedules(project)).schedules[0].enabled, false);
 });
 
-test("a schedule occurrence is submitted to the project assistant as a durable app entry", async () => {
+test("a schedule occurrence becomes a durable schedule task owned by the project assistant", async () => {
   const project = "schedule-submit-test";
   await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
   const schedule = await upsertSchedule(project, {
     name: "巡检", prompt: "检查项目。", cron: "0 9 * * *", timezone: "Asia/Shanghai", enabled: true,
     sessionMode: "assistant",
   });
-  let request;
-  const harness = {
-    commit: async (read) => read({ scanConversations: async () => ({ items: [{ id: 42, owner: null }] }) }),
-    snapshot: async () => ({ cwd: join(process.env.PI_BOX_WORKSPACE, project) }),
-    conversation: async () => ({
-      submit: async (value) => {
-        request = value;
-        return { id: 7, wait: async () => ({ status: "done" }) };
-      },
-    }),
-  };
-  await triggerSchedule(harness, {}, project, schedule, { scheduledAt: "2026-10-15T01:00:00.000Z" });
-  assert.equal(request.content, "检查项目。");
-  assert.equal(request.whenBusy, "followUp");
-  assert.equal(request.entry.kind, "pibox.schedule");
-  assert.equal(request.entry.data.sessionMode, "assistant");
-  assert.match(request.requestId, /^pibox-schedule:schedule-submit-test:/);
+  const harness = makeScheduleHarness(project);
+  const run = await triggerSchedule(harness, {}, project, schedule, { scheduledAt: "2026-10-15T01:00:00.000Z" });
+  assert.equal(harness.calls.taskDefinition, "pibox.schedule.command");
+  const input = harness.calls.taskInput;
+  assert.equal(input.project, project);
+  assert.equal(input.scheduleName, "巡检");
+  assert.equal(input.kind, "llm");
+  assert.equal(input.llm.prompt, "检查项目。");
+  assert.equal(input.llm.session, "persistent");
+  assert.equal(input.mainConversationId, 42, "durable 的 ConversationId 必须是 number");
+  assert.equal(harness.calls.taskOptions.ownership.kind, "conversation");
+  assert.equal(harness.calls.taskOptions.conversationId, 42);
+  assert.equal(harness.calls.taskOptions.background, true);
+  assert.equal(harness.calls.taskOptions.abandonOnRestart, true, "命令有副作用，重启不能重跑");
+  assert.match(run.requestId, /^pibox-schedule:schedule-submit-test:/);
+  assert.equal(run.kind, "llm");
+  assert.equal(run.taskId, "77");
 });
 
-test("an isolated schedule occurrence creates a fresh durable assistant conversation", async () => {
+test("an isolated schedule occurrence runs with an ephemeral assistant session", async () => {
   const project = "schedule-isolated-test";
   await mkdir(join(process.env.PI_BOX_WORKSPACE, project), { recursive: true });
   const schedule = await upsertSchedule(project, {
     name: "独立巡检", prompt: "独立检查项目。", cron: "0 9 * * *", timezone: "Asia/Shanghai", enabled: true,
   });
   assert.equal(schedule.sessionMode, "isolated");
-  let createdOptions;
-  const configuredAgent = {};
-  let request;
-  const main = { id: 42, submit: async () => { throw new Error("不应提交到主会话"); } };
-  const isolated = {
-    id: 99,
-    submit: async (value) => {
-      request = value;
-      return { id: 12, wait: async () => ({ status: "done" }) };
-    },
-  };
-  const harness = {
-    commit: async (operation) => operation({
-      scanConversations: async () => ({ items: [{ id: 42, owner: null }] }),
-      createTask: async () => 77,
-      createConversation: async (options) => {
-        createdOptions = options;
-        return { id: 99 };
-      },
-      doc: async () => configuredAgent,
-    }),
-    snapshot: async () => ({ cwd: join(process.env.PI_BOX_WORKSPACE, project) }),
-    conversation: async (id) => id === 42 ? main : id === 99 ? isolated : undefined,
-  };
+  assert.equal(schedule.kind, "llm");
+  const harness = makeScheduleHarness(project);
   const run = await triggerSchedule(harness, {}, project, schedule, { scheduledAt: "2026-10-15T01:00:00.000Z" });
-  assert.deepEqual(createdOptions.ownership, { kind: "task", taskId: 77 });
-  assert.equal(configuredAgent.cwd, join(process.env.PI_BOX_WORKSPACE, project));
-  assert.equal(configuredAgent.actorType, "assistant");
-  assert.equal(configuredAgent.source, "schedule");
-  assert.equal(configuredAgent.title, "独立巡检");
-  assert.equal(configuredAgent.parentConversationId, "42");
-  assert.equal(run.conversationId, "99");
+  // 每次新建会话由任务内部的 llm 阶段完成（ephemeral），triggerSchedule 只负责建任务。
+  assert.equal(harness.calls.taskInput.llm.session, "ephemeral");
+  assert.equal(harness.calls.taskInput.llm.agent, "assistant");
   assert.equal(run.sessionMode, "isolated");
-  assert.equal(request.content, "独立检查项目。");
-  assert.equal(request.entry.data.sessionMode, "isolated");
 });
 
 test("harness installs custom tasks and can start its recovery scheduler", async () => {
@@ -420,7 +409,7 @@ test("harness installs custom tasks and can start its recovery scheduler", async
   const { harness, context, PiBoxExtension } = await createHarness();
   assert.deepEqual(
     PiBoxExtension.tasks.map((task) => task.definition.name),
-    ["pibox.anchor", "pibox.reporter"],
+    ["pibox.anchor", "pibox.reporter", "pibox.schedule.command", "pibox.schedule.llm"],
   );
   harness.resume();
   await harness.close(context);

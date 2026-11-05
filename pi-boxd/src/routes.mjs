@@ -1,7 +1,7 @@
 // HTTP 路由（6 个 extraRoutes）
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { AgentDoc, configure } from "@earendil-works/pi-durable";
 import { readBody, loadConfig, saveConfig, providerConfig, loadMcpConfig, saveMcpConfig, loadPrefs, savePrefs, APP_ICON_EXTS, APP_ICON_MIME } from "./io.mjs";
 import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, resolveSkills, projectSkillsDir, USER_SKILLS_DIR, BUILTIN_SKILLS_DIR } from "./skills.mjs";
@@ -13,6 +13,9 @@ import { createRoleConversation, renameSubagentRecords, syncAfterConfigChange, s
 import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
 import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upsertSchedule } from "./schedules.mjs";
+import { readLogTail, scheduleLogDir, scheduleLogRoot } from "./schedule-log.mjs";
+import { harness as runtimeHarness, context as runtimeContext, mcpBridge as runtimeMcpBridge, getMaintenance, isMaintenance, restartRuntime } from "./runtime.mjs";
+import { cleanupStatus, pruneAllLogs, saveCleanupConfig } from "./cleanup.mjs";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
@@ -61,8 +64,12 @@ async function saveBrandingIcon(dataUrl) {
   return saved.appIcon;
 }
 
-export function buildExtraRoutes(harness, context, mcpBridge) {
-  return {
+export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
+  // 用运行时代理：数据清理会在同进程内重建 Harness，这些路由必须跟随新实例。
+  const harness = runtimeHarness;
+  const context = runtimeContext;
+  const mcpBridge = runtimeMcpBridge;
+  return guardMaintenance({
     // 浏览器标签页图标（index.html 里的 <link rel="icon"> 指向这里）。
     "/favicon.svg": {
       method: "GET",
@@ -209,6 +216,55 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         } catch (error) {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    // 定时任务运行日志：按 runId（历史日志）或 latest（最近一次）读尾部。
+    "/api/schedules/logs": {
+      method: "GET",
+      async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const project = url.searchParams.get("project");
+        const scheduleId = url.searchParams.get("scheduleId");
+        const runId = url.searchParams.get("runId");
+        const lines = Math.min(2000, Math.max(20, Number(url.searchParams.get("tail") ?? 300)));
+        if (!project || !scheduleId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "缺少 project 或 scheduleId" }));
+        }
+        if (!(await listProjects()).includes(project)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "项目不存在" }));
+        }
+        try {
+          // 只允许读该项目 schedule-logs 目录下的文件（runId → runs.logPath 也要做归属校验）。
+          const root = resolve(scheduleLogRoot(project));
+          const inside = (candidate) => {
+            const full = resolve(candidate);
+            return full === root || full.startsWith(`${root}${sep}`);
+          };
+          let target = null;
+          if (runId) {
+            const store = await loadScheduleStore(project);
+            const run = store.runs.find((item) => item.id === runId);
+            const candidate = run?.logPath ? String(run.logPath) : null;
+            if (candidate && inside(candidate) && !candidate.includes("..")) target = candidate;
+          }
+          if (!target) {
+            const dir = scheduleLogDir(project, scheduleId);
+            if (!inside(dir)) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ error: "scheduleId 不合法" }));
+            }
+            target = join(dir, "latest.log");
+          }
+          const result = await readLogTail(target, lines);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ project, scheduleId, runId: runId ?? null, path: target, ...result }));
+        } catch (error) {
+          const missing = error?.code === "ENOENT";
+          res.writeHead(missing ? 404 : 500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: missing ? "还没有运行日志" : error.message }));
         }
       },
     },
@@ -863,6 +919,68 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
       },
     },
     // ── 系统信息（容器 / workspace / 凭据总览） ───────────────────────────────
+    // ── 数据清理 ────────────────────────────────────────────────────────
+    // 体积 / 配置 / 上次执行结果；维护进行中也能查（前端据此显示进度）。
+    "/api/cleanup/status": {
+      method: "GET",
+      async handler(req, res) {
+        try {
+          const status = await cleanupStatus();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ...status, maintenance: getMaintenance() }));
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    "/api/cleanup/config": {
+      method: "POST",
+      async handler(req, res) {
+        const input = await readBody(req);
+        try {
+          const config = await saveCleanupConfig(input);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, config }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    // 在线清理定时任务日志文件（不中断服务）。
+    "/api/cleanup/logs": {
+      method: "POST",
+      async handler(req, res) {
+        try {
+          const result = await pruneAllLogs();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, result }));
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    // 清理数据库并压缩：会短暂停止后台任务（清理 + VACUUM 需要独占 Storage）。
+    "/api/cleanup/database": {
+      method: "POST",
+      async handler(req, res) {
+        const input = await readBody(req);
+        try {
+          const outcome = await restartRuntime({
+            reason: "manual",
+            retentionDays: input.retentionDays,
+            vacuum: input.vacuum,
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, ...outcome }));
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
     "/api/system": {
       method: "GET",
       async handler(req, res) {
@@ -893,5 +1011,22 @@ export function buildExtraRoutes(harness, context, mcpBridge) {
         }));
       },
     },
-  };
+  });
+}
+
+/** 维护窗口内（重建 Harness 期间）拒绝其它写/读请求，避免撞上正在关闭的存储。 */
+function guardMaintenance(routes) {
+  const allow = new Set(["/api/cleanup/status", "/api/cleanup/database"]);
+  for (const [path, route] of Object.entries(routes)) {
+    if (allow.has(path) || typeof route?.handler !== "function") continue;
+    const original = route.handler;
+    route.handler = async (req, res) => {
+      if (isMaintenance()) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "服务维护中（数据清理中），请稍后重试", maintenance: getMaintenance() }));
+      }
+      return original(req, res);
+    };
+  }
+  return routes;
 }

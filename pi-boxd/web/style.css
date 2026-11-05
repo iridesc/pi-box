@@ -733,3 +733,40 @@ body.density-compact .tree-item { padding-top: 3px; padding-bottom: 3px; font-si
   .drawer-submodal .form-actions button { min-height: 42px; }
   .agent-option-grid { grid-template-columns: 1fr; }
 }
+
+/* ── 定时任务：执行方式 / 命令段 / 日志抽屉 ───────────────────────── */
+.schedule-kind { padding: 2px 6px; border-radius: 10px; font-size: 10px; color: #d2a8ff; background: rgba(137, 87, 229, .18); }
+.schedule-command { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #a5d6ff; }
+.schedule-section { padding: 10px 12px 4px; margin: 0 0 10px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+.schedule-section .form-label { margin-top: 0; }
+.code-textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+.schedule-log-modal { width: 720px; max-width: 92vw; }
+.schedule-log-meta { margin: 4px 0 8px; font-size: 11px; word-break: break-all; }
+.schedule-log-body {
+  margin: 0 0 12px;
+  padding: 12px;
+  max-height: 52vh;
+  overflow: auto;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #010409;
+  color: #c9d1d9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.schedule-section > select, .schedule-section .schedule-agent-select { width: 100%; box-sizing: border-box; }
+
+/* ── 数据清理 tab ─────────────────────────────────────────────── */
+#tab-cleanup .drawer-section { margin-bottom: 22px; }
+#tab-cleanup .kv-table { width: 100%; }
+#tab-cleanup .drawer-section > .btn-secondary,
+#tab-cleanup .drawer-section > .btn-primary { margin-top: 10px; }
+#tab-cleanup .checkbox-item { margin: 8px 0; }
+#tab-cleanup .form-status { margin-top: 8px; min-height: 18px; }
+.cleanup-busy { margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(210, 153, 34, .15); color: #d29922; font-size: 12px; }
+#tab-cleanup .form-row > label { width: 108px; }
+#tab-cleanup .form-row { flex-wrap: nowrap; }
+.cleanup-flash { margin-bottom: 16px; padding: 10px 12px; border-radius: 6px; background: rgba(46, 160, 67, .15); color: #7ee787; font-size: 13px; }

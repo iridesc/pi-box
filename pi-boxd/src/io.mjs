@@ -95,7 +95,15 @@ export async function readBody(req, maxBytes = 0) {
     }
     body += chunk;
   }
-  return JSON.parse(body || "{}");
+  if (!body.trim()) return {};
+  try {
+    const value = JSON.parse(body);
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    // 非法 JSON 不应打死整个进程：当成空对象，由各 handler 的必填校验返回 400。
+    console.warn("[io] 请求体不是合法 JSON，已忽略：", body.slice(0, 200));
+    return {};
+  }
 }
 
 // ── MCP server 配置 ──────────────────────────────────────────────────────
