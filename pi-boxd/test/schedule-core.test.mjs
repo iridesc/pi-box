@@ -94,6 +94,19 @@ test("命令正常退出并收集输出", async () => {
   assert.match(result.tail, /out/);
 });
 
+// tail 是 {{stdout}} 的数据通道：只能含 stdout，stderr 的日志行不能混进去。
+test("tail 只保留 stdout（stderr 只进日志）", async () => {
+  const chunks = [];
+  const result = await runCommand({
+    command: "echo DATA-A; echo 'log-noise' >&2; echo DATA-B",
+    cwd: root,
+    write: (c) => chunks.push(c),
+  });
+  assert.equal(result.tail, "DATA-A\nDATA-B\n");
+  assert.doesNotMatch(result.tail, /log-noise/);
+  assert.match(Buffer.concat(chunks).toString(), /log-noise/);
+});
+
 test("超时杀进程并标记 timedOut", async () => {
   const result = await runCommand({ command: "sleep 30", cwd: root, timeoutSec: 1 });
   assert.equal(result.timedOut, true);

@@ -21,7 +21,8 @@ function projectCwd(project) {
 }
 
 function schedulePath(project) {
-  return join(PROJECTS_DIR, project, ".pi", "schedules.json");
+  // 元项目不在 PROJECTS_DIR 下，必须和日志/助理一样走 projectCwd。
+  return join(projectCwd(project), ".pi", "schedules.json");
 }
 
 function normalizeStore(raw) {

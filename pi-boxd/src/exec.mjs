@@ -40,6 +40,9 @@ export function killAllRunningCommands() {
  * @param {number} [options.maxBytes]     单次输出上限（默认 20MB）
  * @returns {Promise<{exitCode:number|null, signal:string|null, durationMs:number,
  *   timedOut:boolean, aborted:boolean, truncated:boolean, bytes:number, tail:string}>}
+ *
+ * `tail` 只保留 **stdout**：它是数据通道（定时任务的 {{stdout}} 模板变量直接用它），
+ * 不能让 stderr 的日志行混进数据。stderr 仍然通过 write 写进运行日志，只是不进 tail。
  */
 export function runCommand({
   command,
@@ -104,7 +107,7 @@ export function runCommand({
       else signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    const handleChunk = (chunk) => {
+    const handleChunk = (chunk, isStderr = false) => {
       if (!truncated) {
         if (bytes + chunk.length > maxBytes) {
           truncated = true;
@@ -112,7 +115,7 @@ export function runCommand({
           if (room > 0) {
             const head = chunk.subarray(0, room);
             bytes += head.length;
-            tailBuf = concatTail(tailBuf, head);
+            if (!isStderr) tailBuf = concatTail(tailBuf, head);
             try {
               write?.(head);
             } catch {
@@ -126,7 +129,7 @@ export function runCommand({
           }
         } else {
           bytes += chunk.length;
-          tailBuf = concatTail(tailBuf, chunk);
+          if (!isStderr) tailBuf = concatTail(tailBuf, chunk);
           try {
             write?.(chunk);
           } catch {
@@ -136,8 +139,9 @@ export function runCommand({
       }
     };
 
-    child.stdout?.on("data", handleChunk);
-    child.stderr?.on("data", handleChunk);
+    // stdout 进 tail（数据），stderr 只进日志，避免日志污染 {{stdout}}。
+    child.stdout?.on("data", (chunk) => handleChunk(chunk, false));
+    child.stderr?.on("data", (chunk) => handleChunk(chunk, true));
 
     const finish = (code, closeSignal, spawnError) => {
       if (settled) return;
