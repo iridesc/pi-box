@@ -13,7 +13,7 @@ process.env.PI_BOX_PROJECTS_DIR = root;
 const { runCommand } = await import("../src/exec.mjs");
 const { openRunLog, logLine, acquireScheduleLock, markOccurrence, pruneScheduleLogs, readLogTail, scheduleLogDir } =
   await import("../src/schedule-log.mjs");
-const { validateScheduleInput, normalizeExecution, scheduleKind } = await import("../src/schedules.mjs");
+const { validateScheduleInput, normalizeExecution, scheduleKind, latestDueRun } = await import("../src/schedules.mjs");
 
 test.after(async () => {
   await rm(root, { recursive: true, force: true });
@@ -193,4 +193,24 @@ test("按天数清理过期日志", async () => {
   assert.equal(result.removed, 1);
   const exists = await stat(old).then(() => true).catch(() => false);
   assert.equal(exists, false);
+});
+
+// croner 9.x 的 previousRun() 恒返回 null，latestDueRun 用 nextRun 推进兜底；
+// 回归：纯 cron 任务（没有 legacy rule）必须能算出 due。
+test("cron 任务的 due 计算（previousRun 不可用时的兜底）", () => {
+  const cursor = new Date("2026-11-05T11:57:07.733Z"); // 周四 19:57 CST
+  const anomaly = { cron: "0 10-19 * * 1-5", timezone: "Asia/Shanghai" };
+  // 周五 10:05 CST：应补 10:00
+  assert.equal(latestDueRun(anomaly, cursor, new Date("2026-11-06T02:05:00Z")), "2026-11-06T02:00:00.000Z");
+  // 周五 09:55 CST：还没到点
+  assert.equal(latestDueRun(anomaly, cursor, new Date("2026-11-06T01:55:00Z")), null);
+  // 周六 10:05 CST：周六不匹配，最近一次是周五 19:00 CST（policy=latest 只补这一次）
+  assert.equal(latestDueRun(anomaly, cursor, new Date("2026-11-07T02:05:00Z")), "2026-11-06T11:00:00.000Z");
+  // daily 任务
+  const daily = { cron: "0 16 * * *", timezone: "Asia/Shanghai" };
+  assert.equal(latestDueRun(daily, cursor, new Date("2026-11-06T02:05:00Z")), null);
+  assert.equal(latestDueRun(daily, cursor, new Date("2026-11-06T08:05:00Z")), "2026-11-06T08:00:00.000Z");
+  // 漏跑多次只补最近一次（policy=latest）
+  const q = { cron: "*/15 * * * *", timezone: "Asia/Shanghai" };
+  assert.equal(latestDueRun(q, cursor, new Date("2026-11-06T02:20:00Z")), "2026-11-06T02:15:00.000Z");
 });

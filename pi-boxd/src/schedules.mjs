@@ -66,7 +66,7 @@ export function nextScheduleRun(schedule, after = new Date()) {
   return cron.nextRun(after)?.toISOString() ?? null;
 }
 
-function latestDueRun(schedule, cursor, now) {
+export function latestDueRun(schedule, cursor, now) {
   if (schedule.rule?.type === "once") {
     const runAt = new Date(schedule.rule.runAt);
     return !Number.isNaN(runAt.getTime()) && runAt > cursor && runAt <= now ? runAt.toISOString() : null;
@@ -80,8 +80,19 @@ function latestDueRun(schedule, cursor, now) {
     return latest > cursor && latest <= now ? latest.toISOString() : null;
   }
   const cron = new Cron(schedule.cron, { timezone: schedule.timezone, paused: true });
-  const latest = cron.previousRun(new Date(now.getTime() + 1000));
-  return latest && latest > cursor && latest <= now ? latest.toISOString() : null;
+  // 注意：croner 9.x 的 previousRun() 在本环境恒返回 null（实测 */15、daily、hour-range 都是），
+  // 这里用 nextRun() 从 cursor 逐次推进，自己取「最后一个 <= now 的触发点」。
+  // 等价于 previousRun，满足漏跑策略 latest（只补最近一次）；上限 500 次防止停机过久时空转。
+  let latest = null;
+  let probe = new Date(cursor.getTime() + 1);
+  for (let i = 0; i < 500; i += 1) {
+    const next = cron.nextRun(probe);
+    if (!next || next.getTime() > now.getTime()) break;
+    latest = next;
+    probe = new Date(next.getTime() + 1);
+  }
+  if (!latest) return null;
+  return latest > cursor && latest <= now ? latest.toISOString() : null;
 }
 
 function integer(value, min, max, label) {
