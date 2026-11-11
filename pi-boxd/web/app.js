@@ -33,6 +33,33 @@ const draftCache = new Map(); // conversation id -> 未发送的输入文本
 let viewScrollState = { top: 0, atBottom: true }; // 当前视图的滚动位置
 let lastViewKey = "";
 const conversationDetailRequests = new Map();
+
+// ── 增量渲染基础设施 ────────────────────────────────────────────────────────
+// SSE 每 300ms 推送一次快照，变更才推。此前每条消息都会把四栏全量重建，
+// 长会话下单个 renderView 就要 200ms+，主线程被占满导致滚动/输入掉帧。
+// 以下缓存让 SSE 刷新只做「差异 patch」，不再推倒重建。
+
+// 会话区渲染缓存：conversation id -> { body, turns: [{ key, count, sig, node }] }
+// turns 与 conversationTurns() 的输出一一对应；key 是该 turn 的首个 entry id，
+// count 是条目数，sig 是内容指纹。内容未变的 turn 直接复用已有 DOM 节点。
+const conversationRenderCache = new Map();
+// 会话列表节点缓存：conversation id -> { node, dot, titleText, meta, conv }
+// 会话状态点/标题变化时只改文本与 class，不重建节点。
+const sessionItemNodes = new Map();
+// 会话分组节点缓存：分组 key -> details 节点（折叠分组复用）。
+const sessionBucketNodes = new Map();
+// Markdown 渲染缓存：原始文本 -> DOM 模板（用 cloneNode 复用，避免重复解析）。
+const markdownCache = new Map();
+// 会话详情拉取节流状态：conversation id -> { lastFetch, status }
+const detailRefreshState = new Map();
+
+// 详情重拉节流窗口（毫秒）。运行中的会话需要跟上流式输出，空闲会话只做兜底。
+const DETAIL_POLL_ACTIVE_MS = 500;
+const DETAIL_POLL_IDLE_MS = 2000;
+// Markdown 缓存上限（条目数 / 单条文本长度），避免长会话把内存吃满。
+const MARKDOWN_CACHE_MAX_ENTRIES = 120;
+const MARKDOWN_CACHE_MAX_CHARS = 200 * 1024;
+
 let cfgProviders = [];
 let cfgSettings = { activeProvider: "openai", providers: {}, currentModel: null };
 let cfgSelectedModels = [];
@@ -180,7 +207,7 @@ async function refresh() {
   agentsCache = state.agentsByProject ?? {};
   schedulesCache = state.schedulesByProject ?? {};
   // 清掉已经删除或重命名的旧项目记录，避免本地状态无限累积。
-  const existingProjects = new Set(state.projects);
+  const existingProjects = new Set(state?.projects ?? []);
   const restoredProjects = new Set([...expandedProjects].filter((name) => existingProjects.has(name)));
   if (restoredProjects.size !== expandedProjects.size) {
     expandedProjects = restoredProjects;
@@ -206,23 +233,91 @@ function render() {
 }
 
 function renderStatus() {
-  const m = state.model;
-  const noKey = !state.hasKey;
-  document.getElementById("status-bar").innerHTML =
-    `模型 <b style="color:#58a6ff">${m.provider}/${m.modelId}</b> · 项目 ${state.projects.length}` +
-    (noKey ? ' · <span style="color:#d29922">⚠ 未配置 API Key</span>' : "");
+  const m = state?.model ?? {};
+  const noKey = !state?.hasKey;
+  const bar = document.getElementById("status-bar");
+  // 内容没变就不动 DOM：SSE 推送频率高，避免每次重建状态栏节点。
+  const signature = `${m.provider}/${m.modelId}|${state?.projects?.length ?? 0}|${noKey}`;
+  if (bar.dataset.signature !== signature) {
+    bar.dataset.signature = signature;
+    bar.innerHTML =
+      `模型 <b style="color:#58a6ff">${m.provider}/${m.modelId}</b> · 项目 ${state?.projects?.length ?? 0}` +
+      (noKey ? ' · <span style="color:#d29922">⚠ 未配置 API Key</span>' : "");
+  }
   document.getElementById("new-project").disabled = noKey;
+}
+
+// ─── 快照差异比对（P0-1）──────────────────────────────────────────────────────
+// SSE 推送的是全量快照，但只有一小部分字段真正变化。这里算出差异，
+// 让 SSE 刷新只 patch 受影响的部分，而不是四栏全量重建。
+function sameJson(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || a === undefined || b === undefined) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** 比较前后两份快照，返回需要重建的部分。 */
+function diffSnapshot(prev, next) {
+  const diff = {
+    projects: false,
+    agents: false,
+    tasks: false,
+    status: false,
+    conversations: new Set(), // 字段发生变化的会话 id
+    conversationList: false, // 会话增删（会影响第二栏的列表结构）
+  };
+  if (!prev) {
+    diff.projects = true;
+    diff.agents = true;
+    diff.tasks = true;
+    diff.status = true;
+    diff.conversationList = true;
+    return diff;
+  }
+  const prevProjects = prev.projects ?? [];
+  const nextProjects = next.projects ?? [];
+  if (prevProjects.length !== nextProjects.length || prevProjects.some((p, i) => p !== nextProjects[i])) {
+    diff.projects = true;
+  }
+  if (!sameJson(prev.agentsByProject, next.agentsByProject)) diff.agents = true;
+  if (!sameJson(prev.taskGraph, next.taskGraph)) diff.tasks = true;
+  if (!sameJson(prev.model, next.model) || prev.hasKey !== next.hasKey) diff.status = true;
+
+  const prevMap = new Map((prev.conversations ?? []).map((c) => [String(c.id), c]));
+  const nextMap = new Map((next.conversations ?? []).map((c) => [String(c.id), c]));
+  for (const [id, conv] of nextMap) {
+    const before = prevMap.get(id);
+    if (!before) {
+      diff.conversationList = true;
+      continue;
+    }
+    if (before.status !== conv.status || before.title !== conv.title
+      || before.actorType !== conv.actorType || before.actorName !== conv.actorName
+      || before.source !== conv.source || before.project !== conv.project) {
+      diff.conversations.add(id);
+    }
+  }
+  for (const id of prevMap.keys()) {
+    if (!nextMap.has(id)) diff.conversationList = true;
+  }
+  return diff;
+}
+
+/** 会话是否处于「正在干活」状态（这类会话的内容会持续变化）。 */
+function isActiveConversationStatus(status) {
+  return status === "running" || status === "waiting-tool" || status === "pending";
 }
 
 // ─── 左：项目树 ─────────────────────────────────────────────────────────────
 function renderTree() {
   const root = document.getElementById("tree");
   root.innerHTML = "";
-  if (state.projects.length === 0) {
+  const projects = state?.projects ?? [];
+  if (projects.length === 0) {
     root.appendChild(el("div", "tree-empty", "（还没有项目，点右上角 +新建项目）"));
     return;
   }
-  for (const proj of state.projects) {
+  for (const proj of projects) {
     const open = expandedProjects.has(proj);
     const isMeta = proj === state.metaProject;
     // 项目行
@@ -257,7 +352,7 @@ function renderTree() {
     // 助理
     const aNode = el("div", "tree-item tree-assistant");
     aNode.classList.add("tree-level-1");
-    const selectedConversation = selected?.type === "conversation" ? state.conversations.find((item) => item.id === selected.id) : null;
+    const selectedConversation = selected?.type === "conversation" ? (state?.conversations ?? []).find((item) => item.id === selected.id) : null;
     const aSel = (selected?.type === "actor" && selected.project === proj && selected.actorType === "assistant")
       || (selectedConversation?.project === proj && selectedConversation.actorType === "assistant");
     if (aSel) aNode.classList.add("selected");
@@ -864,71 +959,143 @@ function conversationAgeBucket(conversation) {
   return "older";
 }
 
+/** 创建一个会话列表条目节点（结构固定，后续只 patch 文本与 class）。 */
+function createSessionItemNode(conversation) {
+  const item = el("div", "session-item");
+  item.dataset.convId = String(conversation.id);
+  const dot = el("span", "session-dot");
+  const titleDiv = el("div", "session-title");
+  const titleText = el("span", "session-title-text");
+  const renameBtn = el("button", "session-rename", "✎");
+  renameBtn.type = "button";
+  renameBtn.title = "重命名会话";
+  titleDiv.appendChild(titleText);
+  titleDiv.appendChild(renameBtn);
+  item.appendChild(dot);
+  item.appendChild(titleDiv);
+  const meta = el("div", "session-meta");
+  item.appendChild(meta);
+  const entry = { node: item, dot, titleText, meta, conv: conversation };
+  renameBtn.onclick = (ev) => {
+    ev.stopPropagation();
+    renameConversation(entry.conv);
+  };
+  item.onclick = () => {
+    selected = { type: "conversation", project: entry.conv.project, id: entry.conv.id };
+    setMobilePanel("view");
+    render();
+  };
+  return entry;
+}
+
+/** 只更新变化的字段：状态点 class/提示、标题、meta 文本、选中态。 */
+function patchSessionItemNode(entry, conversation) {
+  entry.conv = conversation;
+  const status = conversation.status ?? "idle";
+  const dotClass = `session-dot session-dot-${status}`;
+  if (entry.dot.className !== dotClass) {
+    entry.dot.className = dotClass;
+    entry.dot.title = agentStatusLabel(status);
+  }
+  const title = conversationDisplayTitle(conversation);
+  if (entry.titleText.textContent !== title) entry.titleText.textContent = title;
+  const metaText = `${sessionSourceLabel(conversation)} · #${conversation.id}${conversation.createdAt ? ` · ${formatDateTime(conversation.createdAt)}` : ""}`;
+  if (entry.meta.textContent !== metaText) entry.meta.textContent = metaText;
+  const itemClass = selected?.type === "conversation" && selected.id === conversation.id ? "session-item selected" : "session-item";
+  if (entry.node.className !== itemClass) entry.node.className = itemClass;
+}
+
+/** 把一组会话渲染到容器：复用已有节点，按需插入/移除，避免整列表重建。 */
+function renderSessionItemsInto(container, conversations) {
+  const present = new Set();
+  let previous = null;
+  for (const conversation of conversations) {
+    const id = String(conversation.id);
+    present.add(id);
+    let entry = sessionItemNodes.get(id);
+    if (!entry) {
+      entry = createSessionItemNode(conversation);
+      sessionItemNodes.set(id, entry);
+    }
+    patchSessionItemNode(entry, conversation);
+    // 顺序不对时只做一次 insertBefore（移动已有节点不重建子树）。
+    const expected = previous ? previous.nextSibling : container.firstChild;
+    if (entry.node !== expected) container.insertBefore(entry.node, expected);
+    previous = entry.node;
+  }
+  for (const child of [...container.children]) {
+    const id = child.dataset.convId;
+    if (id === undefined || present.has(id)) continue;
+    child.remove();
+    sessionItemNodes.delete(id);
+  }
+}
+
 function renderSessions() {
   const body = document.getElementById("session-list");
   const createButton = document.getElementById("new-conversation");
-  body.replaceChildren();
   const actor = actorFromSelection();
   createButton.disabled = !actor;
   createButton.title = actor
     ? `为${actor.actorType === "assistant" ? "助理" : ` Agent ${actor.actorName}`}新建独立会话`
     : "请先选择助理或 Agent";
   if (!actor) {
-    body.appendChild(el("div", "session-empty", "请在第一栏选择一个助理或 Agent，这里会显示它的全部会话。"));
+    body.replaceChildren(el("div", "session-empty", "请在第一栏选择一个助理或 Agent，这里会显示它的全部会话。"));
+    sessionItemNodes.clear();
+    sessionBucketNodes.clear();
     return;
   }
   const heading = el("div", "session-context");
   heading.appendChild(el("strong", "", actor.actorType === "assistant" ? "🤖 助理" : `🤖 ${actor.actorName}`));
   heading.appendChild(el("span", "", actor.project));
-  body.appendChild(heading);
-  const conversations = state.conversations
+  body.replaceChildren(heading);
+  const conversations = (state?.conversations ?? [])
     .filter((item) => item.project === actor.project && item.actorType === actor.actorType
       && (actor.actorType !== "agent" || item.actorName === actor.actorName))
     .sort((a, b) => {
       const active = (value) => value.status === "running" || value.status === "waiting-tool" ? 1 : 0;
-      return active(b) - active(a) || String(b.createdAt ?? b.id).localeCompare(String(a.createdAt ?? a.id));
+      return active(b) - active(a) || String(b.createdAt ?? b.id).localeCompare(String(a.createdAt ?? b.id));
     });
   if (conversations.length === 0) {
     body.appendChild(el("div", "session-empty", actor.actorType === "agent" ? "这个 Agent 还没有会话；助理首次派发任务后会自动创建。" : "暂无会话。"));
+    sessionItemNodes.clear();
+    sessionBucketNodes.clear();
     return;
   }
-  const renderConversationItem = (conversation, container) => {
-    const item = el("div", `session-item${selected?.type === "conversation" && selected.id === conversation.id ? " selected" : ""}`);
-    const dot = el("span", `session-dot session-dot-${conversation.status ?? "idle"}`);
-    dot.title = agentStatusLabel(conversation.status ?? "idle");
-    item.appendChild(dot);
-    const titleDiv = el("div", "session-title");
-    titleDiv.appendChild(el("span", "session-title-text", conversationDisplayTitle(conversation)));
-    const renameBtn = el("button", "session-rename", "✎");
-    renameBtn.type = "button";
-    renameBtn.title = "重命名会话";
-    renameBtn.onclick = (ev) => {
-      ev.stopPropagation();
-      renameConversation(conversation);
-    };
-    titleDiv.appendChild(renameBtn);
-    item.appendChild(titleDiv);
-    item.appendChild(el("div", "session-meta", `${sessionSourceLabel(conversation)} · #${conversation.id}${conversation.createdAt ? ` · ${formatDateTime(conversation.createdAt)}` : ""}`));
-    item.onclick = () => {
-      selected = { type: "conversation", project: conversation.project, id: conversation.id };
-      setMobilePanel("view");
-      render();
-    };
-    container.appendChild(item);
-  };
   const buckets = { recent: [], threeDays: [], sevenDays: [], older: [] };
   for (const conversation of conversations) buckets[conversationAgeBucket(conversation)].push(conversation);
-  for (const conversation of buckets.recent) renderConversationItem(conversation, body);
+  renderSessionItemsInto(body, buckets.recent);
   for (const [key, label] of [["threeDays", "3 天以前"], ["sevenDays", "7 天以前"], ["older", "一个月以前"]]) {
     const items = buckets[key];
     if (items.length === 0) continue;
-    const folded = el("details", "session-history-group");
+    let folded = sessionBucketNodes.get(key);
+    if (!folded) {
+      folded = el("details", "session-history-group");
+      folded.appendChild(el("summary", "session-history-summary", ""));
+      folded.appendChild(el("div", "session-history-list"));
+      sessionBucketNodes.set(key, folded);
+    }
+    const summary = folded.querySelector(".session-history-summary");
+    const summaryText = `${label} · ${items.length} 个会话`;
+    if (summary.textContent !== summaryText) summary.textContent = summaryText;
     folded.open = items.some((conversation) => selected?.type === "conversation" && selected.id === conversation.id);
-    folded.appendChild(el("summary", "session-history-summary", `${label} · ${items.length} 个会话`));
-    const list = el("div", "session-history-list");
-    for (const conversation of items) renderConversationItem(conversation, list);
-    folded.appendChild(list);
-    body.appendChild(folded);
+    renderSessionItemsInto(folded.querySelector(".session-history-list"), items);
+    // 分组节点位置可能变化（新建分组时需要挂到列表末尾）。
+    if (folded.parentElement !== body) body.appendChild(folded);
+  }
+  // 清掉本次不再出现的折叠分组。
+  const liveGroups = new Set(["threeDays", "sevenDays", "older"].filter((key) => buckets[key].length > 0));
+  for (const [key, node] of [...sessionBucketNodes]) {
+    if (liveGroups.has(key)) continue;
+    node.remove();
+    sessionBucketNodes.delete(key);
+  }
+  // 当前角色不可见的会话条目节点一并回收，避免缓存无限增长。
+  const visible = new Set(conversations.map((c) => String(c.id)));
+  for (const [id, entry] of [...sessionItemNodes]) {
+    if (visible.has(id)) continue;
+    entry.node.remove();
+    sessionItemNodes.delete(id);
   }
 }
 
@@ -976,8 +1143,11 @@ function renderView() {
   // 导致焦点、光标位置和输入法组合状态丢失。
   const convKey = selected?.type === "conversation" ? String(selected.id) : "";
   const keep = convKey ? composerCache.get(convKey)?.form : undefined;
+  // 增量渲染：属于当前会话的正文节点保留在 DOM 里，不摘除再挂回——
+  // 摘除/挂回会丢失滚动位置，并且额外触发一次布局。
+  const preserve = convKey && oldBody && oldBody.dataset.convId === convKey ? oldBody : null;
   for (const child of [...view.children]) {
-    if (child !== keep) child.remove();
+    if (child !== keep && child !== preserve) child.remove();
   }
   if (!selected) {
     view.className = "view-empty";
@@ -1698,7 +1868,8 @@ function appendInlineMarkdown(parent, source) {
   parent.appendChild(document.createTextNode(source.slice(cursor)));
 }
 
-function markdownBlock(text) {
+/** 构建 Markdown DOM（不包含缓存逻辑）。 */
+function buildMarkdownBlock(text) {
   const root = el("div", "markdown-body");
   const lines = String(text ?? "").replace(/\r\n/g, "\n").split("\n");
   let index = 0;
@@ -1757,6 +1928,33 @@ function markdownBlock(text) {
   return root;
 }
 
+/**
+ * Markdown 渲染带缓存（P1-2）。
+ * 相同文本的段落反复出现（Agent 重述、模板回复），重复解析纯浪费 CPU。
+ * 缓存存的是 DOM 模板，每次用 cloneNode 复制，避免调用方改动影响缓存。
+ */
+function markdownBlock(text) {
+  const key = String(text ?? "");
+  const cached = markdownCache.get(key);
+  if (cached !== undefined) {
+    // LRU：命中后移到队尾。
+    markdownCache.delete(key);
+    markdownCache.set(key, cached);
+    return cached.cloneNode(true);
+  }
+  const root = buildMarkdownBlock(key);
+  // 超长文本不入缓存，避免单条消息把内存吃满。
+  if (key.length <= MARKDOWN_CACHE_MAX_CHARS) {
+    markdownCache.set(key, root);
+    while (markdownCache.size > MARKDOWN_CACHE_MAX_ENTRIES) {
+      const oldest = markdownCache.keys().next().value;
+      if (oldest === undefined) break;
+      markdownCache.delete(oldest);
+    }
+  }
+  return root.cloneNode(true);
+}
+
 function messageRoleLabel(msg, entry) {
   if (msg.role === "toolResult") return `工具结果${msg.toolName ? ` · ${msg.toolName}` : ""}`;
   if (msg.role === "assistant") {
@@ -1787,11 +1985,11 @@ function conversationTurns(entries) {
     const userMessages = messages.filter((msg) => msg.role === "user");
     const synthetic = userMessages.length > 0 && userMessages.every((msg) => /^\[子 agent .+ 回复\]/.test(messageText(msg).trim()));
     if (userMessages.length > 0 && !synthetic) {
-      current = { users: userMessages, items: [] };
+      current = { users: userMessages, items: [], entryId: String(entry.id) };
       turns.push(current);
     }
     if (!current) {
-      current = { users: [], items: [] };
+      current = { users: [], items: [], entryId: String(entry.id) };
       turns.push(current);
     }
     for (const msg of messages) {
@@ -1801,6 +1999,21 @@ function conversationTurns(entries) {
     }
   }
   return turns;
+}
+
+/**
+ * 计算 turn 的身份与内容指纹，用于增量渲染时判断是否可以复用已有 DOM。
+ * key  : 该 turn 首个 entry 的 id（entry 是 append-only，id 不变即前缀不变）。
+ * count: 条目数（条目被增删时立刻失配）。
+ * sig : 内容指纹（消息条数 + 每条消息长度 + stopReason）。
+ */
+function turnIdentity(turn) {
+  let sig = `${turn.users.length}/${turn.items.length}`;
+  for (const msg of turn.users) sig += `|u${messageText(msg).length}`;
+  for (const { entry, msg } of turn.items) {
+    sig += `|${entry.id}:${msg.role}:${messageText(msg).length}:${msg.stopReason ?? ""}`;
+  }
+  return { key: turn.entryId ?? "", count: turn.items.length, sig };
 }
 
 function renderConversationTurn(turn) {
@@ -1854,9 +2067,117 @@ function renderConversationTurn(turn) {
   return fragment;
 }
 
+/**
+ * 构建/增量更新会话正文（P0-3）。
+ * 返回 { body, rebuilt }：rebuilt=true 表示整体重建，需要恢复滚动位置；
+ * rebuilt=false 表示在已有 DOM 上做了增量 patch，滚动位置天然保持。
+ */
+function renderConversationBody(convKey, detail) {
+  const turns = conversationTurns(detail.entries ?? []);
+  const view = document.getElementById("view");
+  const mounted = view.querySelector(".view-body");
+  const cache = conversationRenderCache.get(convKey);
+
+  // 首次渲染 / 切换会话：整体重建。
+  if (!cache || mounted !== cache.body || mounted.dataset.convId !== convKey) {
+    const body = el("div", "view-body");
+    body.dataset.convId = convKey;
+    const rendered = [];
+    for (const turn of turns) {
+      const id = turnIdentity(turn);
+      const node = renderConversationTurn(turn);
+      // 必须在 appendChild 之前取 childNodes：fragment 被追加后就被清空了。
+      const nodes = [...node.childNodes];
+      body.appendChild(node);
+      rendered.push({ key: id.key, count: id.count, sig: id.sig, nodes });
+    }
+    conversationRenderCache.set(convKey, { body, turns: rendered });
+    pruneConversationRenderCache(convKey);
+    return { body, rebuilt: true };
+  }
+
+  const { body, turns: cached } = cache;
+  // 前缀失配（entry 变化 / 条目减少）→ 整体重建。
+  let mismatch = cached.length > turns.length;
+  if (!mismatch) {
+    for (let i = 0; i < cached.length; i++) {
+      // entry id 变了说明结构变了，必须整体重建。
+      if (cached[i].key !== turns[i].entryId) {
+        mismatch = true;
+        break;
+      }
+      // 条目数变化只允许出现在最后一个 turn：entry 是 append-only，
+      // 已完成的历史 turn 不会变；正在写入的最后一个 turn 变了走下面的指纹替换。
+      if (i < cached.length - 1 && cached[i].count !== turns[i].items.length) {
+        mismatch = true;
+        break;
+      }
+    }
+  }
+  if (mismatch) {
+    body.replaceChildren();
+    cached.length = 0;
+    for (const turn of turns) {
+      const id = turnIdentity(turn);
+      const node = renderConversationTurn(turn);
+      const nodes = [...node.childNodes];
+      body.appendChild(node);
+      cached.push({ key: id.key, count: id.count, sig: id.sig, nodes });
+    }
+    return { body, rebuilt: true };
+  }
+
+  // entry 是 append-only，已完成的 turn 不会变，只有最后一个 turn 仍在写入，
+  // 因此只需比对最后一个已缓存 turn 的内容指纹。
+  const cachedLast = cached.length - 1;
+  if (cachedLast >= 0) {
+    const id = turnIdentity(turns[cachedLast]);
+    if (cached[cachedLast].sig !== id.sig) {
+      // 一个 turn 可能产出多个兄弟节点（用户气泡 + 回复区），
+      // replaceChild 不能直接传 DocumentFragment，否则会错位。
+      const oldNodes = cached[cachedLast].nodes;
+      const fragment = renderConversationTurn(turns[cachedLast]);
+      const newNodes = [...fragment.childNodes];
+      const parent = oldNodes[0]?.parentNode;
+      if (parent) {
+        const anchor = oldNodes[0];
+        for (const node of newNodes) parent.insertBefore(node, anchor);
+        for (const node of oldNodes) node.remove();
+      }
+      cached[cachedLast].nodes = newNodes;
+      cached[cachedLast].sig = id.sig;
+    }
+  }
+  // 追加新增的 turn。
+  for (let i = cached.length; i < turns.length; i++) {
+    const id = turnIdentity(turns[i]);
+    const node = renderConversationTurn(turns[i]);
+    const nodes = [...node.childNodes];
+    body.appendChild(node);
+    cached.push({ key: id.key, count: id.count, sig: id.sig, nodes });
+  }
+  return { body, rebuilt: false };
+}
+
+/** 会话渲染缓存只保留最近打开的若干个会话，避免长时间使用后内存无限增长。 */
+function pruneConversationRenderCache(currentKey) {
+  const limit = 12;
+  if (conversationRenderCache.size <= limit) return;
+  for (const [key, value] of [...conversationRenderCache]) {
+    if (conversationRenderCache.size <= limit) break;
+    if (key === currentKey) continue;
+    if (value.body.parentElement) continue; // 仍在视图里，不能回收
+    conversationRenderCache.delete(key);
+  }
+}
+
 function renderConversation(view) {
   const conv = state.conversations.find((c) => c.id === selected.id);
   if (!conv) {
+    // 会话已被删除：清掉对应的渲染/详情缓存，避免陈旧数据占内存。
+    const key = String(selected.id);
+    conversationRenderCache.delete(key);
+    detailRefreshState.delete(key);
     view.textContent = "（会话已不存在）";
     return;
   }
@@ -1869,7 +2190,13 @@ function renderConversation(view) {
   // 输入框若已挂在视图里，新内容插到它前面，避免 append 移动节点导致失焦。
   const cachedComposer = composerCache.get(String(conv.id));
   const anchor = cachedComposer && cachedComposer.form.parentElement === view ? cachedComposer.form : null;
-  const mount = (node) => (anchor ? view.insertBefore(node, anchor) : view.appendChild(node));
+  // 正文节点已经挂在视图里时，标题要插到正文之前，保持 head → body → composer 的顺序。
+  const mountedBody = view.querySelector(".view-body");
+  const mount = (node) => {
+    if (mountedBody && mountedBody.parentElement === view) return view.insertBefore(node, mountedBody);
+    if (anchor) return view.insertBefore(node, anchor);
+    return view.appendChild(node);
+  };
   const head = el("div", "view-head");
   const titleSpan = el("span", "view-title", title);
   const renameBtn = el("button", "view-rename", "✎");
@@ -1919,11 +2246,12 @@ function renderConversation(view) {
     return;
   }
 
-  const body = el("div", "view-body");
-  for (const turn of conversationTurns(detail.entries ?? [])) body.appendChild(renderConversationTurn(turn));
-  mount(body);
+  const { body, rebuilt } = renderConversationBody(String(conv.id), detail);
+  // 增量路径下 body 已经在视图里，不要再挂载（摘下再挂回会丢滚动位置）。
+  if (body.parentElement !== view) mount(body);
   // 用户已经往上翻时不要被后台推送拉回底部。
-  body.scrollTop = viewScrollState.atBottom ? body.scrollHeight : viewScrollState.top;
+  if (rebuilt) body.scrollTop = viewScrollState.atBottom ? body.scrollHeight : viewScrollState.top;
+  else if (viewScrollState.atBottom) body.scrollTop = body.scrollHeight;
 
   const composer = getComposer(String(conv.id), conv);
   // 已经在视图里就保持原位（不重新 append），否则挂到末尾。
@@ -2181,7 +2509,7 @@ async function populateAgentModelSelect(select, selectedValue) {
 
 // ─── 第四栏：当前会话任务图 ──────────────────────────────────────────────────
 function renderTaskGraph() {
-  const allTasks = Object.values(state.taskGraph.tasks);
+  const allTasks = Object.values(state?.taskGraph?.tasks ?? {});
   const elx = document.getElementById("task-graph");
   elx.className = "scroll";
   elx.innerHTML = "";
@@ -2193,7 +2521,7 @@ function renderTaskGraph() {
   let changed = true;
   while (changed) {
     changed = false;
-    for (const conversation of state.conversations) {
+    for (const conversation of state?.conversations ?? []) {
       if (conversation.parentConversationId && conversationIds.has(String(conversation.parentConversationId)) && !conversationIds.has(conversation.id)) {
         conversationIds.add(conversation.id);
         changed = true;
@@ -3777,17 +4105,69 @@ document.getElementById("save-settings").onclick = async () => {
 };
 
 // ─── SSE ────────────────────────────────────────────────────────────────────
+/**
+ * 按需重拉选中会话的详情（P0-2）。
+ * 之前每条 SSE 都会 force 重拉完整会话（400 轮 ≈ 299KB），即使内容毫无变化。
+ * 现在：状态发生跃迁（空闲 ↔ 运行中）时立即拉；运行中按 DETAIL_POLL_ACTIVE_MS
+ * 节流；空闲会话不做任何轮询（内容不会变）。
+ */
+function maybeRefreshConversationDetail(conv) {
+  const key = String(conv.id);
+  // 详情还没加载过：交给 renderConversation 的首次加载分支处理。
+  if (!conversationDetailCache.has(key)) return;
+  const record = detailRefreshState.get(key) ?? { lastFetch: 0, status: conv.status };
+  const active = isActiveConversationStatus(conv.status);
+  const wasActive = isActiveConversationStatus(record.status);
+  const now = Date.now();
+  // 状态跃迁：会话刚开始干活或刚干完活，内容一定变了，立即拉。
+  if (active !== wasActive) {
+    refreshConversationDetail(conv, now);
+    return;
+  }
+  if (!active) return; // 空闲会话内容不变，不做无效轮询。
+  if (now - record.lastFetch < DETAIL_POLL_ACTIVE_MS) return;
+  refreshConversationDetail(conv, now);
+}
+
+function refreshConversationDetail(conv, now) {
+  const key = String(conv.id);
+  detailRefreshState.set(key, { lastFetch: now, status: conv.status });
+  loadConversationDetail(conv.id, { force: true }).then(() => {
+    if (selected?.type === "conversation" && String(selected.id) === key) renderView();
+  }).catch(() => {});
+}
+
+/**
+ * 把快照差异应用到界面（P0-1）。
+ * 只重建真正受影响的部分：项目树 / 会话列表 / 任务图 / 会话头部。
+ */
+function applySnapshotDiff(prev, diff) {
+  if (diff.status) renderStatus();
+  if (diff.projects || diff.agents) renderTree();
+  if (diff.conversations.size > 0 || diff.conversationList) renderSessions();
+  if (diff.tasks) renderTaskGraph();
+  if (selected?.type !== "conversation") return;
+  const key = String(selected.id);
+  const conv = state.conversations.find((c) => String(c.id) === key);
+  if (!conv) {
+    // 会话已被删除：重建视图显示占位文案。
+    renderView();
+    return;
+  }
+  // 标题 / 状态变化需要更新头部（终止按钮可用性等）。
+  if (diff.conversations.has(key) || diff.conversationList) renderView();
+  maybeRefreshConversationDetail(conv);
+}
+
 const es = new EventSource("/api/events");
 es.onmessage = (ev) => {
-  state = JSON.parse(ev.data);
+  const next = JSON.parse(ev.data);
+  const prev = state;
+  const diff = diffSnapshot(prev, next);
+  state = next;
   agentsCache = state.agentsByProject ?? {};
-  render();
-  if (selected?.type === "conversation") {
-    const selectedId = selected.id;
-    loadConversationDetail(selectedId, { force: true }).then(() => {
-      if (selected?.type === "conversation" && selected.id === selectedId) renderView();
-    }).catch(() => {});
-  }
+  schedulesCache = state.schedulesByProject ?? {};
+  applySnapshotDiff(prev, diff);
   updateSseIndicator("ok");
 };
 es.onerror = () => {
