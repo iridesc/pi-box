@@ -114,6 +114,33 @@ services:
 
 删除项目时，目录会先移动到 `/workspace/.pi-box-trash`，便于人工恢复。
 
+## 项目文件浏览
+
+左栏每个项目下多了一行「📄 文件」：点进去后**第二栏变成文件树**，**第四栏（原任务图位置）变成预览区**，第三栏对话暂时让位（文件模式下四栏压成三栏）。移动端在「会话」与「预览」两个页签之间切换。
+
+- **浏览**：点文件夹行或箭头展开/收起；目录默认折叠，展开时才按需请求。单个目录最多返回 3000 条（`node_modules` 这类巨型目录不会打爆页面），超出会提示。
+- **预览**：文本/代码带行号并用 highlight.js 高亮；Markdown 默认渲染，可切「源码」；图片、PDF、音视频直接内联；二进制只显示大小和下载入口。文本最多读 1MB，超出会在顶部标注「已截断」。
+- **下载**：预览头部 `⬇ 下载` 与文件行悬浮 `⬇`，走 `Content-Disposition: attachment`；同一接口支持 `Range`，视频可拖动进度。
+- **上传**：文件树面板头 `⬆ 上传`（支持多选），落到树顶上「上传目录」显示的那个目录（点开某个文件夹即切换）。同名文件返回 409，确认后覆盖；写入用隐藏临时文件 + `rename`，失败不会留下半截文件。
+
+安全边界：
+
+- 路径一律是项目内相对路径，`..` 与绝对路径直接拒绝，解析后还会用 `realpath` 校验；符号链接指到项目外一律 400。
+- 原文件默认按附件下发，只有图片 / 音频 / 视频 / PDF 允许 inline；SVG inline 时附加 `Content-Security-Policy: sandbox`，并且所有响应都带 `X-Content-Type-Options: nosniff`，HTML 不会被当作页面渲染。
+- 上传文件名只取 basename 并去掉控制字符；单文件默认上限 200MB（`PI_BOX_UPLOAD_MAX_BYTES` 可调）。
+- 元项目（`meta`）同样可浏览，根目录是 `~/.pi/agent/meta`。
+
+接口（精确路径匹配，参数只能走 query）：
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/files/list?project=&path=` | 目录条目（目录优先，含大小与 mtime） |
+| `GET /api/files/read?project=&path=` | 预览内容：`text` / `binary` / `media`，带截断标记 |
+| `GET /api/files/raw?project=&path=&download=1` | 原文件流（支持 `Range`，`download=1` 强制附件） |
+| `POST /api/files/upload?project=&dir=&name=&overwrite=1` | 裸流上传（请求体就是文件内容，不走 base64/multipart） |
+
+代码高亮用的是内置的 highlight.js common 构建（`pi-boxd/web/vendor/hljs/`，离线可用、不依赖 CDN），升级方式见同目录 `VERSION.txt`。
+
 ## 元项目（pi-box-expert）
 
 pi-box 启动时会在 `agent-home/.pi/agent/meta/` 下安装一个**身份特殊的内置项目**，代号 `pi-box-expert`。它不是用户创建的业务项目，而是平台级的“管理员项目”，在左侧项目列表中始终排在最前面，标记为 🔧。
@@ -302,6 +329,7 @@ podman compose down
 - `PI_BOXD_DATA_DIR`：Durable 数据目录；镜像默认 `/home/agent/.pi-boxd`。
 - `PI_BOX_USER_SKILLS_DIR`：用户 Skill 库；默认 `~/.pi/agent/skills`。
 - `PI_BOX_BUILTIN_SKILLS_DIR`：内置 Skill 库；默认 `/opt/pi-box/skills`。
+- `PI_BOX_UPLOAD_MAX_BYTES`：项目文件上传的单文件上限；默认 200MB。
 - `PORT`：HTTP 监听端口；镜像默认 `8790`。
 - `PI_BOX_AUTH_USERNAME` / `PI_BOX_AUTH_PASSWORD`：应用层 HTTP Basic Auth；密码为空时禁用认证。
 
