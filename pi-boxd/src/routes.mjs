@@ -16,6 +16,7 @@ import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upse
 import { readLogTail, scheduleLogDir, scheduleLogRoot } from "./schedule-log.mjs";
 import { harness as runtimeHarness, context as runtimeContext, mcpBridge as runtimeMcpBridge, getMaintenance, isMaintenance, restartRuntime } from "./runtime.mjs";
 import { cleanupStatus, pruneAllLogs, saveCleanupConfig } from "./cleanup.mjs";
+import { listDirectory, readFilePreview, resolveProjectPath, sendProjectFile, uploadProjectFile } from "./files.mjs";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
@@ -37,6 +38,34 @@ const ICON_MIME_EXT = {
 function sendJson(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   res.end(JSON.stringify(payload));
+}
+
+/** 解析 query string（extraRoutes 是精确路径匹配，参数只能走 query）。 */
+function queryOf(req) {
+  return new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`).searchParams;
+}
+
+/** 文件接口统一错误出口：fileError 带 status，其余按 500 处理。 */
+function sendFileError(res, error) {
+  if (res.headersSent || res.writableEnded || res.destroyed) {
+    res.destroy();
+    return;
+  }
+  const byCode = { EACCES: 403, EPERM: 403, ENOENT: 404, ENOTDIR: 404, EISDIR: 400, ENOSPC: 507 };
+  const status = Number(error?.status) || byCode[error?.code] || 500;
+  sendJson(res, status, { error: error?.message ?? String(error) });
+}
+
+/** 静态资源（vendor 目录）直出，带长缓存。 */
+async function sendVendor(res, file, contentType) {
+  try {
+    const body = await readFile(join(WEB_DIR, "vendor", file));
+    res.writeHead(200, { "Content-Type": contentType, "Cache-Control": "public, max-age=604800" });
+    res.end(body);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("not found");
+  }
 }
 
 /** 删除 branding 目录下除 keep 之外的所有图标文件 */
@@ -410,6 +439,75 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
         await rename(cwd, join(trashDir, trashName));
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, project: name, recoverable: true, trashName }));
+      },
+    },
+    // ── 项目文件：浏览 / 预览 / 下载 / 上传 ────────────────────────────────
+    // 全部走 query string（路径参数无法用精确匹配路由）；路径解析与越界校验在 files.mjs。
+    "/api/files/list": {
+      method: "GET",
+      async handler(req, res) {
+        const params = queryOf(req);
+        try {
+          const data = await listDirectory(params.get("project"), params.get("path") ?? "");
+          sendJson(res, 200, data);
+        } catch (error) {
+          sendFileError(res, error);
+        }
+      },
+    },
+    "/api/files/read": {
+      method: "GET",
+      async handler(req, res) {
+        const params = queryOf(req);
+        try {
+          const data = await readFilePreview(params.get("project"), params.get("path") ?? "");
+          sendJson(res, 200, data);
+        } catch (error) {
+          sendFileError(res, error);
+        }
+      },
+    },
+    "/api/files/raw": {
+      methods: ["GET", "HEAD"],
+      async handler(req, res) {
+        const params = queryOf(req);
+        try {
+          const target = await resolveProjectPath(params.get("project"), params.get("path") ?? "");
+          await sendProjectFile(req, res, target, { download: params.get("download") === "1" });
+        } catch (error) {
+          sendFileError(res, error);
+        }
+      },
+    },
+    // 上传：请求体就是文件裸流（不用 base64 / multipart），先写隐藏临时文件再 rename。
+    "/api/files/upload": {
+      method: "POST",
+      async handler(req, res) {
+        const params = queryOf(req);
+        try {
+          const data = await uploadProjectFile(req, {
+            project: params.get("project"),
+            dir: params.get("dir") ?? "",
+            name: params.get("name"),
+            overwrite: params.get("overwrite") === "1",
+          });
+          sendJson(res, 200, { ok: true, ...data });
+        } catch (error) {
+          sendFileError(res, error);
+        }
+      },
+    },
+    // 代码高亮（vendor）：highlight.js common 构建 + github-dark 主题。
+    "/vendor/hljs.js": {
+      method: "GET",
+      async handler(_req, res) {
+        await sendVendor(res, "hljs/highlight.min.js", "text/javascript; charset=utf-8");
+      },
+    },
+    "/vendor/hljs.css": {
+      method: "GET",
+      async handler(_req, res) {
+        await sendVendor(res, "hljs/github-dark.min.css", "text/css; charset=utf-8");
       },
     },
     // provider 元数据

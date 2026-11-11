@@ -1,0 +1,5 @@
+highlight.js 11.12.0（@highlightjs/cdn-assets 的 common 构建，含常用 36 种语言）
+来源: https://www.npmjs.com/package/@highlightjs/cdn-assets
+主题: styles/github-dark.min.css
+协议: BSD-3-Clause（见同目录 LICENSE）
+升级: npm pack @highlightjs/cdn-assets@11 && 覆盖这两个文件

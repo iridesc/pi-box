@@ -770,3 +770,78 @@ body.density-compact .tree-item { padding-top: 3px; padding-bottom: 3px; font-si
 #tab-cleanup .form-row > label { width: 108px; }
 #tab-cleanup .form-row { flex-wrap: nowrap; }
 .cleanup-flash { margin-bottom: 16px; padding: 10px 12px; border-radius: 6px; background: rgba(46, 160, 67, .15); color: #7ee787; font-size: 13px; }
+
+/* ── 项目文件：文件树（第二栏）+ 预览（第四栏） ───────────────────── */
+.panel-head-actions { display: flex; align-items: center; gap: 6px; }
+.panel-link {
+  padding: 3px 8px; border: 1px solid #30363d; border-radius: 4px;
+  background: #21262d; color: #c9d1d9; font-size: 11px; text-decoration: none; cursor: pointer;
+}
+.panel-link:hover { background: #30363d; }
+.panel-link[hidden], .panel-head-actions > button[hidden] { display: none; }
+
+/* 方案 B：文件模式下第三栏让位，预览占据最右侧整块（原第四栏位置） */
+body.mode-files main { grid-template-columns: 260px 340px 0 minmax(0, 1fr); }
+body.mode-files #panel-view { display: none; }
+body.mode-files #panel-tasks { grid-column: 4; }
+body.mode-files #new-conversation { display: none; }
+
+.file-tree { display: flex; flex-direction: column; padding-bottom: 8px; }
+.file-row {
+  display: flex; align-items: center; gap: 4px; padding: 3px 6px;
+  border-radius: 4px; cursor: pointer; white-space: nowrap; font-size: 12px;
+}
+.file-row:hover { background: #1f2937; }
+.file-row.selected { background: rgba(31, 111, 235, .22); }
+.file-row-dir .file-name { font-weight: 600; }
+.file-arrow { flex: 0 0 auto; width: 12px; color: #8b949e; font-size: 10px; user-select: none; }
+.file-arrow:hover { color: #58a6ff; }
+.file-icon { flex: 0 0 auto; font-size: 12px; }
+.file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.file-size { flex: 0 0 auto; color: #6e7681; font-size: 10px; }
+.file-row-dl { flex: 0 0 auto; color: #8b949e; text-decoration: none; opacity: 0; }
+.file-row:hover .file-row-dl, .file-row.selected .file-row-dl { opacity: 1; }
+.file-row-dl:hover { color: #58a6ff; }
+.file-loading, .file-empty { padding: 4px 6px; color: #6e7681; font-size: 11px; }
+.file-error { padding: 4px 8px; color: #f85149; font-size: 11px; white-space: normal; }
+.file-notice {
+  margin: 0 0 6px; padding: 6px 8px; border-radius: 5px;
+  background: rgba(31, 111, 235, .12); color: #79c0ff; font-size: 11px; white-space: normal;
+}
+.file-notice.err { background: rgba(248, 81, 73, .12); color: #f85149; }
+.file-current-dir { padding: 2px 6px 6px; color: #6e7681; font-size: 10px; word-break: break-all; }
+
+/* 预览区 */
+#task-graph.file-preview { padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+.file-preview-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 6px 10px; border-bottom: 1px solid #21262d; background: #161b22;
+  color: #8b949e; font-size: 11px; word-break: break-all;
+}
+.file-preview-bar strong { color: #e6edf3; font-weight: 600; }
+.file-preview-body { flex: 1; min-height: 0; overflow: auto; }
+.file-preview-hint { padding: 18px 14px; color: #6e7681; font-size: 12px; line-height: 1.7; text-align: center; }
+.file-preview-error { padding: 14px; color: #f85149; font-size: 12px; white-space: pre-wrap; }
+
+.file-code-wrap { display: flex; align-items: stretch; width: max-content; min-width: 100%; min-height: 100%; font-size: 12px; line-height: 1.55; }
+.file-gutter {
+  position: sticky; left: 0; z-index: 1; flex: 0 0 auto; margin: 0;
+  padding: 8px 8px 8px 10px; background: #0d1117; color: #484f58;
+  text-align: right; user-select: none; border-right: 1px solid #21262d;
+}
+.file-code { flex: 0 0 auto; margin: 0; padding: 8px 12px; white-space: pre; }
+.file-code code, .file-code code.hljs {
+  display: block; padding: 0; overflow: visible; background: transparent;
+  font-family: inherit; font-size: inherit; line-height: inherit;
+}
+.file-image { display: block; max-width: 100%; margin: 12px auto; background: #010409; }
+.file-media { display: block; width: 100%; max-height: 70vh; margin: 12px 0; }
+.file-pdf { width: 100%; height: 100%; min-height: 70vh; border: 0; }
+.file-md { padding: 12px 14px; }
+.file-binary { padding: 16px 14px; color: #8b949e; font-size: 12px; line-height: 1.8; text-align: center; }
+
+@media (max-width: 760px) {
+  body.mode-files #panel-tasks { grid-column: auto; }
+  body.mode-files [data-mobile-panel="view"] { opacity: .35; pointer-events: none; }
+}
+.file-row.file-row-current { background: rgba(31, 111, 235, .08); }

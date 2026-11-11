@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>pi-box · 多 Agent 平台</title>
   <link rel="icon" id="app-favicon" type="image/svg+xml" href="/favicon.svg">
+  <!-- 代码高亮主题必须排在 style.css 之前，方便 style.css 覆盖内边距/滚动行为 -->
+  <link rel="stylesheet" href="/vendor/hljs.css">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -106,7 +108,13 @@
     </section>
 
     <section id="panel-sessions">
-      <div class="panel-head"><h2>会话</h2><button id="new-conversation" type="button" disabled>＋ 新建会话</button></div>
+      <div class="panel-head">
+        <h2 id="sessions-title">会话</h2>
+        <div class="panel-head-actions">
+          <button id="file-upload-btn" type="button" hidden title="上传文件到当前目录">⬆ 上传</button>
+          <button id="new-conversation" type="button" disabled>＋ 新建会话</button>
+        </div>
+      </div>
       <div id="session-list" class="scroll"></div>
     </section>
 
@@ -115,11 +123,20 @@
     </section>
 
     <section id="panel-tasks">
-      <div class="panel-head"><h2>任务图 <small>当前会话</small></h2></div>
+      <div class="panel-head">
+        <h2 id="tasks-title">任务图 <small>当前会话</small></h2>
+        <div class="panel-head-actions">
+          <a id="file-download-btn" class="panel-link" hidden download>⬇ 下载</a>
+          <button id="file-refresh-btn" type="button" hidden title="重新读取预览">↻</button>
+        </div>
+      </div>
       <div id="task-graph" class="scroll"></div>
     </section>
   </main>
 
+  <input id="file-upload-input" type="file" multiple hidden>
+
+  <script src="/vendor/hljs.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

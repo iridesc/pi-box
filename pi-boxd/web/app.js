@@ -190,8 +190,16 @@ async function refresh() {
 }
 
 function render() {
+  const filesMode = selected?.type === "files";
+  setFilesChrome(filesMode);
   renderStatus();
   renderTree();
+  if (filesMode) {
+    // 文件模式：第二/第四栏由 renderFilePanels 接管，SSE 周期刷新不重绘，避免丢滚动位置和图片重载。
+    ensureFileBrowser(selected.project);
+    renderFilePanels();
+    return;
+  }
   renderSessions();
   renderView();
   renderTaskGraph();
@@ -277,6 +285,15 @@ function renderTree() {
     };
     root.appendChild(aNode);
 
+    // 项目文件浏览入口（第二栏变文件树，第四栏变预览）
+    const filesNode = el("div", "tree-item tree-files");
+    filesNode.classList.add("tree-level-1");
+    filesNode.appendChild(el("span", "tree-arrow", ""));
+    filesNode.appendChild(el("span", "tree-label", "📄 文件"));
+    if (selected?.type === "files" && selected.project === proj) filesNode.classList.add("selected");
+    filesNode.onclick = () => openProjectFiles(proj);
+    root.appendChild(filesNode);
+
     // 子 agent：直接挂在项目下，不再有折叠组（需求：随时看到圆点状态）
     const agents = agentsCache[proj] ?? [];
     // 子 Agent 区域与新建入口始终存在，空项目也必须能创建第一个 Agent。
@@ -343,6 +360,453 @@ function renderTree() {
       root.appendChild(n);
     }
 
+  }
+}
+
+// ─── 项目文件浏览（第二栏：文件树 / 第四栏：预览） ─────────────────────────
+// 方案 B：文件模式下第三栏（对话）让位，预览占据最右侧整块（原任务图位置）。
+const FILE_ICONS = {
+  md: "📝", markdown: "📝", mdx: "📝", txt: "📄", log: "📜", csv: "🧮", tsv: "🧮",
+  json: "🧾", jsonc: "🧾", yaml: "🧾", yml: "🧾", toml: "🧾", ini: "🧾", conf: "🧾", cfg: "🧾",
+  js: "🟨", mjs: "🟨", cjs: "🟨", jsx: "🟨", ts: "🟦", tsx: "🟦", vue: "🟩",
+  py: "🐍", go: "🐹", rs: "🦀", java: "☕", kt: "🟣", rb: "💎", php: "🐘",
+  c: "🔵", h: "🔵", cc: "🔵", cpp: "🔵", hpp: "🔵", cs: "🟪",
+  sh: "🐚", bash: "🐚", zsh: "🐚", fish: "🐚", ps1: "🐚", sql: "🗄",
+  html: "🌐", htm: "🌐", xml: "🌐", svg: "🖼", css: "🎨", scss: "🎨", less: "🎨",
+  png: "🖼", jpg: "🖼", jpeg: "🖼", gif: "🖼", webp: "🖼", bmp: "🖼", ico: "🖼", avif: "🖼",
+  pdf: "📕", zip: "🗜", gz: "🗜", tgz: "🗜", tar: "🗜", "7z": "🗜", rar: "🗜",
+  mp3: "🎵", wav: "🎵", ogg: "🎵", m4a: "🎵", flac: "🎵",
+  mp4: "🎬", webm: "🎬", mov: "🎬", mkv: "🎬",
+  lock: "🔒", env: "🔑", wasm: "⚙", proto: "🧩", diff: "🧩", patch: "🧩",
+};
+const MARKDOWN_RE = /\.(md|markdown|mdx)$/i;
+const HIGHLIGHT_MAX_CHARS = 400 * 1024;
+
+// { project, dirs: Map<rel, {items, loaded, loading, error, truncated}>, expanded: Set,
+//   currentDir, selected, preview, previewError, previewLoading, markdownSource, notice }
+let fileBrowser = null;
+
+function fileIcon(item) {
+  if (item.type === "dir") return item.link ? "🔗" : "📁";
+  const name = item.name.toLowerCase();
+  if (name === "dockerfile") return "🐳";
+  if (name === "makefile") return "🔨";
+  if (name === ".env" || name.startsWith(".env.")) return "🔑";
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+  return FILE_ICONS[ext] ?? "📄";
+}
+
+function filesApi(name, params) {
+  return `/api/files/${name}?${new URLSearchParams(params).toString()}`;
+}
+
+function rawFileUrl(project, path, download = false) {
+  const params = { project, path };
+  if (download) params.download = "1";
+  return `/api/files/raw?${new URLSearchParams(params).toString()}`;
+}
+
+function parentDirOf(path) {
+  const index = path.lastIndexOf("/");
+  return index < 0 ? "" : path.slice(0, index);
+}
+
+/** 进入某个项目的文件浏览：第二栏展示文件树，第四栏展示预览。 */
+function openProjectFiles(project) {
+  selected = { type: "files", project };
+  ensureFileBrowser(project);
+  setMobilePanel("sessions");
+  render();
+}
+
+function ensureFileBrowser(project) {
+  if (fileBrowser?.project === project) return fileBrowser;
+  fileBrowser = {
+    project,
+    dirs: new Map(),
+    expanded: new Set([""]),
+    currentDir: "",
+    selected: null,
+    preview: null,
+    previewError: null,
+    previewLoading: false,
+    markdownSource: false,
+    notice: null,
+    noticeError: false,
+    treeDirty: true,
+    previewDirty: true,
+  };
+  loadFileDir("");
+  return fileBrowser;
+}
+
+async function loadFileDir(rel, { force = false } = {}) {
+  const fb = fileBrowser;
+  if (!fb) return;
+  const known = fb.dirs.get(rel);
+  if (known?.loading) return;
+  if (known?.loaded && !force) return;
+  fb.dirs.set(rel, { ...(known ?? {}), loading: true, error: null });
+  fb.treeDirty = true;
+  renderFilePanels();
+  try {
+    const response = await fetch(filesApi("list", { project: fb.project, path: rel }));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "读取目录失败");
+    if (fileBrowser !== fb) return;
+    fb.dirs.set(rel, {
+      items: data.entries ?? [],
+      truncated: Boolean(data.truncated),
+      loaded: true,
+      loading: false,
+      error: null,
+    });
+  } catch (error) {
+    if (fileBrowser !== fb) return;
+    fb.dirs.set(rel, { items: [], loaded: false, loading: false, error: error.message, truncated: false });
+  }
+  fb.treeDirty = true;
+  renderFilePanels();
+}
+
+function toggleFileDir(fb, path) {
+  fb.currentDir = path;
+  if (fb.expanded.has(path)) {
+    fb.expanded.delete(path);
+  } else {
+    fb.expanded.add(path);
+    loadFileDir(path);
+  }
+  fb.treeDirty = true;
+  renderFilePanels();
+}
+
+async function openFilePreview(fb, path) {
+  setMobilePanel("tasks");
+  fb.selected = path;
+  fb.currentDir = parentDirOf(path);
+  fb.preview = null;
+  fb.previewError = null;
+  fb.previewLoading = true;
+  fb.markdownSource = false;
+  fb.treeDirty = true;
+  fb.previewDirty = true;
+  renderFilePanels();
+  try {
+    const response = await fetch(filesApi("read", { project: fb.project, path }));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "读取文件失败");
+    if (fileBrowser !== fb) return;
+    fb.preview = data;
+  } catch (error) {
+    if (fileBrowser !== fb) return;
+    fb.previewError = error.message;
+  } finally {
+    if (fileBrowser === fb) {
+      fb.previewLoading = false;
+      fb.previewDirty = true;
+      renderFilePanels();
+    }
+  }
+}
+
+/** 文件模式下的面板头（标题 / 上传 / 下载 / 刷新）。幂等，可反复调用。 */
+function setFilesChrome(on) {
+  const sessionsTitle = document.getElementById("sessions-title");
+  const tasksTitle = document.getElementById("tasks-title");
+  const upload = document.getElementById("file-upload-btn");
+  const download = document.getElementById("file-download-btn");
+  const refresh = document.getElementById("file-refresh-btn");
+  const tasksNavLabel = document.querySelector('[data-mobile-panel="tasks"] span');
+  if (!sessionsTitle || !tasksTitle || !upload) return;
+  document.body.classList.toggle("mode-files", on);
+  if (on) {
+    if (sessionsTitle.textContent !== "文件") sessionsTitle.textContent = "文件";
+    if (tasksTitle.textContent !== "文件预览") tasksTitle.textContent = "文件预览";
+    upload.hidden = false;
+    const hasFile = Boolean(fileBrowser?.selected);
+    download.hidden = !hasFile;
+    refresh.hidden = !hasFile;
+    if (tasksNavLabel && tasksNavLabel.textContent !== "预览") tasksNavLabel.textContent = "预览";
+  } else {
+    if (sessionsTitle.textContent !== "会话") sessionsTitle.textContent = "会话";
+    if (!tasksTitle.querySelector("small")) tasksTitle.innerHTML = "任务图 <small>当前会话</small>";
+    upload.hidden = true;
+    download.hidden = true;
+    refresh.hidden = true;
+    if (tasksNavLabel && tasksNavLabel.textContent !== "任务") tasksNavLabel.textContent = "任务";
+  }
+  if (upload.hidden) return;
+  const dirLabel = fileBrowser?.currentDir ? fileBrowser.currentDir : "项目根目录";
+  upload.title = `上传文件到 ${dirLabel}`;
+  download.href = fileBrowser?.selected ? rawFileUrl(fileBrowser.project, fileBrowser.selected, true) : "#";
+}
+
+function renderFilePanels() {
+  const fb = fileBrowser;
+  if (!fb || selected?.type !== "files" || selected.project !== fb.project) return;
+  if (fb.treeDirty) {
+    renderFileTree(fb);
+    fb.treeDirty = false;
+  }
+  if (fb.previewDirty) {
+    renderFilePreview(fb);
+    fb.previewDirty = false;
+  }
+  setFilesChrome(true);
+}
+
+function renderFileTree(fb) {
+  const root = document.getElementById("session-list");
+  root.innerHTML = "";
+  if (fb.notice) root.appendChild(el("div", fb.noticeError ? "file-notice err" : "file-notice", fb.notice));
+  const current = el("div", "file-current-dir", `上传目录：${fb.currentDir || "（项目根目录）"}`);
+  root.appendChild(current);
+  const tree = el("div", "file-tree");
+  root.appendChild(tree);
+  appendFileRows(tree, fb, "", 0);
+}
+
+function appendFileRows(container, fb, rel, depth) {
+  const node = fb.dirs.get(rel);
+  const indent = 4 + depth * 12;
+  if (node?.error) {
+    const row = el("div", "file-error", node.error);
+    row.style.paddingLeft = `${indent}px`;
+    container.appendChild(row);
+    const retry = el("div", "file-loading", "点击重试");
+    retry.style.paddingLeft = `${indent}px`;
+    retry.onclick = () => loadFileDir(rel, { force: true });
+    container.appendChild(retry);
+    return;
+  }
+  if (!node?.loaded) {
+    const row = el("div", "file-loading", node?.loading === false ? "（空目录）" : "加载中…");
+    row.style.paddingLeft = `${indent}px`;
+    container.appendChild(row);
+    return;
+  }
+  if (node.items.length === 0) {
+    const row = el("div", "file-empty", "（空目录）");
+    row.style.paddingLeft = `${indent}px`;
+    container.appendChild(row);
+    return;
+  }
+  for (const item of node.items) {
+    const isDir = item.type === "dir";
+    const open = isDir && fb.expanded.has(item.path);
+    const row = el("div", isDir ? "file-row file-row-dir" : "file-row file-row-file");
+    row.style.paddingLeft = `${indent}px`;
+    if (!isDir && fb.selected === item.path) row.classList.add("selected");
+    if (isDir && fb.currentDir === item.path) row.classList.add("file-row-current");
+    row.appendChild(el("span", "file-arrow", isDir ? (open ? "▼" : "▶") : ""));
+    row.appendChild(el("span", "file-icon", fileIcon(item)));
+    const name = el("span", "file-name", item.name);
+    name.title = item.path;
+    row.appendChild(name);
+    if (!isDir) {
+      if (item.size !== null && item.size !== undefined) row.appendChild(el("span", "file-size", formatBytes(item.size)));
+      const download = el("a", "file-row-dl", "⬇");
+      download.href = rawFileUrl(fb.project, item.path, true);
+      download.title = `下载 ${item.path}`;
+      download.download = item.name;
+      download.onclick = (event) => event.stopPropagation();
+      row.appendChild(download);
+    }
+    row.onclick = () => {
+      if (isDir) toggleFileDir(fb, item.path);
+      else openFilePreview(fb, item.path);
+    };
+    container.appendChild(row);
+    if (isDir && open) appendFileRows(container, fb, item.path, depth + 1);
+  }
+  if (node.truncated) {
+    const row = el("div", "file-loading", "目录条目过多，仅显示前一部分");
+    row.style.paddingLeft = `${indent + 12}px`;
+    container.appendChild(row);
+  }
+}
+
+function renderFilePreview(fb) {
+  const box = document.getElementById("task-graph");
+  box.innerHTML = "";
+  box.className = "scroll file-preview";
+  if (!fb.selected) {
+    box.appendChild(el("div", "file-preview-hint", "← 在左侧文件树里点文件预览，点文件夹展开/收起。"));
+    return;
+  }
+  if (fb.previewLoading) {
+    box.appendChild(el("div", "file-preview-hint", `读取 ${fb.selected} …`));
+    return;
+  }
+  if (fb.previewError) {
+    const wrap = el("div", "file-preview-body");
+    wrap.appendChild(el("div", "file-preview-error", fb.previewError));
+    const retry = el("button", "btn-secondary", "重试");
+    retry.onclick = () => openFilePreview(fb, fb.selected);
+    wrap.appendChild(retry);
+    box.appendChild(wrap);
+    return;
+  }
+  const preview = fb.preview;
+  if (!preview) {
+    box.appendChild(el("div", "file-preview-hint", "读取中…"));
+    return;
+  }
+
+  const bar = el("div", "file-preview-bar");
+  const title = el("strong", "", preview.path);
+  bar.appendChild(title);
+  bar.appendChild(el("span", "", `${formatBytes(preview.size)} · ${formatDateTime(preview.mtime)}`));
+  if (preview.truncated) {
+    bar.appendChild(el("span", "file-size", `已截断，仅显示前 ${formatBytes(preview.previewBytes ?? 0)}`));
+  }
+  if (preview.kind === "text" && MARKDOWN_RE.test(preview.path)) {
+    const toggle = el("button", "btn-secondary", fb.markdownSource ? "渲染" : "源码");
+    toggle.onclick = () => {
+      fb.markdownSource = !fb.markdownSource;
+      fb.previewDirty = true;
+      renderFilePanels();
+    };
+    bar.appendChild(toggle);
+  }
+  // 只有媒体类型允许 inline，其它类型走 raw 会触发下载，所以不给「新标签打开」。
+  if (preview.kind === "media") {
+    const openRaw = el("a", "panel-link", "↗ 新标签打开");
+    openRaw.href = rawFileUrl(fb.project, preview.path);
+    openRaw.target = "_blank";
+    openRaw.rel = "noopener noreferrer";
+    bar.appendChild(openRaw);
+  }
+  box.appendChild(bar);
+
+  const body = el("div", "file-preview-body");
+  box.appendChild(body);
+  if (preview.kind === "media") renderMediaPreview(body, fb, preview);
+  else if (preview.kind === "binary") renderBinaryPreview(body, fb, preview);
+  else if (fb.markdownSource === false && MARKDOWN_RE.test(preview.path)) {
+    body.appendChild(markdownBlock(preview.content));
+    body.firstChild?.classList.add("file-md");
+  } else renderTextPreview(body, preview);
+}
+
+function renderMediaPreview(body, fb, preview) {
+  const url = rawFileUrl(fb.project, preview.path);
+  if (preview.mediaKind === "image") {
+    const img = el("img", "file-image");
+    img.src = url;
+    img.alt = preview.path;
+    img.title = "点击在新标签打开";
+    img.onclick = () => window.open(url, "_blank", "noopener");
+    body.appendChild(img);
+    return;
+  }
+  if (preview.mediaKind === "pdf") {
+    const frame = el("iframe", "file-pdf");
+    frame.src = url;
+    frame.title = preview.path;
+    body.appendChild(frame);
+    return;
+  }
+  const node = document.createElement(preview.mediaKind === "video" ? "video" : "audio");
+  node.className = "file-media";
+  node.controls = true;
+  node.src = url;
+  body.appendChild(node);
+}
+
+function renderBinaryPreview(body, fb, preview) {
+  const wrap = el("div", "file-binary");
+  wrap.appendChild(el("div", "", `${preview.name ?? preview.path} 是二进制文件，不能直接预览。`));
+  wrap.appendChild(el("div", "muted", `${formatBytes(preview.size)} · ${preview.mime}`));
+  const link = el("a", "panel-link", "⬇ 下载文件");
+  link.href = rawFileUrl(fb.project, preview.path, true);
+  link.download = preview.name ?? "";
+  wrap.appendChild(link);
+  body.appendChild(wrap);
+}
+
+function highlightToHtml(code, language) {
+  const hljs = window.hljs;
+  if (!hljs || code.length > HIGHLIGHT_MAX_CHARS) return null;
+  try {
+    if (language && hljs.getLanguage(language)) {
+      return hljs.highlight(code, { language, ignoreIllegals: true }).value;
+    }
+    if (!language && code.length <= 100 * 1024) return hljs.highlightAuto(code).value;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function renderTextPreview(body, preview) {
+  const text = String(preview.content ?? "").replace(/\r\n/g, "\n").replace(/\n$/, "");
+  const lineCount = text.split("\n").length;
+  const wrap = el("div", "file-code-wrap");
+  const gutter = el("pre", "file-gutter");
+  gutter.textContent = Array.from({ length: lineCount }, (_, index) => index + 1).join("\n");
+  const code = el("pre", "file-code");
+  const codeEl = el("code", "hljs");
+  const html = highlightToHtml(text, preview.language);
+  if (html === null) codeEl.textContent = text;
+  else codeEl.innerHTML = html;
+  code.appendChild(codeEl);
+  wrap.appendChild(gutter);
+  wrap.appendChild(code);
+  body.appendChild(wrap);
+}
+
+async function uploadFiles(files) {
+  const fb = fileBrowser;
+  if (!fb || files.length === 0) return;
+  const dir = fb.currentDir;
+  const failures = [];
+  let done = 0;
+  for (const file of files) {
+    fb.notice = `正在上传 ${file.name}（${done + 1}/${files.length}）…`;
+    fb.noticeError = false;
+    fb.treeDirty = true;
+    renderFilePanels();
+    const params = { project: fb.project, dir, name: file.name };
+    const send = (extra = {}) => fetch(`/api/files/upload?${new URLSearchParams({ ...params, ...extra }).toString()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    let response = await send().catch((error) => ({ ok: false, status: 0, json: async () => ({ error: error.message }) }));
+    if (response.status === 409) {
+      if (!confirm(`${file.name} 已存在，覆盖？`)) {
+        failures.push(`${file.name}：已跳过`);
+        continue;
+      }
+      response = await send({ overwrite: "1" });
+    }
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      failures.push(`${file.name}：${data.error || `HTTP ${response.status}`}`);
+      continue;
+    }
+    done += 1;
+  }
+  // 上传过程中用户可能切到别的项目，旧 fb 不能再动新状态。
+  if (fileBrowser !== fb) return;
+  fb.expanded.add(dir);
+  const notice = failures.length
+    ? `已上传 ${done} 个，失败 ${failures.length} 个：${failures.join("；")}`
+    : `✅ 已上传 ${done} 个文件到 ${dir || "项目根目录"}`;
+  fb.notice = notice;
+  fb.noticeError = failures.length > 0;
+  await loadFileDir(dir, { force: true });
+  // 成功提示几秒后自动消失，失败信息保留给用户看清楚。
+  if (failures.length === 0) {
+    setTimeout(() => {
+      if (fileBrowser === fb && fb.notice === notice) {
+        fb.notice = null;
+        fb.treeDirty = true;
+        renderFilePanels();
+      }
+    }, 4000);
   }
 }
 
@@ -1708,6 +2172,7 @@ async function populateAgentModelSelect(select, selectedValue) {
 function renderTaskGraph() {
   const allTasks = Object.values(state.taskGraph.tasks);
   const elx = document.getElementById("task-graph");
+  elx.className = "scroll";
   elx.innerHTML = "";
   if (selected?.type !== "conversation") {
     elx.textContent = "（请选择一个会话）";
@@ -1774,6 +2239,25 @@ for (const button of document.querySelectorAll("[data-mobile-panel]")) {
   button.onclick = () => setMobilePanel(button.dataset.mobilePanel);
 }
 setMobilePanel(activeMobilePanel);
+
+// 文件浏览：上传 / 预览刷新
+const fileUploadBtn = document.getElementById("file-upload-btn");
+const fileUploadInput = document.getElementById("file-upload-input");
+if (fileUploadBtn && fileUploadInput) {
+  fileUploadBtn.onclick = () => fileUploadInput.click();
+  fileUploadInput.onchange = async () => {
+    const files = [...fileUploadInput.files];
+    fileUploadInput.value = "";
+    if (files.length > 0) await uploadFiles(files);
+  };
+}
+const fileRefreshBtn = document.getElementById("file-refresh-btn");
+if (fileRefreshBtn) {
+  fileRefreshBtn.onclick = () => {
+    if (!fileBrowser?.selected) return;
+    openFilePreview(fileBrowser, fileBrowser.selected);
+  };
+}
 
 // ─── 设置弹窗（模型）────────────────────────────────────────────────────────
 function renderModelChips() {
