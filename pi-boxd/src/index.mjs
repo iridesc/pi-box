@@ -7,6 +7,7 @@ import { buildExtraRoutes } from "./routes.mjs";
 import { join } from "node:path";
 import { bootRuntime, closeScheduler, context, harness, mcpBridge, startCleanupScheduler } from "./runtime.mjs";
 import { installBasicAuth } from "./auth.mjs";
+import { installStaticOptimizer } from "./static.mjs";
 
 // 初始化 model（用 config.json 或回退到 faux）
 await initProvider();
@@ -31,6 +32,9 @@ const server = createWebServer({
   extraRoutes: buildExtraRoutes(harness, context, mcpBridge),
   webDir: WEB_DIR,
 });
+
+// 静态资源优化：gzip + ETag + 缓存头。装在认证内侧，认证仍然覆盖静态资源。
+installStaticOptimizer(server, { webDir: WEB_DIR });
 
 const auth = installBasicAuth(server);
 
