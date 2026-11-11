@@ -385,6 +385,9 @@ const HIGHLIGHT_MAX_CHARS = 400 * 1024;
 // { project, dirs: Map<rel, {items, loaded, loading, error, truncated}>, expanded: Set,
 //   currentDir, selected, preview, previewError, previewLoading, markdownSource, notice }
 let fileBrowser = null;
+// 文件面板当前是否「已经占着」第二/第四栏。退出文件模式时会被其它渲染函数覆盖，
+// 再次进入必须强制重画一次，否则 dirty 标记为 false 会导致面板空白。
+let filesModeMounted = false;
 
 function fileIcon(item) {
   if (item.type === "dir") return item.link ? "🔗" : "📁";
@@ -520,6 +523,14 @@ function setFilesChrome(on) {
   const tasksNavLabel = document.querySelector('[data-mobile-panel="tasks"] span');
   if (!sessionsTitle || !tasksTitle || !upload) return;
   document.body.classList.toggle("mode-files", on);
+  // 模式切换：重新进入时面板 DOM 已不属于文件浏览器，强制整块重画。
+  if (on !== filesModeMounted) {
+    filesModeMounted = on;
+    if (on && fileBrowser) {
+      fileBrowser.treeDirty = true;
+      fileBrowser.previewDirty = true;
+    }
+  }
   if (on) {
     if (sessionsTitle.textContent !== "文件") sessionsTitle.textContent = "文件";
     if (tasksTitle.textContent !== "文件预览") tasksTitle.textContent = "文件预览";
