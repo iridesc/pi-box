@@ -1083,3 +1083,33 @@ body.mode-reports #file-upload-btn { display: none; }
 .report-arrow { font-size: 9px; }
 .report-item-open { flex: 0 0 auto; font-size: 10px; color: #484f58; }
 .report-item-row:hover .report-item-open { color: #58a6ff; }
+
+/* 项目设置里的子 Agent 管理（新建入口从左侧树搬过来：低频操作） */
+.project-agents-section {
+  margin-top: 22px; padding-top: 18px; border-top: 1px solid #21262d;
+}
+.project-agents-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.project-agents-title { font-size: 13px; font-weight: 600; color: #c9d1d9; }
+.project-agents-count { font-size: 11px; color: #6e7681; }
+.project-agents-add { margin-left: auto; font-size: 12px; padding: 4px 10px; }
+.project-agents-desc { font-size: 11px; line-height: 1.6; margin-bottom: 10px; }
+.project-agents-empty { font-size: 12px; color: #6e7681; padding: 10px 0; }
+.project-agents-list { display: flex; flex-direction: column; gap: 4px; }
+.project-agent-row {
+  display: flex; align-items: center; gap: 10px; padding: 7px 9px;
+  border: 1px solid #21262d; border-radius: 6px; background: #0d1117;
+}
+.project-agent-icon { flex: 0 0 auto; font-size: 14px; width: 18px; text-align: center; }
+.project-agent-info { flex: 1 1 auto; min-width: 0; }
+.project-agent-name { font-size: 12.5px; font-weight: 600; color: #c9d1d9; }
+.project-agent-meta {
+  font-size: 10.5px; color: #6e7681; margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.project-agent-btn { font-size: 11px; padding: 3px 9px; }
+
+/* 项目树里的纯分割线（分隔功能区与角色区，不带文字标签） */
+.tree-divider {
+  height: 0; margin: 6px 12px 6px 24px;
+  border-top: 1px solid #21262d;
+}

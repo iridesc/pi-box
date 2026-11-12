@@ -434,31 +434,28 @@ function renderTree() {
     root.appendChild(reportsNode);
 
 
-    // 子 agent：直接挂在项目下，不再有折叠组（需求：随时看到圆点状态）
+    // 子 Agent：一条分割线和「助理 / 文件 / 报告」分开，但不再有文字标签和 ＋ 按钮 ——
+    // 「新建 Agent」是低频操作，入口收进项目设置（项目行右侧的 ⚙）。
     const agents = agentsCache[proj] ?? [];
-    // 子 Agent 区域与新建入口始终存在，空项目也必须能创建第一个 Agent。
-    const sep = el("div", "tree-sep");
-    sep.appendChild(el("span", "tree-sep-label", "子 Agent"));
-    const addAgent = el("button", "tree-sep-add", "＋");
-    addAgent.type = "button";
-    addAgent.title = isMeta ? "元项目子 agent 不可通过 UI 新建，请在宿主机直接编辑 /home/agent/.pi/agent/meta/agents/" : "新建 Agent";
-    addAgent.setAttribute("aria-label", `在 ${proj} 中新建 Agent`);
-    if (isMeta) {
-      addAgent.disabled = true;
-      addAgent.style.opacity = "0.4";
-      addAgent.style.cursor = "not-allowed";
-    }
-    addAgent.onclick = (event) => {
-      event.stopPropagation();
-      openAgentEditor({ scope: "project", project: proj });
-    };
-    sep.appendChild(addAgent);
-    root.appendChild(sep);
+    root.appendChild(el("div", "tree-divider"));
     if (agents.length === 0) {
-      root.appendChild(el("div", "tree-agent-empty tree-level-2", "暂无 Agent"));
+      const hint = el("div", "tree-agent-empty tree-level-1", "暂无 Agent");
+      hint.title = isMeta
+        ? "元项目子 agent 请在宿主机编辑 /home/agent/.pi/agent/meta/agents/"
+        : "打开项目设置可以新建 Agent";
+      if (!isMeta) {
+        hint.style.cursor = "pointer";
+        hint.onclick = (event) => {
+          event.stopPropagation();
+          selected = { type: "project", project: proj };
+          setMobilePanel("view");
+          render();
+        };
+      }
+      root.appendChild(hint);
     }
     for (const a of agents) {
-      const n = el("div", "tree-item tree-level-2");
+      const n = el("div", "tree-item tree-level-1");
       const isSel = (selected?.type === "actor" && selected.project === proj && selected.actorType === "agent" && selected.actorName === a.name)
         || (selectedConversation?.project === proj && selectedConversation.actorType === "agent" && selectedConversation.actorName === a.name);
       if (isSel) n.classList.add("selected");
@@ -2100,6 +2097,73 @@ function renderProjectForm(view) {
   bar.appendChild(remove);
   bar.appendChild(status);
   form.appendChild(bar);
+
+  // ── 子 Agent 管理（新建入口从左侧树的 ＋ 搬到这里：低频操作） ──
+  if (oldName !== state.metaProject) {
+    const agentSection = el("section", "project-agents-section");
+    const agentHead = el("div", "project-agents-head");
+    const agents = agentsCache[oldName] ?? [];
+    agentHead.appendChild(el("div", "project-agents-title", "子 Agent"));
+    agentHead.appendChild(el("div", "project-agents-count", `${agents.length} 个`));
+    const addAgent = el("button", "btn-primary project-agents-add", "＋ 新建 Agent");
+    addAgent.type = "button";
+    addAgent.onclick = () => openAgentEditor({ scope: "project", project: oldName });
+    agentHead.appendChild(addAgent);
+    agentSection.appendChild(agentHead);
+    agentSection.appendChild(
+      el(
+        "div",
+        "muted project-agents-desc",
+        "项目 Agent 创建后始终启用，可直接在被助理派发或作为会话角色使用；「全局」Agent 来自全局库，只在助理授权后出现在本项目。",
+      ),
+    );
+
+    if (agents.length === 0) {
+      agentSection.appendChild(el("div", "project-agents-empty", "还没有 Agent。"));
+    } else {
+      const list = el("div", "project-agents-list");
+      for (const agent of agents) {
+        const row = el("div", "project-agent-row");
+        row.appendChild(el("span", "project-agent-icon", agent.icon || DEFAULT_ICONS.agent));
+        const info = el("div", "project-agent-info");
+        info.appendChild(el("div", "project-agent-name", agent.name));
+        const meta = [agent.scope === "global" ? "全局 Agent" : "项目 Agent"];
+        if (agent.model) meta.push(agent.model);
+        if ((agent.reports ?? []).length) meta.push(`报告组 ${agent.reports.join("、")}`);
+        info.appendChild(el("div", "project-agent-meta", meta.join(" · ")));
+        row.appendChild(info);
+
+        if (agent.scope !== "meta") {
+          const edit = el("button", "btn-secondary project-agent-btn", "编辑");
+          edit.type = "button";
+          edit.onclick = () => openAgentEditor({ scope: agent.scope, project: oldName, existing: agent });
+          row.appendChild(edit);
+
+          const remove = el("button", "btn-secondary project-agent-btn project-danger", "删除");
+          remove.type = "button";
+          remove.disabled = Boolean(agent.locked);
+          remove.title = agent.locked ? "已锁定（locked=true），不可删除" : "删除这个 Agent 定义文件";
+          remove.onclick = async () => {
+            if (!confirm(`确认删除 Agent「${agent.name}」？定义文件会被删除，已创建的会话仍保留。`)) return;
+            const res = await fetch("/api/agents/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ project: oldName, name: agent.name, scope: agent.scope }),
+            });
+            if (!res.ok) {
+              alert((await res.json()).error || "删除失败");
+              return;
+            }
+            await refresh();
+          };
+          row.appendChild(remove);
+        }
+        list.appendChild(row);
+      }
+      agentSection.appendChild(list);
+    }
+    form.appendChild(agentSection);
+  }
 
   const scheduleSection = el("details", "project-schedules");
   scheduleSection.open = expandedProjectSchedules.has(oldName);
