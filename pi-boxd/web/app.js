@@ -358,13 +358,11 @@ function renderTree() {
     if (!isMeta) {
       const projectSettings = el("button", "tree-settings", "⚙");
       projectSettings.type = "button";
-      projectSettings.title = "修改项目名称";
+      projectSettings.title = "项目设置（名称 / 子 Agent / 定时任务）";
       projectSettings.setAttribute("aria-label", `设置项目 ${proj}`);
       projectSettings.onclick = (ev) => {
         ev.stopPropagation();
-        selected = { type: "project", project: proj };
-        setMobilePanel("view");
-        render();
+        openProjectSettings(proj);
       };
       row.appendChild(projectSettings);
     }
@@ -447,9 +445,7 @@ function renderTree() {
         hint.style.cursor = "pointer";
         hint.onclick = (event) => {
           event.stopPropagation();
-          selected = { type: "project", project: proj };
-          setMobilePanel("view");
-          render();
+          openProjectSettings(proj);
         };
       }
       root.appendChild(hint);
@@ -2048,8 +2044,64 @@ function renderProjectForm(view) {
   const head = el("div", "view-head");
   head.appendChild(el("span", "view-title", `${iconOf("project", oldName)} 项目设置 · ${oldName}`));
   view.appendChild(head);
+  buildProjectSettings(view, oldName, {
+    onRenamed: (newName) => {
+      selected = { type: "project", project: newName };
+    },
+  });
+}
 
-  const form = el("div", "view-form");
+/** 项目设置弹窗：和助理 / 子 Agent 的设置保持一致的交互。 */
+function openProjectSettings(project) {
+  const overlay = el("div", "drawer-submodal-backdrop");
+  const modal = el("div", "drawer-submodal project-settings-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.appendChild(el("h3", "", `${iconOf("project", project)} 项目设置 · ${project}`));
+
+  const body = el("div", "project-settings-body");
+  modal.appendChild(body);
+
+  let currentProject = project;
+  const close = async () => {
+    overlay.remove();
+    await refresh();
+  };
+
+  const actions = el("div", "form-actions");
+  const closeBtn = el("button", "btn-secondary", "关闭");
+  closeBtn.type = "button";
+  closeBtn.onclick = close;
+  actions.appendChild(closeBtn);
+  modal.appendChild(actions);
+
+  buildProjectSettings(body, project, {
+    onRenamed: async (newName) => {
+      currentProject = newName;
+      // 改名后整块重画，标题跟着更新，避免关掉再开
+      overlay.remove();
+      openProjectSettings(newName);
+    },
+  });
+
+  overlay.appendChild(modal);
+  overlay.onclick = (event) => {
+    if (event.target === overlay) close();
+  };
+  document.body.appendChild(overlay);
+}
+
+/**
+ * 项目设置面板内容（改名 / 删除 / 子 Agent / 定时任务）。
+ * 抽成独立函数是因为它现在主要作为弹窗使用（和助理、子 Agent 的设置一致），
+ * 第三栏的 renderProjectForm 只是复用同一份内容。
+ */
+function buildProjectSettings(container, oldName, { onRenamed } = {}) {
+  if (!state.projects.includes(oldName)) {
+    container.appendChild(el("div", "muted", "（项目已不存在）"));
+    return;
+  }
+  const form = el("div", "view-form project-settings-form");
   const nameInput = document.createElement("input");
   nameInput.type = "text";
   nameInput.value = oldName;
@@ -2086,7 +2138,8 @@ function renderProjectForm(view) {
     expandedProjects.delete(`agents-${oldName}`);
     expandedProjects.add(newName);
     saveExpandedProjects();
-    selected = { type: "project", project: newName };
+    if (onRenamed) onRenamed(newName);
+    else selected = { type: "project", project: newName };
     await refresh();
   };
   const bar = el("div", "form-actions");
@@ -2190,10 +2243,11 @@ function renderProjectForm(view) {
   fillScheduleList(scheduleList, oldName, schedulesCache[oldName] ?? []);
   scheduleSection.appendChild(scheduleList);
   form.appendChild(scheduleSection);
-  view.appendChild(form);
+  container.appendChild(form);
 
   reloadSchedules(oldName).then((data) => {
-    if (selected?.type !== "project" || selected.project !== oldName || !scheduleList.isConnected) return;
+    // 弹窗场景下 selected 不是 project，只判断节点是否还在 DOM 里。
+    if (!scheduleList.isConnected) return;
     count.textContent = String(data.schedules.length);
     fillScheduleList(scheduleList, oldName, data.schedules);
   }).catch((error) => {

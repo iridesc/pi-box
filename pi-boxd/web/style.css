@@ -615,7 +615,7 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 }
 .drawer-submodal {
   background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-  padding: 20px 24px; width: 520px; max-width: 90vw; max-height: 90vh;
+  padding: 22px 26px; width: 640px; max-width: min(94vw, 640px); max-height: 92vh;
   overflow-y: auto;
 }
 /* ── 实体图标（emoji，可点击修改） ─────────────────────────────────────── */
@@ -639,7 +639,7 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 .tree-item.selected .entity-icon:hover, .tree-project.selected .entity-icon:hover { background: rgba(255,255,255,.22); }
 
 /* ── emoji 图标选择器 ─────────────────────────────────────────────────── */
-.icon-picker-modal { width: 400px; max-height: min(620px, calc(100vh - 48px)); }
+.icon-picker-modal { width: 470px; max-height: min(720px, calc(100vh - 40px)); }
 .icon-picker-input {
   width: 100%; box-sizing: border-box; margin-bottom: 10px;
   background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
@@ -662,11 +662,12 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
 .icon-picker-cell.current { border-color: #58a6ff; background: rgba(88,166,255,.14); }
 @media (max-width: 720px) {
   .icon-picker-modal { width: 100%; }
+  .agent-editor-modal, .project-settings-modal { width: 100%; max-width: 100%; }
   .icon-picker-grid { grid-template-columns: repeat(7, 1fr); }
   .icon-picker-groups { max-height: 46dvh; }
 }
 
-.agent-editor-modal { width: 660px; max-height: min(820px, calc(100vh - 48px)); overflow-y: auto; }
+.agent-editor-modal { width: 820px; max-width: min(94vw, 820px); max-height: min(90vh, calc(100vh - 40px)); overflow-y: auto; }
 .agent-editor-section { margin: 14px 0; }
 .agent-editor-section-title { margin-bottom: 3px; color: #c9d1d9; font-size: 12px; font-weight: 600; }
 .agent-editor-section-desc { margin-bottom: 8px; }
@@ -1059,7 +1060,7 @@ body.mode-reports #file-upload-btn { display: none; }
 }
 
 /* 报告组设置面板 */
-.report-group-modal { width: min(520px, calc(100vw - 40px)); }
+.report-group-modal { width: 660px; max-width: min(94vw, 660px); }
 .report-slug-readonly {
   flex: 1; font-size: 12px; color: #8b949e; font-family: ui-monospace, SFMono-Regular, monospace;
   padding: 5px 8px; background: #0d1117; border: 1px solid #21262d; border-radius: 5px;
@@ -1113,3 +1114,12 @@ body.mode-reports #file-upload-btn { display: none; }
   height: 0; margin: 6px 12px 6px 24px;
   border-top: 1px solid #21262d;
 }
+
+/* 项目设置弹窗：内容比普通表单宽，Agent 行和定时任务卡片需要横向空间 */
+.project-settings-modal { width: min(880px, calc(94vw)); max-width: min(94vw, 880px); }
+.project-settings-body .view-form { padding: 0; }
+.project-settings-body .view-form > .muted { margin-bottom: 8px; }
+.project-settings-modal .form-actions { margin-top: 18px; padding-top: 14px; border-top: 1px solid #21262d; }
+
+/* 项目设置是纵向表单，按钮左对齐更自然（和第三栏里的旧布局一致） */
+.project-settings-form .form-actions { justify-content: flex-start; }
