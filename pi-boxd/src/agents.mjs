@@ -71,7 +71,7 @@ export function ensureSkillReadTool(resolvedTools, skillCount) {
 /** 解析 .md 的 frontmatter + 正文。frontmatter：model / tools / mcps / skills / agents / locked */
 export function parseAgentDef(md) {
   const m = md.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---(?:\r?\n)?([\s\S]*)$/);
-  if (!m) return { model: null, tools: null, mcps: null, skills: null, agents: null, instructions: md.trim() };
+  if (!m) return { model: null, tools: null, mcps: null, skills: null, agents: null, icon: null, instructions: md.trim() };
   const fm = {};
   for (const line of m[1].split("\n")) {
     const kv = line.match(/^(\w+):\s*(.+)$/);
@@ -81,12 +81,14 @@ export function parseAgentDef(md) {
     const a = s?.match(/\[([^\]]*)\]/);
     return a ? a[1].split(",").map((x) => x.trim()).filter(Boolean) : null;
   };
-  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), skills: arr(fm.skills), agents: arr(fm.agents), locked: /^true$/i.test(fm.locked ?? ""), instructions: m[2].trim() };
+  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), skills: arr(fm.skills), agents: arr(fm.agents), locked: /^true$/i.test(fm.locked ?? ""), icon: fm.icon || null, instructions: m[2].trim() };
 }
 
-/** 序列化回 .md（保存到文件） */
-export function serializeAgentDef({ model: m, tools, mcps, skills, agents, locked, instructions }) {
+/** 序列化回 .md（保存到文件）
+ * icon 是纯展示用的 emoji，放在 frontmatter 首行便于人工阅读与修改。 */
+export function serializeAgentDef({ model: m, tools, mcps, skills, agents, locked, icon, instructions }) {
   const fm = [];
+  if (icon) fm.push(`icon: ${icon}`);
   if (m) fm.push(`model: ${m}`);
   // 空数组也要落盘，否则会被解释成 null（继承全部默认工具）。
   if (tools !== null && tools !== undefined) fm.push(`tools: [${tools.join(", ")}]`);
@@ -143,6 +145,7 @@ async function listAgentsInDir(dir, scope, projectName) {
       mcps: def.mcps ?? null,
       skills: def.skills ?? null,
       locked: !!def.locked,
+      icon: def.icon ?? null,
       instructions: def.instructions ?? "",
     });
   }
@@ -218,10 +221,11 @@ export async function loadAssistant(projectName) {
       mcps: def.mcps,
       skills: def.skills ?? null,
       agents: def.agents ?? [],
+      icon: def.icon ?? null,
       instructions: def.instructions,
     };
   } catch {
-    return { model: null, tools: null, mcps: null, skills: null, agents: [], instructions: "" };
+    return { model: null, tools: null, mcps: null, skills: null, agents: [], icon: null, instructions: "" };
   }
 }
 
@@ -310,11 +314,17 @@ export function agentFilePath(projectName, agentName, scope) {
   return join(PROJECTS_DIR, projectName, ".pi", "agents", `${agentName}.md`);
 }
 
-/** 保存 agent 定义到文件 */
+/** 保存 agent 定义到文件。未传 icon 时保留文件里已有的图标，避免在编辑器里改配置时把图标冲掉。 */
 export async function saveAgentFile(projectName, name, scope, def) {
   const file = agentFilePath(projectName, name, scope);
+  let icon = def.icon;
+  if (icon === undefined) {
+    icon = await readFile(file, "utf-8")
+      .then((md) => parseAgentDef(md).icon)
+      .catch(() => null);
+  }
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, serializeAgentDef(def), "utf-8");
+  await writeFile(file, serializeAgentDef({ ...def, icon }), "utf-8");
   return file;
 }
 
@@ -370,7 +380,93 @@ export async function saveAssistantFile(projectName, def, { force = false } = {}
   const file = projectName === META_PROJECT
     ? join(META_DIR, "assistant.md")
     : join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
+  // 未传 icon 时保留现有图标，避免在助理编辑器里改模型/工具时把图标冲掉。
+  let icon = def.icon;
+  if (icon === undefined) {
+    icon = await readFile(file, "utf-8")
+      .then((md) => parseAgentDef(md).icon)
+      .catch(() => null);
+  }
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, serializeAgentDef(def), "utf-8");
+  await writeFile(file, serializeAgentDef({ ...def, icon }), "utf-8");
   return file;
+}
+
+// ─── 实体图标（项目 / 助理 / 子 Agent） ──────────────────────────────
+// 图标是纯展示用的 emoji：项目存 <project>/.pi/project.json，助理与子 Agent
+// 存各自 .md 的 frontmatter。元项目图标固定，不提供读写入口。
+const ICON_MAX_CODE_POINTS = 8;
+
+/** 校验并规范化 emoji 图标。返回 null 表示“恢复默认”（删除自定义）。 */
+export function normalizeIcon(value) {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).replace(/[\r\n\t]/g, "").trim();
+  if (!raw) return null;
+  const points = Array.from(raw);
+  if (points.length > ICON_MAX_CODE_POINTS) {
+    throw new Error(`图标最多 ${ICON_MAX_CODE_POINTS} 个字符`);
+  }
+  return raw;
+}
+
+function projectMetaPath(projectName) {
+  return join(PROJECTS_DIR, projectName, ".pi", "project.json");
+}
+
+/** 读项目图标；无自定义时返回 null（前端回落到 📁）。 */
+export async function loadProjectIcon(projectName) {
+  if (projectName === META_PROJECT) return null;
+  try {
+    const meta = JSON.parse(await readFile(projectMetaPath(projectName), "utf-8"));
+    return normalizeIcon(meta?.icon) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 保存项目图标；null 表示删除自定义图标。 */
+export async function saveProjectIcon(projectName, icon) {
+  if (projectName === META_PROJECT) {
+    throw new Error("元项目图标固定，不可修改");
+  }
+  const file = projectMetaPath(projectName);
+  const normalized = normalizeIcon(icon);
+  if (normalized === null) {
+    await unlink(file).catch(() => {});
+    return null;
+  }
+  let meta = {};
+  try {
+    meta = JSON.parse(await readFile(file, "utf-8")) ?? {};
+  } catch {
+    meta = {};
+  }
+  meta.icon = normalized;
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(meta, null, 2)}\n`, "utf-8");
+  return normalized;
+}
+
+/** 只改助理图标：原地重写 frontmatter，其余字段（模型/工具/提示词）原样保留。
+ * 单独提供而不复用 saveAssistantFile，是为了避免「改个图标」也要经过
+ * skills/tools 校验链，或因为前端拿着旧快照而把助理配置写回旧版本。 */
+export async function setAssistantIcon(projectName, icon) {
+  if (projectName === META_PROJECT) throw new Error("元项目图标固定，不可修改");
+  const file = join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
+  const def = await readFile(file, "utf-8")
+    .then((md) => parseAgentDef(md))
+    .catch(() => ({ model: null, tools: null, mcps: null, skills: null, agents: null, instructions: "" }));
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, serializeAgentDef({ ...def, icon: normalizeIcon(icon) }), "utf-8");
+  return normalizeIcon(icon);
+}
+
+/** 只改子 Agent 图标；同理保留其余 frontmatter 字段。 */
+export async function setAgentIcon(projectName, name, scope, icon) {
+  if (scope === "meta") throw new Error("元项目子 agent 图标固定，不可修改");
+  const file = agentFilePath(projectName, name, scope);
+  const def = await readFile(file, "utf-8").then((md) => parseAgentDef(md)).catch(() => null);
+  if (!def) throw new Error(`Agent 定义不存在：${name}`);
+  await writeFile(file, serializeAgentDef({ ...def, icon: normalizeIcon(icon) }), "utf-8");
+  return normalizeIcon(icon);
 }

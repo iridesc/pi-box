@@ -19,6 +19,7 @@ import {
   listGlobalAgents,
   listMetaAgents,
   loadAssistant,
+  loadProjectIcon,
   loadEnabledAgentDef,
   assistantInstructions,
   resolveAgentModel,
@@ -355,8 +356,11 @@ export async function boxSnapshot(harness) {
   const assistantByProject = {};
   const schedulesByProject = {};
   const agentsStatus = {}; // { [project]: { [name]: { status, conversationId } } }
+  const projectIcons = {}; // { [project]: emoji } —— 只有自定义过的项目才有键
   for (const p of projects) {
     agentsByProject[p] = await listAgents(p);
+    const icon = await loadProjectIcon(p);
+    if (icon) projectIcons[p] = icon;
     // 助理授权页的完整 agent 目录（含全局候选）只在打开编辑器时需要，
     // 改由 GET /api/agents/catalog 按需获取，不再随每次快照推送。
     assistantByProject[p] = await loadAssistant(p);
@@ -414,6 +418,7 @@ export async function boxSnapshot(harness) {
     hasKey: getHasKey(),
     projects,
     agentsByProject,
+    projectIcons,
     globalAgents: await listGlobalAgents(),
     metaProject: META_PROJECT,
     metaDir: META_DIR,

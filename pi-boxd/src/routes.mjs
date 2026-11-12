@@ -8,7 +8,7 @@ import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, res
 import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR, WEB_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, agentFilePath, ensureSkillReadTool } from "./agents.mjs";
+import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, agentFilePath, ensureSkillReadTool, loadProjectIcon, saveProjectIcon, setAssistantIcon, setAgentIcon, normalizeIcon } from "./agents.mjs";
 import { createRoleConversation, renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
@@ -369,6 +369,77 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
       },
     },
     // 项目重命名：目录与所有相关会话 cwd 一起更新
+    // 统一实体图标接口：kind=project|assistant|agent，icon=null 表示恢复默认。
+    // 只改图标字段，不回传其余配置，避开完整保存链路的校验与旧快照覆盖风险。
+    "/api/entities/icon": {
+      method: "POST",
+      async handler(req, res) {
+        const { kind, project, name, scope = "project", icon } = await readBody(req);
+        try {
+          let saved;
+          if (kind === "project") {
+            if (!project || !(await listProjects()).includes(project)) {
+              res.writeHead(404, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ error: `项目 "${project}" 不存在` }));
+            }
+            saved = await saveProjectIcon(project, icon ?? null);
+          } else if (kind === "assistant") {
+            if (!project) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ error: "缺少 project 参数" }));
+            }
+            saved = await setAssistantIcon(project, icon ?? null);
+          } else if (kind === "agent") {
+            if (!name) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ error: "缺少 name 参数" }));
+            }
+            saved = await setAgentIcon(project, name, scope, icon ?? null);
+          } else {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "kind 只能是 project / assistant / agent" }));
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, kind, project: project ?? null, name: name ?? null, icon: saved }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    // 项目自定义图标（emoji）；icon=null 表示恢复默认 📁
+    "/api/projects/icon": {
+      methods: ["GET", "POST"],
+      async handler(req, res) {
+        if (req.method === "GET") {
+          const project = queryOf(req).get("project");
+          if (!project) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "缺少 project 参数" }));
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ project, icon: await loadProjectIcon(project) }));
+          return;
+        }
+        const { project, icon } = await readBody(req);
+        if (!project) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "缺少 project 参数" }));
+        }
+        if (!(await listProjects()).includes(project)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: `项目 "${project}" 不存在` }));
+        }
+        try {
+          const saved = await saveProjectIcon(project, icon ?? null);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, project, icon: saved }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
     "/api/projects/rename": {
       method: "POST",
       async handler(req, res) {
@@ -644,7 +715,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           res.end(JSON.stringify({ project, agents: await listAgents(project) }));
           return;
         }
-        const { project, name, oldName, scope = "project", model: m, tools, mcps, skills, instructions } = await readBody(req);
+        const { project, name, oldName, scope = "project", model: m, tools, mcps, skills, instructions, icon } = await readBody(req);
         if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
@@ -702,6 +773,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
             tools,
             mcps: Array.isArray(mcps) ? mcps : [],
             skills: Array.isArray(skills) ? skills : null,
+            icon: icon === undefined ? undefined : normalizeIcon(icon),
             instructions,
           });
           await syncAfterConfigChange(harness, { scope, projectName: project, agentName: name });
@@ -790,7 +862,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           res.end(JSON.stringify({ project, assistant: await loadAssistant(project) }));
           return;
         }
-        const { project, model: m, tools, mcps, skills, agents, instructions } = await readBody(req);
+        const { project, model: m, tools, mcps, skills, agents, instructions, icon } = await readBody(req);
         if (!project) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "缺少 project" }));
@@ -819,6 +891,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
             mcps,
             skills: Array.isArray(skills) ? skills : null,
             agents: selectedGlobals,
+            icon: icon === undefined ? undefined : normalizeIcon(icon),
             instructions,
           });
           await syncAfterConfigChange(harness, { scope: "project", projectName: project, agentName: null });

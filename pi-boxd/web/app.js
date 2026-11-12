@@ -331,7 +331,16 @@ function renderTree() {
       render();
     };
     row.appendChild(arrow);
-    row.appendChild(el("span", "tree-label", isMeta ? `🔧 ${proj}（元项目）` : `📁 ${proj}`));
+    const projIcon = iconButton(iconOf("project", proj), isMeta ? "元项目图标固定" : "点击修改图标", () => {
+      if (isMeta) return;
+      openIconPicker({
+        title: `项目图标 · ${proj}`,
+        current: state?.projectIcons?.[proj] ?? null,
+        onPick: (icon) => saveEntityIcon({ kind: "project", project: proj, icon }),
+      });
+    }, isMeta ? "entity-icon-fixed" : "entity-icon-project");
+    row.appendChild(projIcon);
+    row.appendChild(el("span", "tree-label", isMeta ? `${proj}（元项目）` : proj));
     if (!isMeta) {
       const projectSettings = el("button", "tree-settings", "⚙");
       projectSettings.type = "button";
@@ -357,7 +366,16 @@ function renderTree() {
       || (selectedConversation?.project === proj && selectedConversation.actorType === "assistant");
     if (aSel) aNode.classList.add("selected");
     aNode.appendChild(el("span", "tree-arrow", ""));
-    aNode.appendChild(el("span", "tree-label", "🤖 助理"));
+    const asstIcon = iconButton(iconOf("assistant", proj), isMeta ? "元项目助理图标固定" : "点击修改图标", () => {
+      if (isMeta) return;
+      openIconPicker({
+        title: `助理图标 · ${proj}`,
+        current: state?.assistantByProject?.[proj]?.icon ?? null,
+        onPick: (icon) => saveEntityIcon({ kind: "assistant", project: proj, icon }),
+      });
+    }, isMeta ? "entity-icon-fixed" : "entity-icon-assistant");
+    aNode.appendChild(asstIcon);
+    aNode.appendChild(el("span", "tree-label", "助理"));
     const assistantSettings = el("button", "tree-settings", "⚙");
     assistantSettings.type = "button";
     assistantSettings.title = "助理设置";
@@ -418,8 +436,21 @@ function renderTree() {
         || (selectedConversation?.project === proj && selectedConversation.actorType === "agent" && selectedConversation.actorName === a.name);
       if (isSel) n.classList.add("selected");
       n.appendChild(el("span", "tree-arrow", ""));
-      const avatar = el("span", `agent-avatar agent-avatar-${a.scope}`, "🤖");
-      avatar.title = a.scope === "global" ? "全局 Agent" : a.scope === "meta" ? "元项目 Agent" : "项目 Agent";
+      const avatarText = a.icon || DEFAULT_ICONS.agent;
+      const scopeLabel = a.scope === "global" ? "全局 Agent" : a.scope === "meta" ? "元项目 Agent" : "项目 Agent";
+      const avatar = a.scope === "meta"
+        ? (() => {
+            const s = el("span", `agent-avatar agent-avatar-${a.scope}`, avatarText);
+            s.title = `${scopeLabel}（图标固定）`;
+            return s;
+          })()
+        : iconButton(avatarText, `${scopeLabel} · 点击修改图标`, () => {
+            openIconPicker({
+              title: `Agent 图标 · ${a.name}`,
+              current: a.icon ?? null,
+              onPick: (icon) => saveEntityIcon({ kind: "agent", project: proj, name: a.name, scope: a.scope, icon }),
+            });
+          }, `agent-avatar agent-avatar-${a.scope} entity-icon-avatar`);
       n.appendChild(avatar);
       n.appendChild(el("span", "tree-label", a.name));
 
@@ -456,6 +487,148 @@ function renderTree() {
     }
 
   }
+}
+
+// ─── 实体图标（emoji，可自定义） ───────────────────────────────────────────
+// 项目 / 助理 / 子 Agent 的图标都是 emoji，默认值分别为 📁 / 🤖 / 🤖。
+// 自定义不落库、不写全局配置：项目存 <project>/.pi/project.json，助理与子 Agent
+// 存各自 .md 的 frontmatter，所以换机器、git 备份都能带走。
+const DEFAULT_ICONS = { project: "📁", meta: "🔧", assistant: "🤖", agent: "🤖" };
+const ICON_EMOJI_GROUPS = [
+  ["常用", ["📁", "📂", "🗂️", "📦", "🗃️", "🎯", "🚀", "🔧", "⚙️", "💡", "🔥", "⭐", "✨", "🧩", "🛠️", "📌", "🔖", "🏷️"]],
+  ["角色", ["🤖", "🧑‍💻", "🧑‍🔬", "🕵️", "🎓", "👷", "🧙", "🧑‍🍳", "👨‍💼", "🐱", "🦊", "🐧", "🐳", "🦀", "🐍", "🐹"]],
+  ["物件", ["📄", "📝", "📊", "📈", "📜", "🗒️", "🔒", "🔑", "🧪", "🧰", "📡", "🖥️", "⌨️", "🗄️", "🧭", "🔬"]],
+  ["符号", ["✅", "❌", "⚠️", "❓", "💠", "🔷", "🔶", "🟢", "🟡", "🔴", "🟣", "⚡", "♻️", "🔁", "⏱️", "🎨"]],
+];
+const ICON_MAX_POINTS = 8;
+
+/** 读取实体图标：自定义值优先，否则回落到默认 emoji。 */
+function iconOf(kind, key) {
+  if (kind === "project") {
+    if (key === state?.metaProject) return DEFAULT_ICONS.meta;
+    return state?.projectIcons?.[key] || DEFAULT_ICONS.project;
+  }
+  if (kind === "assistant") return state?.assistantByProject?.[key]?.icon || DEFAULT_ICONS.assistant;
+  return DEFAULT_ICONS.agent;
+}
+
+/** 保存实体图标（icon=null → 恢复默认）。成功后静默刷新快照。 */
+async function saveEntityIcon({ kind, project, name, scope, icon }) {
+  const body = { kind, icon };
+  if (project !== undefined) body.project = project;
+  if (name !== undefined) body.name = name;
+  if (scope !== undefined) body.scope = scope;
+  const res = await fetch("/api/entities/icon", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "保存图标失败");
+  // 本地立即生效，不必等下一帧 SSE（后端快照会随后确认）。
+  if (kind === "project") {
+    state.projectIcons = state.projectIcons ?? {};
+    if (data.icon) state.projectIcons[project] = data.icon;
+    else delete state.projectIcons[project];
+  } else if (kind === "assistant" && state.assistantByProject?.[project]) {
+    state.assistantByProject[project].icon = data.icon ?? null;
+  } else if (kind === "agent") {
+    const list = agentsCache?.[project];
+    const target = list?.find((agent) => agent.name === name && agent.scope === (scope ?? "project"));
+    if (target) target.icon = data.icon ?? null;
+  }
+}
+
+/** emoji 选择器弹层。onPick(emoji|null) 由调用方决定保存到哪个实体。 */
+function openIconPicker({ title, current, onPick }) {
+  const overlay = el("div", "drawer-submodal-backdrop icon-picker-backdrop");
+  const modal = el("div", "drawer-submodal icon-picker-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.appendChild(el("h3", "", title || "选择图标"));
+
+  // 自由输入：可直接粘贴任意 emoji（不限于下方网格）。
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "icon-picker-input";
+  input.placeholder = "直接输入或粘贴 emoji，回车确认";
+  input.maxLength = ICON_MAX_POINTS;
+  input.value = current ?? "";
+  modal.appendChild(input);
+
+  const gridWrap = el("div", "icon-picker-groups");
+  for (const [label, list] of ICON_EMOJI_GROUPS) {
+    gridWrap.appendChild(el("div", "icon-picker-group-label", label));
+    const grid = el("div", "icon-picker-grid");
+    for (const emoji of list) {
+      const btn = el("button", "icon-picker-cell", emoji);
+      btn.type = "button";
+      btn.title = emoji;
+      if (emoji === current) btn.classList.add("current");
+      btn.onclick = () => commit(emoji);
+      grid.appendChild(btn);
+    }
+    gridWrap.appendChild(grid);
+  }
+  modal.appendChild(gridWrap);
+
+  const actions = el("div", "form-actions");
+  const reset = el("button", "btn-secondary", "恢复默认");
+  reset.type = "button";
+  reset.onclick = () => commit(null);
+  const close = el("button", "btn-secondary", "关闭");
+  close.type = "button";
+  close.onclick = () => overlay.remove();
+  actions.append(reset, close);
+  modal.appendChild(actions);
+
+  const commit = async (emoji) => {
+    const value = emoji === null ? null : Array.from(String(emoji).trim()).slice(0, ICON_MAX_POINTS).join("") || null;
+    overlay.remove();
+    try {
+      await onPick(value);
+      render();
+    } catch (error) {
+      alert(error.message || "保存图标失败");
+    }
+  };
+
+  input.onkeydown = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const value = input.value.trim();
+      if (value) commit(value);
+    } else if (event.key === "Escape") {
+      overlay.remove();
+    }
+  };
+
+  overlay.onclick = (event) => {
+    if (event.target === overlay) overlay.remove();
+  };
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  input.focus();
+  input.select();
+}
+
+/** 取 actor（助理 / 子 Agent）的显示图标，用于会话区标题与列表头像。 */
+function actorIcon(project, actorType, actorName) {
+  if (actorType === "assistant") return iconOf("assistant", project);
+  const found = (agentsCache?.[project] ?? []).find((agent) => agent.name === actorName);
+  return found?.icon || DEFAULT_ICONS.agent;
+}
+
+/** 可点击的图标元素：hover 显示可编辑提示。 */
+function iconButton(text, title, onClick, className = "") {
+  const btn = el("button", `entity-icon ${className}`.trim(), text);
+  btn.type = "button";
+  btn.title = title;
+  btn.onclick = (event) => {
+    event.stopPropagation();
+    onClick();
+  };
+  return btn;
 }
 
 // ─── 项目文件浏览（第二栏：文件树 / 第四栏：预览） ─────────────────────────
@@ -1046,7 +1219,7 @@ function renderSessions() {
     return;
   }
   const heading = el("div", "session-context");
-  heading.appendChild(el("strong", "", actor.actorType === "assistant" ? "🤖 助理" : `🤖 ${actor.actorName}`));
+  heading.appendChild(el("strong", "", `${actorIcon(actor.project, actor.actorType, actor.actorName)} ${actor.actorType === "assistant" ? "助理" : actor.actorName}`));
   heading.appendChild(el("span", "", actor.project));
   body.replaceChildren(heading);
   const conversations = (state?.conversations ?? [])
@@ -1683,7 +1856,7 @@ function renderProjectForm(view) {
     return;
   }
   const head = el("div", "view-head");
-  head.appendChild(el("span", "view-title", `📁 项目设置 · ${oldName}`));
+  head.appendChild(el("span", "view-title", `${iconOf("project", oldName)} 项目设置 · ${oldName}`));
   view.appendChild(head);
 
   const form = el("div", "view-form");
@@ -2183,9 +2356,10 @@ function renderConversation(view) {
   }
   const isAgentView = conv.actorType === "agent";
   const displayTitle = conversationDisplayTitle(conv);
+  const convIcon = actorIcon(conv.project, conv.actorType, conv.actorName);
   const title = isAgentView
-    ? `🤖 子 Agent · ${displayTitle}（#${conv.id}）`
-    : `🤖 ${displayTitle}（#${conv.id}）`;
+    ? `${convIcon} 子 Agent · ${displayTitle}（#${conv.id}）`
+    : `${convIcon} ${displayTitle}（#${conv.id}）`;
   const sub = `${conv.project} · ${sessionSourceLabel(conv)}`;
   // 输入框若已挂在视图里，新内容插到它前面，避免 append 移动节点导致失焦。
   const cachedComposer = composerCache.get(String(conv.id));
@@ -2804,7 +2978,17 @@ async function renderDrawerAgents(panel) {
     const row = el("div", "drawer-row");
     const left = el("div", "drawer-row-main");
     const rowTitle = el("div", "drawer-row-title");
-    rowTitle.appendChild(el("span", "agent-avatar agent-avatar-global", "🤖"));
+    // 全局 Agent 被多个项目共享，改一次所有项目都跟着变，标题里已标注「全局」。
+    rowTitle.appendChild(iconButton(agent.icon || DEFAULT_ICONS.agent, "全局 Agent · 点击修改图标", () => {
+      openIconPicker({
+        title: `全局 Agent 图标 · ${agent.name}`,
+        current: agent.icon ?? null,
+        onPick: async (icon) => {
+          await saveEntityIcon({ kind: "agent", name: agent.name, scope: "global", icon });
+          await renderDrawerAgents(panel);
+        },
+      });
+    }, "agent-avatar agent-avatar-global entity-icon-avatar"));
     rowTitle.appendChild(el("span", "", agent.name));
     left.appendChild(rowTitle);
     left.appendChild(el("div", "muted drawer-row-desc", agent.instructions || "（无描述）"));
