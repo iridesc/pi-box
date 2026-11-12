@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { bootRuntime, closeScheduler, context, harness, mcpBridge, startCleanupScheduler } from "./runtime.mjs";
 import { installBasicAuth } from "./auth.mjs";
 import { installStaticOptimizer } from "./static.mjs";
+import { installReportPages, isPublicReportRequest } from "./report-pages.mjs";
 
 // 初始化 model（用 config.json 或回退到 faux）
 await initProvider();
@@ -36,7 +37,13 @@ const server = createWebServer({
 // 静态资源优化：gzip + ETag + 缓存头。装在认证内侧，认证仍然覆盖静态资源。
 installStaticOptimizer(server, { webDir: WEB_DIR });
 
-const auth = installBasicAuth(server);
+// 报告阅读页（/reports）与公开报告（/r/<slug>）。
+// 必须在 basicAuth 之前安装，否则豁免后的请求还得再穿过一层。
+installReportPages(server, { webDir: WEB_DIR });
+
+// 公开报告（/r/*）豁免 Basic Auth：这是「拿到链接就能看」的入口。
+// 只豁免 /r 前缀，且 slug 有效性由 report-pages 自己校验。
+const auth = installBasicAuth(server, { exempt: isPublicReportRequest });
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`pi-boxd 已启动: http://localhost:${PORT}`);

@@ -17,6 +17,19 @@ import { readLogTail, scheduleLogDir, scheduleLogRoot } from "./schedule-log.mjs
 import { harness as runtimeHarness, context as runtimeContext, mcpBridge as runtimeMcpBridge, getMaintenance, isMaintenance, restartRuntime } from "./runtime.mjs";
 import { cleanupStatus, pruneAllLogs, saveCleanupConfig } from "./cleanup.mjs";
 import { listDirectory, readFilePreview, resolveProjectPath, sendProjectFile, uploadProjectFile } from "./files.mjs";
+import {
+  createGroup as createReportGroup,
+  deleteGroup as deleteReportGroup,
+  deleteReport as deleteReportItem,
+  listGroups as listReportGroups,
+  listReports as listReportItems,
+  loadGroupMeta as loadReportGroup,
+  readReport as readReportItem,
+  scanSensitive as scanReportSensitive,
+  setGroupVisibility as setReportVisibility,
+  updateGroup as updateReportGroup,
+} from "./reports.mjs";
+import { sendReportContent } from "./report-pages.mjs";
 
 const NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const AGENT_NAME_RE = /^[\p{L}\p{N}_-]+$/u;
@@ -715,7 +728,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           res.end(JSON.stringify({ project, agents: await listAgents(project) }));
           return;
         }
-        const { project, name, oldName, scope = "project", model: m, tools, mcps, skills, instructions, icon } = await readBody(req);
+        const { project, name, oldName, scope = "project", model: m, tools, mcps, skills, reports, instructions, icon } = await readBody(req);
         if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
@@ -768,11 +781,24 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
             await renameAgentFile(project, oldName, name, scope);
             await renameSubagentRecords(harness, { scope, projectName: project, oldName, newName: name });
           }
+          // 报告组绑定：必须是已存在的组，避免 agent 写了拼错的 slug 才发现。
+          let resolvedReports = null;
+          if (Array.isArray(reports)) {
+            const known = new Set((await listReportGroups(project)).map((group) => group.slug));
+            const unknown = reports.filter((slug) => !known.has(slug));
+            if (unknown.length > 0) {
+              throw new Error(`报告组不存在：${unknown.join(", ")}（请先在左栏「报告」里创建）`);
+            }
+            resolvedReports = reports;
+          } else if (reports === null) {
+            resolvedReports = null;
+          }
           const file = await saveAgentFile(project, name, scope, {
             model: m,
             tools,
             mcps: Array.isArray(mcps) ? mcps : [],
             skills: Array.isArray(skills) ? skills : null,
+            reports: resolvedReports,
             icon: icon === undefined ? undefined : normalizeIcon(icon),
             instructions,
           });
@@ -862,7 +888,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           res.end(JSON.stringify({ project, assistant: await loadAssistant(project) }));
           return;
         }
-        const { project, model: m, tools, mcps, skills, agents, instructions, icon } = await readBody(req);
+        const { project, model: m, tools, mcps, skills, agents, reports, instructions, icon } = await readBody(req);
         if (!project) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "缺少 project" }));
@@ -885,12 +911,23 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
             throw new Error(`Skill 定义非法：${invalid.map((item) => `${item.name}（${item.error}）`).join("; ")}`);
           }
           ensureSkillReadTool(resolveAssistantTools(tools, mcps), resolvedSkills.length);
+          // 报告组绑定：助理也能写报告；必须是已存在的组。
+          let resolvedReports = null;
+          if (Array.isArray(reports)) {
+            const known = new Set((await listReportGroups(project)).map((group) => group.slug));
+            const unknown = reports.filter((slug) => !known.has(slug));
+            if (unknown.length > 0) {
+              throw new Error(`报告组不存在：${unknown.join(", ")}（请先在左栏「报告」里创建）`);
+            }
+            resolvedReports = reports;
+          }
           const file = await saveAssistantFile(project, {
             model: m,
             tools,
             mcps,
             skills: Array.isArray(skills) ? skills : null,
             agents: selectedGlobals,
+            reports: resolvedReports,
             icon: icon === undefined ? undefined : normalizeIcon(icon),
             instructions,
           });
@@ -1086,6 +1123,132 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
         } catch (error) {
           if (error?.code === "PAYLOAD_TOO_LARGE") return sendJson(res, 413, { error: "图标不能超过 512KB" });
           return sendJson(res, error?.status ?? 400, { error: String(error?.message ?? error) });
+        }
+      },
+    },
+    // ── 报告组 / 报告 ──────────────────────────────────────────────────
+    // 路径固定 + query 传参（extraRoutes 是精确匹配）。所有写操作都只改文件，
+    // 可见性切换额外要求先调 /api/reports/sensitive 让人确认（前端负责）。
+    "/api/reports/groups": {
+      methods: ["GET", "POST"],
+      async handler(req, res) {
+        try {
+          if (req.method === "GET") {
+            const project = queryOf(req).get("project");
+            return sendJson(res, 200, { groups: await listReportGroups(project) });
+          }
+          const body = await readBody(req);
+          const group = await createReportGroup(body.project, {
+            name: body.name,
+            slug: body.slug,
+            retentionDays: body.retentionDays,
+          });
+          return sendJson(res, 200, { group });
+        } catch (error) {
+          return sendJson(res, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      },
+    },
+    "/api/reports/group": {
+      methods: ["GET", "PATCH", "DELETE"],
+      async handler(req, res) {
+        try {
+          const query = queryOf(req);
+          const project = query.get("project");
+          const group = query.get("group");
+          if (req.method === "GET") {
+            const meta = await loadReportGroup(project, group);
+            if (!meta) return sendJson(res, 404, { error: `报告组不存在：${group}` });
+            return sendJson(res, 200, { group: meta });
+          }
+          if (req.method === "PATCH") {
+            const body = await readBody(req);
+            const updated = await updateReportGroup(project, group, {
+              name: body.name,
+              retentionDays: body.retentionDays,
+            });
+            return sendJson(res, 200, { group: updated });
+          }
+          const result = await deleteReportGroup(project, group);
+          return sendJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          return sendJson(res, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      },
+    },
+    "/api/reports/visibility": {
+      method: "POST",
+      async handler(req, res) {
+        try {
+          const body = await readBody(req);
+          const group = await setReportVisibility(body.project, body.group, body.visibility);
+          return sendJson(res, 200, { group });
+        } catch (error) {
+          return sendJson(res, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      },
+    },
+    "/api/reports/sensitive": {
+      method: "GET",
+      async handler(req, res) {
+        try {
+          const query = queryOf(req);
+          const report = await scanReportSensitive(query.get("project"), query.get("group"));
+          return sendJson(res, 200, report);
+        } catch (error) {
+          return sendJson(res, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      },
+    },
+    "/api/reports/items": {
+      method: "GET",
+      async handler(req, res) {
+        try {
+          const query = queryOf(req);
+          const payload = await listReportItems(query.get("project"), query.get("group"));
+          return sendJson(res, 200, payload);
+        } catch (error) {
+          return sendJson(res, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      },
+    },
+    "/api/reports/item": {
+      methods: ["GET", "DELETE"],
+      async handler(req, res) {
+        try {
+          const query = queryOf(req);
+          const project = query.get("project");
+          const group = query.get("group");
+          const stamp = query.get("stamp");
+          if (req.method === "GET") {
+            // 不传 stamp 时取最新一份，阅读页只需要一次请求。
+            let target = stamp;
+            if (!target) {
+              const listed = await listReportItems(project, group);
+              target = listed.reports[0]?.stamp ?? null;
+              if (!target) throw Object.assign(new Error("这个报告组还没有任何报告"), { status: 404 });
+            }
+            return sendJson(res, 200, await readReportItem(project, group, target));
+          }
+          return sendJson(res, 200, await deleteReportItem(project, group, stamp));
+        } catch (error) {
+          return sendJson(res, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      },
+    },
+    "/api/reports/content": {
+      method: "GET",
+      async handler(req, res) {
+        try {
+          const query = queryOf(req);
+          await sendReportContent(res, {
+            project: query.get("project"),
+            group: query.get("group"),
+            stamp: query.get("stamp"),
+            method: req.method,
+          });
+        } catch (error) {
+          return sendJson(res, error?.status ?? 500, { error: String(error?.message ?? error) });
         }
       },
     },

@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { DATA_DIR, META_DIR, META_PROJECT, PROJECTS_DIR } from "./paths.mjs";
 import { listProjects } from "./agents.mjs";
 import { pruneScheduleLogs, scheduleLogDir } from "./schedule-log.mjs";
+import { pruneProjectReports } from "./reports.mjs";
 
 const CONFIG_PATH = join(DATA_DIR, "cleanup.json");
 const DAY_MS = 86_400_000;
@@ -241,10 +242,24 @@ export async function pruneAllLogs({ config, projects } = {}) {
     }
   }
 
+  // 报告清理：跟着日志同一个周期跑（保留期由每个报告组自己的 meta 决定，
+  // 默认 30 天、上限 365 天；每组最新一份永不删）。
+  let removedReports = 0;
+  for (const project of list) {
+    try {
+      const outcome = await pruneProjectReports(project);
+      removedReports += outcome.removed;
+      if (outcome.removed > 0) details.push({ project, kind: "reports", removed: outcome.removed });
+    } catch (error) {
+      console.warn(`[cleanup] 清理报告失败（${project}）：${error?.message ?? error}`);
+    }
+  }
+
   const summary = {
     at: startedAt.toISOString(),
     removedFiles: removed,
     freedBytes,
+    removedReports,
     details: details.slice(0, 50),
   };
   await recordCleanupRun("logs", summary);

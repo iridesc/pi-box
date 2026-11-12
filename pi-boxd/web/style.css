@@ -893,3 +893,156 @@ body.mode-files #new-conversation { display: none; }
   body.mode-files [data-mobile-panel="view"] { opacity: .35; pointer-events: none; }
 }
 .file-row.file-row-current { background: rgba(31, 111, 235, .08); }
+
+/* ═══ 报告阅读页（/reports 与公开 /r/<slug>） ═══════════════════════════════
+   独立全屏视图：顶部 bar + 正文（限宽 860px 居中）+ 右下角导航 FAB。
+   正文限宽是因为超过 ~100 字符/行读起来很累；右侧留白正好放 FAB。 */
+body.mode-report-view { background: #0d1117; overflow: hidden; }
+body.mode-report-view > *:not(.rp-shell) { display: none !important; }
+
+.rp-shell { position: fixed; inset: 0; display: flex; flex-direction: column; }
+
+.rp-top {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  height: 52px; padding: 0 16px; border-bottom: 1px solid #21262d; background: #0d1117;
+}
+.rp-back {
+  font-size: 12px; color: #8b949e; text-decoration: none; padding: 4px 9px;
+  border: 1px solid #30363d; border-radius: 5px; background: #161b22; white-space: nowrap;
+}
+.rp-back:hover { color: #58a6ff; border-color: #58a6ff; }
+.rp-crumb { font-size: 12.5px; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rp-crumb b { color: #c9d1d9; font-weight: 600; }
+.rp-meta { font-size: 11px; color: #6e7681; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rp-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.rp-tag {
+  font-size: 10px; padding: 2px 7px; border-radius: 4px;
+  background: rgba(139, 148, 158, .12); color: #8b949e; border: 1px solid #30363d;
+}
+.rp-tag-public { background: rgba(63, 185, 80, .15); color: #3fb950; border-color: rgba(63, 185, 80, .4); }
+.rp-btn {
+  font-size: 11px; padding: 4px 10px; border-radius: 5px; background: #21262d; color: #c9d1d9;
+  border: 1px solid #30363d; cursor: pointer; text-decoration: none; white-space: nowrap;
+}
+.rp-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+
+/* 正文：md 在 .rp-wrap 内滚动；html 交给 iframe 自己滚 */
+.rp-wrap { flex: 1 1 auto; overflow: auto; padding: 32px 0 80px; }
+/* html 报告放进白底「纸张」容器：报告若自己没写样式，黑字在深色界面里会看不见；
+   有自己样式的报告会覆盖白底，表现得和独立打开一致。 */
+.rp-wrap.rp-wrap-html { padding: 18px; overflow: hidden; }
+.rp-doc { max-width: 860px; margin: 0 auto; padding: 0 28px; }
+.rp-wrap-html .rp-doc {
+  max-width: 1100px; padding: 0; height: 100%; background: #fff;
+  border-radius: 8px; overflow: hidden; box-shadow: 0 6px 28px rgba(0, 0, 0, .45);
+}
+.rp-doc .markdown-body { font-size: 14.5px; line-height: 1.75; }
+.rp-html { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+.rp-loading { opacity: .45; transition: opacity .12s; }
+
+.rp-loading-text { color: #6e7681; font-size: 13px; padding: 40px 0; text-align: center; }
+.rp-error { padding: 60px 0; text-align: center; }
+.rp-error-title { font-size: 15px; color: #c9d1d9; font-weight: 600; margin-bottom: 8px; }
+.rp-error-body { font-size: 12.5px; color: #8b949e; }
+
+/* 右下角导航：不挡正文（正文限宽居中，右侧是真空白） */
+.rp-fab {
+  position: fixed; right: 22px; bottom: 22px; width: 46px; height: 46px; border-radius: 50%;
+  background: #161b22; border: 1px solid #30363d; color: #8b949e; font-size: 16px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .55); transition: .15s; z-index: 40;
+}
+.rp-fab:hover { color: #58a6ff; border-color: #58a6ff; transform: translateY(-1px); }
+.rp-fab .cnt {
+  position: absolute; bottom: -3px; right: -3px; background: #1f6feb; color: #fff;
+  font-size: 9px; line-height: 1; padding: 2px 4px; border-radius: 8px; font-weight: 600;
+}
+
+.rp-pop {
+  position: fixed; right: 22px; bottom: 78px; width: 310px; max-height: 58vh; z-index: 41;
+  display: flex; flex-direction: column; background: #161b22; border: 1px solid #30363d;
+  border-radius: 10px; box-shadow: 0 14px 44px rgba(0, 0, 0, .6); overflow: hidden;
+  opacity: 0; transform: translateY(8px) scale(.98); pointer-events: none; transition: .16s;
+}
+.rp-pop.on { opacity: 1; transform: none; pointer-events: auto; }
+.rp-pop-head { padding: 10px 12px 8px; border-bottom: 1px solid #21262d; }
+.rp-pop-title { font-size: 12px; font-weight: 600; color: #c9d1d9; }
+.rp-pop-sub { font-size: 10px; color: #6e7681; margin-top: 2px; }
+.rp-navrow { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #21262d; }
+.rp-navrow button {
+  flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 6px 9px; background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+  cursor: pointer; color: #c9d1d9; font-size: 11.5px; text-align: left;
+}
+.rp-navrow button:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+.rp-navrow button:disabled { opacity: .35; cursor: default; }
+.rp-navrow small { font-size: 9.5px; color: #6e7681; }
+.rp-list { overflow: auto; padding: 5px; }
+.rp-li {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-radius: 5px; cursor: pointer; font-size: 11.5px; color: #8b949e;
+}
+.rp-li:hover { background: #1f2937; color: #c9d1d9; }
+.rp-li.cur { background: rgba(31, 111, 235, .2); color: #c9d1d9; font-weight: 600; }
+.rp-li .dot { width: 5px; height: 5px; border-radius: 50%; background: #30363d; flex: 0 0 auto; }
+.rp-li.cur .dot { background: #58a6ff; }
+.rp-li .d { margin-left: auto; font-size: 9.5px; color: #6e7681; }
+
+@media (max-width: 720px) {
+  .rp-top { height: auto; min-height: 46px; padding: 8px 10px; flex-wrap: wrap; gap: 6px; }
+  .rp-meta { display: none; }
+  .rp-doc { padding: 0 14px; }
+  .rp-wrap { padding: 18px 0 90px; }
+  .rp-pop { right: 10px; left: 10px; width: auto; bottom: 72px; max-height: 62vh; }
+  .rp-fab { right: 12px; bottom: 12px; width: 42px; height: 42px; }
+}
+
+/* ═══ 左栏：报告组树 ══════════════════════════════════════════════════════ */
+.tree-report-group { cursor: pointer; }
+.tree-report-icon { flex: 0 0 auto; font-size: 11px; opacity: .85; }
+.tree-report-badge {
+  flex: 0 0 auto; font-size: 9px; padding: 0 4px; border-radius: 3px; margin-left: 4px;
+  background: rgba(63, 185, 80, .16); color: #3fb950; border: 1px solid rgba(63, 185, 80, .35);
+}
+.tree-report-count {
+  flex: 0 0 auto; font-size: 9.5px; color: #6e7681; margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.tree-report-item { cursor: pointer; }
+.tree-report-item:hover { background: #1f2937; }
+.tree-report-time {
+  flex: 1 1 auto; min-width: 0; font-size: 11px; color: #8b949e;
+  font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-report-format {
+  flex: 0 0 auto; font-size: 8.5px; color: #6e7681; letter-spacing: .04em;
+  border: 1px solid #21262d; border-radius: 3px; padding: 0 3px;
+}
+.tree-report-more {
+  font-size: 11px; color: #58a6ff; padding: 3px 6px 6px 32px; cursor: pointer;
+}
+.tree-report-more:hover { text-decoration: underline; }
+.tree-agent-empty.tree-level-3 { padding-left: 32px; }
+
+/* 报告组设置面板 */
+.report-group-modal { width: min(520px, calc(100vw - 40px)); }
+.report-slug-readonly {
+  flex: 1; font-size: 12px; color: #8b949e; font-family: ui-monospace, SFMono-Regular, monospace;
+  padding: 5px 8px; background: #0d1117; border: 1px solid #21262d; border-radius: 5px;
+}
+.report-visibility-row {
+  display: flex; align-items: center; gap: 10px; padding: 10px 0;
+  border-top: 1px solid #21262d; margin-top: 6px;
+}
+.report-visibility-state { flex: 1; font-size: 12px; color: #c9d1d9; }
+.report-public-link {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0 10px;
+}
+.report-public-link code {
+  flex: 1; font-size: 11px; color: #7ee787; background: #0d1117;
+  border: 1px solid #21262d; border-radius: 5px; padding: 5px 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.report-danger { color: #f85149 !important; border-color: rgba(248, 81, 73, .4) !important; }
+.report-danger:hover { background: rgba(248, 81, 73, .12) !important; }
+.form-hint { font-size: 10.5px; color: #6e7681; margin: -2px 0 8px; }

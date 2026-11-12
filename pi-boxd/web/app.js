@@ -25,6 +25,14 @@ let expandedProjects = loadExpandedProjects();
 let expandedProjectSchedules = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
 let schedulesCache = {}; // project -> schedule 列表
+
+// 报告组不在快照里（快照要瘦）：按需拉取 + 短 TTL 缓存。
+// 结构：project -> { at, groups }； `${project}/${group}` -> { at, reports }
+let reportGroupsCache = {};
+let reportItemsCache = {};
+const REPORT_CACHE_TTL = 15_000;
+// 展开的报告组（key = `${project}/${slug}`），只存内存，不需要跨刷新持久化。
+let expandedReportGroups = new Set();
 let scheduleRunsCache = {}; // project -> 最近运行记录
 const conversationDetailCache = new Map(); // conversation id -> 按需加载的完整 entries
 // 每个会话独立的输入框节点与草稿：SSE 全局刷新时复用节点，避免清空输入、打断输入法。
@@ -409,6 +417,98 @@ function renderTree() {
     if (selected?.type === "files" && selected.project === proj) filesNode.classList.add("selected");
     filesNode.onclick = () => openProjectFiles(proj);
     root.appendChild(filesNode);
+
+    // ── 报告组（按需加载，不进快照）─────────────────────────────────
+    const reportSep = el("div", "tree-sep");
+    reportSep.appendChild(el("span", "tree-sep-label", "报告"));
+    const addGroupBtn = el("button", "tree-sep-add", "＋");
+    addGroupBtn.type = "button";
+    addGroupBtn.title = "新建报告组";
+    addGroupBtn.setAttribute("aria-label", `在 ${proj} 中新建报告组`);
+    addGroupBtn.onclick = (event) => {
+      event.stopPropagation();
+      openReportGroupEditor({ project: proj });
+    };
+    reportSep.appendChild(addGroupBtn);
+    root.appendChild(reportSep);
+
+    const groupEntry = reportGroupsCache[proj];
+    if (!groupEntry) {
+      root.appendChild(el("div", "tree-agent-empty tree-level-2", "加载中…"));
+      loadReportGroups(proj);
+    } else if (groupEntry.groups.length === 0) {
+      root.appendChild(el("div", "tree-agent-empty tree-level-2", "暂无报告组"));
+    } else {
+      for (const group of groupEntry.groups) {
+        const groupKey = `${proj}/${group.slug}`;
+        const isOpen = expandedReportGroups.has(groupKey);
+        const groupRow = el("div", "tree-item tree-level-2 tree-report-group");
+        const groupArrow = el("span", "tree-arrow", isOpen ? "▼" : "▶");
+        groupArrow.onclick = (event) => {
+          event.stopPropagation();
+          if (isOpen) expandedReportGroups.delete(groupKey);
+          else expandedReportGroups.add(groupKey);
+          render();
+        };
+        groupRow.appendChild(groupArrow);
+        groupRow.appendChild(el("span", "tree-report-icon", "📊"));
+        groupRow.appendChild(el("span", "tree-label", group.name));
+        if (group.visibility === "public") {
+          const badge = el("span", "tree-report-badge", "公开");
+          badge.title = "公开：任何拿到链接的人都能看";
+          groupRow.appendChild(badge);
+        } else {
+          groupRow.appendChild(el("span", "tree-report-count", String(group.reportCount)));
+        }
+        const groupSettings = el("button", "tree-settings", "⚙");
+        groupSettings.type = "button";
+        groupSettings.title = "报告组设置（名称 / 可见性 / 保留期）";
+        groupSettings.setAttribute("aria-label", `配置报告组 ${group.name}`);
+        groupSettings.onclick = (event) => {
+          event.stopPropagation();
+          openReportGroupEditor({ project: proj, group });
+        };
+        groupRow.appendChild(groupSettings);
+        groupRow.onclick = () => {
+          if (isOpen) expandedReportGroups.delete(groupKey);
+          else expandedReportGroups.add(groupKey);
+          render();
+        };
+        root.appendChild(groupRow);
+
+        if (!isOpen) continue;
+        const itemEntry = reportItemsCache[groupKey];
+        if (!itemEntry) {
+          root.appendChild(el("div", "tree-agent-empty tree-level-3", "加载中…"));
+          loadReportItems(proj, group.slug);
+          continue;
+        }
+        if (itemEntry.reports.length === 0) {
+          root.appendChild(el("div", "tree-agent-empty tree-level-3", "还没有报告"));
+          continue;
+        }
+        for (const item of itemEntry.reports.slice(0, 5)) {
+          const line = el("div", "tree-item tree-level-3 tree-report-item");
+          line.appendChild(el("span", "tree-arrow", ""));
+          line.appendChild(el("span", "tree-report-time", reportTime(item.createdAt, false)));
+          line.appendChild(el("span", "tree-report-format", item.format === "html" ? "HTML" : "MD"));
+          line.title = `${item.title} · ${item.agent || "未知来源"}\n在新标签页打开`;
+          line.onclick = (event) => {
+            event.stopPropagation();
+            window.open(reportViewUrl(proj, group.slug, item.stamp), "_blank", "noopener");
+          };
+          root.appendChild(line);
+        }
+        if (itemEntry.reports.length > 5) {
+          const more = el("div", "tree-report-more tree-level-3", `查看全部 ${itemEntry.reports.length} 份 →`);
+          more.onclick = (event) => {
+            event.stopPropagation();
+            window.open(reportViewUrl(proj, group.slug, null), "_blank", "noopener");
+          };
+          root.appendChild(more);
+        }
+      }
+    }
 
     // 子 agent：直接挂在项目下，不再有折叠组（需求：随时看到圆点状态）
     const agents = agentsCache[proj] ?? [];
@@ -2588,6 +2688,9 @@ async function openAssistantEditor(proj) {
     disabledWhen: (choice) => choice.required === true,
     checkedWhen: (choice) => choice.required === true || selectedGlobals.has(choice.value),
   });
+  // 报告组绑定：助理也能写报告（对应 assistant.md 的 reports 字段）。
+  const selectedReports = new Set(asst.reports ?? []);
+  await appendReportBindingGroup(modal, { project: proj, selectedValues: selectedReports });
   modal.appendChild(el("div", "form-label", "提示词（instructions）"));
   const instructions = document.createElement("textarea");
   instructions.className = "cfg-textarea";
@@ -2627,6 +2730,7 @@ async function openAssistantEditor(proj) {
         mcps: [...selectedMcps],
         skills: [...selectedSkills],
         agents: [...selectedGlobals],
+        reports: [...selectedReports],
         instructions: prompt,
       }),
     });
@@ -3047,6 +3151,25 @@ async function renderDrawerAgents(panel) {
   }
 }
 
+/** 报告组多选（助理编辑器与 agent 编辑器共用）。拉不到组列表时给出引导文案，不阻塞编辑。 */
+async function appendReportBindingGroup(modal, { project, selectedValues }) {
+  let groups = [];
+  try {
+    const res = await fetch(`/api/reports/groups?${new URLSearchParams({ project })}`);
+    if (res.ok) groups = (await res.json()).groups ?? [];
+  } catch {
+    /* 报告接口故障不该挡住角色编辑 */
+  }
+  appendAgentCheckboxGroup(modal, {
+    title: "报告组",
+    description: groups.length
+      ? "勾选它可以写入的报告组。绑定后才有 report_publish / report_list / report_read / report_delete 工具；不勾选则不能写报告。可见性只能由人在左栏「报告」里调整。"
+      : "当前项目还没有报告组。先在左栏「报告」分组右侧 ＋ 新建一个，再回来勾选。",
+    choices: groups.map((group) => ({ value: group.slug, label: group.name, note: group.slug })),
+    selectedValues,
+  });
+}
+
 function appendAgentCheckboxGroup(modal, {
   title,
   description,
@@ -3194,6 +3317,12 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
     selectedValues: selectedMcps,
     disabledWhen: (choice) => choice.config.enabled === false,
   });
+  // 报告组绑定：勾选后 agent 才拿到 report_* 工具（对应 frontmatter 的 reports）。
+  // 全局 Agent 不绑定（它被复制进各项目使用，而报告组是项目级的）。
+  const selectedReports = new Set(existing?.reports ?? []);
+  if (isProject) {
+    await appendReportBindingGroup(modal, { project, selectedValues: selectedReports });
+  }
   modal.appendChild(el("div", "form-label", "提示词（instructions）"));
   const instructions = document.createElement("textarea");
   instructions.className = "cfg-textarea";
@@ -3262,6 +3391,7 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
         tools: [...selectedTools],
         mcps: [...selectedMcps],
         skills: [...selectedSkills],
+        reports: [...selectedReports],
         instructions: prompt,
       }),
     });
@@ -4340,6 +4470,8 @@ function refreshConversationDetail(conv, now) {
 function applySnapshotDiff(prev, diff) {
   if (diff.status) renderStatus();
   if (diff.projects || diff.agents) renderTree();
+  // 报告数据不在快照里，靠 TTL 自己刷新（agent 刚发完报告能很快看到）。
+  if (diff.projects || diff.conversationList) refreshReportCachesIfStale();
   if (diff.conversations.size > 0 || diff.conversationList) renderSessions();
   if (diff.tasks) renderTaskGraph();
   if (selected?.type !== "conversation") return;
@@ -4355,22 +4487,26 @@ function applySnapshotDiff(prev, diff) {
   maybeRefreshConversationDetail(conv);
 }
 
-const es = new EventSource("/api/events");
-es.onmessage = (ev) => {
-  const next = JSON.parse(ev.data);
-  const prev = state;
-  const diff = diffSnapshot(prev, next);
-  state = next;
-  agentsCache = state.agentsByProject ?? {};
-  schedulesCache = state.schedulesByProject ?? {};
-  applySnapshotDiff(prev, diff);
-  updateSseIndicator("ok");
-};
-es.onerror = () => {
-  // EventSource 自带重连；只更新指示器状态
-  updateSseIndicator("reconnecting");
-};
-es.onopen = () => updateSseIndicator("ok");
+/** 建立 SSE 连接。报告阅读页不需要它，所以包成函数，只在主界面调用。 */
+function startEventStream() {
+  const es = new EventSource("/api/events");
+  es.onmessage = (ev) => {
+    const next = JSON.parse(ev.data);
+    const prev = state;
+    const diff = diffSnapshot(prev, next);
+    state = next;
+    agentsCache = state.agentsByProject ?? {};
+    schedulesCache = state.schedulesByProject ?? {};
+    applySnapshotDiff(prev, diff);
+    updateSseIndicator("ok");
+  };
+  es.onerror = () => {
+    // EventSource 自带重连；只更新指示器状态
+    updateSseIndicator("reconnecting");
+  };
+  es.onopen = () => updateSseIndicator("ok");
+  return es;
+}
 
 // 启动时先拉一次偏好，应用标题 / 图标 / 主题 / 密度（失败则保持默认外观）
 async function initPrefs() {
@@ -4381,5 +4517,640 @@ async function initPrefs() {
   }
 }
 
-initPrefs();
-refresh();
+// 主界面的启动入口在文件末尾：报告阅读页会接管整个页面，不启动 SSE/refresh。
+
+// ═══ 报告阅读页（内侧 /reports 与公开 /r/<slug>） ═══════════════════════════
+// 独立于四栁主界面的全屏阅读视图：顶部 bar + 正文 + 右下角导航 FAB。
+// 公开模式下只请求 /r/<slug>/data（免认证），完全不碰 /api/*。
+// html 报告放在 sandbox iframe 里（无 allow-same-origin），与站点彻底隔离。
+
+function parseReportRoute() {
+  const path = location.pathname;
+  const params = new URLSearchParams(location.search);
+  if (path === "/reports" || path.startsWith("/reports/")) {
+    return {
+      mode: "internal",
+      project: params.get("project"),
+      group: params.get("group"),
+      stamp: params.get("stamp"),
+    };
+  }
+  const matched = /^\/r\/([0-9a-f]{16,64})(?:\/(\d{8}-\d{6}(?:-\d+)?))?\/?$/.exec(path);
+  if (matched) return { mode: "public", publicSlug: matched[1], stamp: matched[2] ?? null };
+  return null;
+}
+
+/** 把 Date/ISO 时间格式化成 11-12 14:00 这种阅读友好的形式。 */
+function reportTime(value, withYear = false) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  const head = withYear ? `${date.getFullYear()}-` : "";
+  return `${head}${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+async function fetchReportPayload(route, stamp) {
+  if (route.mode === "public") {
+    const base = `/r/${route.publicSlug}${stamp ? `/${stamp}` : ""}`;
+    const res = await fetch(`${base}/data`, { headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error(res.status === 404 ? "报告不存在，或这份报告的公开链接已被撤销" : `加载失败（HTTP ${res.status}）`);
+    return res.json();
+  }
+  const query = new URLSearchParams({ project: route.project ?? "", group: route.group ?? "" });
+  if (stamp) query.set("stamp", stamp);
+  const res = await fetch(`/api/reports/item?${query}`, { headers: { Accept: "application/json" } });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.error ?? `加载失败（HTTP ${res.status}）`);
+  }
+  return res.json();
+}
+
+function bootReportView(route) {
+  document.body.classList.add("mode-report-view");
+  document.body.innerHTML = "";
+
+  const shell = el("div", "rp-shell");
+  const top = el("div", "rp-top");
+  const wrap = el("div", "rp-wrap");
+  const doc = el("div", "rp-doc");
+  wrap.appendChild(doc);
+  const pop = el("div", "rp-pop");
+  const fab = el("button", "rp-fab");
+  fab.type = "button";
+  fab.title = "切换报告（← →）";
+  fab.textContent = "⇅";
+  shell.append(top, wrap, pop, fab);
+  document.body.appendChild(shell);
+
+  let payload = null;
+  let pickerOpen = false;
+  const prefetch = new Map();
+
+  const currentStamp = () => payload?.report?.stamp ?? null;
+
+  const closePicker = () => {
+    pickerOpen = false;
+    pop.classList.remove("on");
+  };
+  const openPicker = () => {
+    pickerOpen = true;
+    pop.classList.add("on");
+    // 32 份报告时当前项可能在列表中部：打开就滚到它，否则等于没列表。
+    requestAnimationFrame(() => {
+      const current = pop.querySelector(".rp-li.cur");
+      if (current) current.scrollIntoView({ block: "center" });
+    });
+  };
+
+  /** 切换报告：当前标签内换内容（不新开标签），URL 跟着改，滚动回顶部。 */
+  async function show(stamp) {
+    if (!stamp || stamp === currentStamp()) return;
+    closePicker();
+    doc.classList.add("rp-loading");
+    try {
+      const next = await fetchReportPayload(route, stamp);
+      payload = next;
+      renderReport();
+      syncUrl(stamp);
+      wrap.scrollTop = 0;
+    } catch (error) {
+      renderError(error.message);
+    } finally {
+      doc.classList.remove("rp-loading");
+    }
+  }
+
+  function syncUrl(stamp) {
+    if (route.mode === "public") {
+      const next = `/r/${route.publicSlug}/${stamp}`;
+      if (location.pathname !== next) history.replaceState(null, "", next);
+      return;
+    }
+    const query = new URLSearchParams({ project: route.project ?? "", group: route.group ?? "", stamp });
+    history.replaceState(null, "", `/reports?${query}`);
+  }
+
+  function renderError(message) {
+    doc.innerHTML = "";
+    const box = el("div", "rp-error");
+    box.append(el("div", "rp-error-title", "打不开这份报告"), el("div", "rp-error-body", message));
+    doc.appendChild(box);
+    top.innerHTML = "";
+    const back = el("a", "rp-back", "← 返回");
+    back.href = "/";
+    top.appendChild(back);
+    pop.innerHTML = "";
+    fab.hidden = true;
+  }
+
+  function renderReport() {
+    const { group, report, nav } = payload;
+    // ── 顶部 bar ──
+    top.innerHTML = "";
+    if (route.mode !== "public") {
+      const back = el("a", "rp-back", "← 返回");
+      back.href = "/";
+      back.title = "回到 pi-box";
+      top.appendChild(back);
+    }
+    const crumb = el("span", "rp-crumb");
+    crumb.appendChild(el("b", "", group.name));
+    crumb.appendChild(document.createTextNode(` · ${reportTime(report.createdAt, true)}`));
+    top.appendChild(crumb);
+    const metaBits = [report.agent || "未知来源", report.title].filter(Boolean);
+    top.appendChild(el("span", "rp-meta", metaBits.join(" · ")));
+
+    const right = el("div", "rp-right");
+    if (group.visibility === "public") {
+      right.appendChild(el("span", "rp-tag rp-tag-public", "🌐 公开"));
+    } else {
+      right.appendChild(el("span", "rp-tag", "🔒 私有"));
+    }
+    if (route.mode !== "public") {
+      const act = el("button", "rp-btn", group.visibility === "public" ? "取消公开" : "设为公开");
+      act.type = "button";
+      act.onclick = () => toggleVisibility(group);
+      right.appendChild(act);
+    }
+    const raw = el("a", "rp-btn", "⬇ 原始");
+    raw.href = route.mode === "public"
+      ? `/r/${route.publicSlug}/${report.stamp}/content`
+      : `/api/reports/content?${new URLSearchParams({ project: route.project ?? "", group: group.slug, stamp: report.stamp })}`;
+    raw.download = `${group.slug}-${report.stamp}.${report.format}`;
+    right.appendChild(raw);
+    top.appendChild(right);
+
+    // ── 正文 ──
+    doc.innerHTML = "";
+    if (report.format === "html") {
+      // sandbox 里没有 allow-same-origin：报告脚本拿不到 cookie / API。
+      const frame = document.createElement("iframe");
+      frame.className = "rp-html";
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.setAttribute("referrerpolicy", "no-referrer");
+      frame.srcdoc = report.content;
+      doc.appendChild(frame);
+      wrap.classList.add("rp-wrap-html");
+    } else {
+      wrap.classList.remove("rp-wrap-html");
+      doc.appendChild(markdownBlock(report.content));
+    }
+
+    // ── 右下角 FAB + 面板 ──
+    const total = nav.total;
+    fab.hidden = total <= 1;
+    fab.innerHTML = "";
+    fab.appendChild(document.createTextNode("⇅"));
+    if (total > 1) fab.appendChild(el("span", "cnt", `${nav.index}/${total}`));
+    fab.onclick = (event) => {
+      event.stopPropagation();
+      if (pickerOpen) closePicker();
+      else openPicker();
+    };
+
+    pop.innerHTML = "";
+    const head = el("div", "rp-pop-head");
+    head.append(
+      el("div", "rp-pop-title", group.name),
+      el("div", "rp-pop-sub", `共 ${total} 份 · 当前第 ${nav.index} 份`),
+    );
+    pop.appendChild(head);
+
+    const row = el("div", "rp-navrow");
+    const navButton = (item, label, arrow) => {
+      const button = el("button", "");
+      button.type = "button";
+      button.disabled = !item;
+      button.append(
+        el("span", "", `${arrow} ${label}`),
+        el("small", "", item ? reportTime(item.createdAt, true) : "没有了"),
+      );
+      if (item) button.onclick = () => show(item.stamp);
+      return button;
+    };
+    row.append(navButton(nav.newer, "更新", "↑"), navButton(nav.older, "更早", "↓"));
+    pop.appendChild(row);
+
+    // 面板里的完整列表（需要完整的报告清单，用当前 payload 的邻居不够，所以按需拉一次）
+    const list = el("div", "rp-list");
+    list.id = "rp-list";
+    pop.appendChild(list);
+    loadReportList(list, group, report.stamp);
+
+    // 预取相邻两份：翻页时零等待
+    prefetchNeighbors(nav);
+  }
+
+  function prefetchNeighbors(nav) {
+    for (const item of [nav.older, nav.newer]) {
+      if (!item || prefetch.has(item.stamp)) continue;
+      prefetch.set(item.stamp, fetchReportPayload(route, item.stamp).catch(() => null));
+    }
+  }
+
+  async function loadReportList(container, group, activeStamp) {
+    container.innerHTML = "";
+    try {
+      let items;
+      if (route.mode === "public") {
+        // 公开页只有组信息+最新一份，完整列表要额外拉一次（同一组的最新 payload 自带 nav.total）
+        const res = await fetch(`/r/${route.publicSlug}/list`, { headers: { Accept: "application/json" } });
+        if (!res.ok) throw new Error("列表加载失败");
+        items = (await res.json()).reports;
+      } else {
+        const query = new URLSearchParams({ project: route.project ?? "", group: group.slug });
+        const res = await fetch(`/api/reports/items?${query}`, { headers: { Accept: "application/json" } });
+        if (!res.ok) throw new Error("列表加载失败");
+        items = (await res.json()).reports;
+      }
+      container.innerHTML = "";
+      for (const item of items) {
+        const line = el("div", `rp-li${item.stamp === activeStamp ? " cur" : ""}`);
+        line.append(
+          el("span", "dot", ""),
+          el("span", "", reportTime(item.createdAt, true)),
+          el("span", "d", item.format === "html" ? "HTML" : "MD"),
+        );
+        line.onclick = () => show(item.stamp);
+        container.appendChild(line);
+      }
+    } catch {
+      container.innerHTML = "";
+      container.appendChild(el("div", "rp-li", "列表加载失败"));
+    }
+  }
+
+  async function toggleVisibility(group) {
+    if (route.mode === "public") return;
+    const target = group.visibility === "public" ? "private" : "public";
+    if (target === "public") {
+      // 转公开前必须先看敏感扫描结果：内网 IP / 凭据一旦公开就收不回来。
+      let report;
+      try {
+        const res = await fetch(`/api/reports/sensitive?${new URLSearchParams({ project: route.project ?? "", group: group.slug })}`);
+        report = await res.json();
+        if (!res.ok) throw new Error(report.error ?? "扫描失败");
+      } catch (error) {
+        alert(`无法完成敏感信息扫描：${error.message}`);
+        return;
+      }
+      const lines = report.items.length
+        ? report.items.map((item) => `· ${item.kind} × ${item.count}（例如 ${item.sample}）`).join("\n")
+        : "没有扫描到内网 IP、凭据或私钥。";
+      const ok = confirm(
+        `把报告组「${group.name}」设为公开？\n\n` +
+          `任何拿到链接的人都能查看（无需登录），并且后续新发布的报告会自动公开。\n\n` +
+          `敏感信息扫描：\n${lines}\n\n确认这些内容可以对外公开？`,
+      );
+      if (!ok) return;
+    }
+    try {
+      const res = await fetch("/api/reports/visibility", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project: route.project, group: group.slug, visibility: target }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "操作失败");
+      payload.group = { ...payload.group, visibility: data.group.visibility, publicSlug: data.group.publicSlug };
+      renderReport();
+      if (target === "public" && data.group.publicSlug) {
+        alert(`已公开。链接：\n${location.origin}/r/${data.group.publicSlug}`);
+      }
+    } catch (error) {
+      alert(`操作失败：${error.message}`);
+    }
+  }
+
+  // 点面板外部关闭
+  document.addEventListener("click", (event) => {
+    if (!pickerOpen) return;
+    if (pop.contains(event.target) || fab.contains(event.target)) return;
+    closePicker();
+  });
+  // 快捷键：← → 切报告，Esc 关面板 / 返回
+  document.addEventListener("keydown", (event) => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    if (event.key === "Escape") {
+      if (pickerOpen) closePicker();
+      else if (route.mode !== "public") location.href = "/";
+      return;
+    }
+    if (!payload) return;
+    if (event.key === "ArrowLeft" && payload.nav.older) {
+      event.preventDefault();
+      show(payload.nav.older.stamp);
+    } else if (event.key === "ArrowRight" && payload.nav.newer) {
+      event.preventDefault();
+      show(payload.nav.newer.stamp);
+    }
+  });
+
+  doc.innerHTML = "";
+  doc.appendChild(el("div", "rp-loading-text", "加载中…"));
+
+  fetchReportPayload(route, route.stamp)
+    .then((data) => {
+      payload = data;
+      renderReport();
+      if (!route.stamp) syncUrl(data.report.stamp);
+      document.title = `${data.group.name} · ${data.report.title} · pi-box`;
+    })
+    .catch((error) => renderError(error.message));
+}
+
+// ─── 报告组：左栏树的数据加载与设置面板 ──────────────────────────────────
+
+function reportViewUrl(project, group, stamp) {
+  const query = new URLSearchParams({ project, group });
+  if (stamp) query.set("stamp", stamp);
+  return `/reports?${query}`;
+}
+
+const reportGroupPending = new Set();
+const reportItemsPending = new Set();
+
+/** 拉某个项目的报告组列表。失败也写缓存（空列表），避免每帧都重试。 */
+async function loadReportGroups(project) {
+  if (reportGroupPending.has(project)) return;
+  reportGroupPending.add(project);
+  try {
+    const res = await fetch(`/api/reports/groups?${new URLSearchParams({ project })}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "加载失败");
+    reportGroupsCache[project] = { at: Date.now(), groups: data.groups ?? [] };
+  } catch {
+    reportGroupsCache[project] = { at: Date.now(), groups: [] };
+  } finally {
+    reportGroupPending.delete(project);
+    render();
+  }
+}
+
+/** 拉某个报告组内的报告清单。 */
+async function loadReportItems(project, group) {
+  const key = `${project}/${group}`;
+  if (reportItemsPending.has(key)) return;
+  reportItemsPending.add(key);
+  try {
+    const res = await fetch(`/api/reports/items?${new URLSearchParams({ project, group })}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "加载失败");
+    reportItemsCache[key] = { at: Date.now(), reports: data.reports ?? [] };
+  } catch {
+    reportItemsCache[key] = { at: Date.now(), reports: [] };
+  } finally {
+    reportItemsPending.delete(key);
+    render();
+  }
+}
+
+/** 报告数据不进快照，所以靠 TTL 自己刷新（agent 刚发完报告时能很快看到）。 */
+function refreshReportCachesIfStale() {
+  const now = Date.now();
+  for (const project of state?.projects ?? []) {
+    const entry = reportGroupsCache[project];
+    if (!entry) continue;
+    if (now - entry.at > REPORT_CACHE_TTL) loadReportGroups(project);
+  }
+  for (const key of expandedReportGroups) {
+    const entry = reportItemsCache[key];
+    if (!entry) continue;
+    if (now - entry.at > REPORT_CACHE_TTL) {
+      const [project, group] = key.split("/");
+      loadReportItems(project, group);
+    }
+  }
+}
+
+function invalidateReportCaches(project) {
+  if (project) delete reportGroupsCache[project];
+  for (const key of Object.keys(reportItemsCache)) {
+    if (!project || key.startsWith(`${project}/`)) delete reportItemsCache[key];
+  }
+}
+
+/**
+ * 报告组设置面板（新建 / 编辑两种形态）。
+ * 可见性切换是唯一需要二次确认的操作：转公开前先跑敏感扫描并逐项展示。
+ */
+function openReportGroupEditor({ project, group = null }) {
+  const isCreate = !group;
+  const overlay = el("div", "drawer-submodal-backdrop");
+  const modal = el("div", "drawer-submodal report-group-modal");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.appendChild(el("h3", "", isCreate ? `新建报告组 · ${project}` : `报告组设置 · ${group.name}`));
+
+  const status = el("div", "form-status");
+
+  // 名称
+  const nameRow = el("div", "form-row");
+  nameRow.appendChild(el("label", "", "名称"));
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.maxLength = 120;
+  nameInput.value = group?.name ?? "";
+  nameInput.placeholder = "例如：每日资产审计";
+  nameRow.appendChild(nameInput);
+  modal.appendChild(nameRow);
+
+  // slug（只在创建时可填；创建后它是目录名和 URL 段，不可改）
+  let slugInput = null;
+  if (isCreate) {
+    const slugRow = el("div", "form-row");
+    slugRow.appendChild(el("label", "", "slug"));
+    slugInput = document.createElement("input");
+    slugInput.type = "text";
+    slugInput.maxLength = 41;
+    slugInput.placeholder = "daily-audit（小写字母/数字/短横线，留空则从名称推导）";
+    slugRow.appendChild(slugInput);
+    modal.appendChild(slugRow);
+  } else {
+    const slugRow = el("div", "form-row");
+    slugRow.appendChild(el("label", "", "slug"));
+    slugRow.appendChild(el("div", "report-slug-readonly", group.slug));
+    modal.appendChild(slugRow);
+  }
+
+  // 保留期
+  const retentionRow = el("div", "form-row");
+  retentionRow.appendChild(el("label", "", "保留期（天）"));
+  const retentionInput = document.createElement("input");
+  retentionInput.type = "number";
+  retentionInput.min = "1";
+  retentionInput.max = "365";
+  retentionInput.value = String(group?.retentionDays ?? 30);
+  retentionRow.appendChild(retentionInput);
+  modal.appendChild(retentionRow);
+  modal.appendChild(el("div", "form-hint", "超过保留期的历史报告会被自动清理；每组最新一份永不删。"));
+
+  // 可见性（仅编辑时）
+  if (!isCreate) {
+    const visRow = el("div", "report-visibility-row");
+    const visLabel = el("div", "report-visibility-state");
+    visLabel.textContent = group.visibility === "public" ? "🌐 公开（任何拿到链接的人都能看）" : "🔒 私有（需要登录 pi-box）";
+    visRow.appendChild(visLabel);
+    const toggle = el("button", "btn-secondary", group.visibility === "public" ? "取消公开" : "设为公开");
+    toggle.type = "button";
+    toggle.onclick = async () => {
+      const target = group.visibility === "public" ? "private" : "public";
+      if (target === "public") {
+        status.textContent = "正在扫描敏感信息…";
+        status.className = "form-status";
+        let scan;
+        try {
+          const res = await fetch(`/api/reports/sensitive?${new URLSearchParams({ project, group: group.slug })}`);
+          scan = await res.json();
+          if (!res.ok) throw new Error(scan.error ?? "扫描失败");
+        } catch (error) {
+          status.textContent = `扫描失败：${error.message}`;
+          status.className = "form-status error";
+          return;
+        }
+        const lines = scan.items.length
+          ? scan.items.map((item) => `· ${item.kind} × ${item.count}（例如 ${item.sample}）`).join("\n")
+          : "没有扫描到内网 IP、凭据或私钥。";
+        const ok = confirm(
+          `把「${group.name}」设为公开？\n\n` +
+            "任何拿到链接的人都能查看，无需登录；后续新发布的报告会自动公开。\n\n" +
+            `敏感信息扫描：\n${lines}\n\n确认这些内容可以对外公开？`,
+        );
+        if (!ok) {
+          status.textContent = "";
+          return;
+        }
+      }
+      try {
+        const res = await fetch("/api/reports/visibility", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project, group: group.slug, visibility: target }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "操作失败");
+        invalidateReportCaches(project);
+        overlay.remove();
+        render();
+        if (target === "public" && data.group.publicSlug) {
+          alert(`已公开。链接：\n${location.origin}/r/${data.group.publicSlug}`);
+        }
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = "form-status error";
+      }
+    };
+    visRow.appendChild(toggle);
+    modal.appendChild(visRow);
+    if (group.visibility === "public" && group.publicSlug) {
+      const linkRow = el("div", "report-public-link");
+      const link = el("code", "", `${location.origin}/r/${group.publicSlug}`);
+      const copy = el("button", "btn-secondary", "复制");
+      copy.type = "button";
+      copy.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(`${location.origin}/r/${group.publicSlug}`);
+          copy.textContent = "已复制";
+          setTimeout(() => (copy.textContent = "复制"), 1200);
+        } catch {
+          copy.textContent = "复制失败";
+        }
+      };
+      linkRow.append(link, copy);
+      modal.appendChild(linkRow);
+    }
+  }
+
+  modal.appendChild(status);
+
+  const actions = el("div", "form-actions");
+  const cancel = el("button", "btn-secondary", "取消");
+  cancel.type = "button";
+  cancel.onclick = () => overlay.remove();
+
+  const submit = el("button", "", isCreate ? "创建" : "保存");
+  submit.type = "button";
+  submit.onclick = async () => {
+    const name = nameInput.value.trim();
+    if (!name) {
+      status.textContent = "名称不能为空";
+      status.className = "form-status error";
+      return;
+    }
+    submit.disabled = true;
+    status.textContent = "保存中…";
+    status.className = "form-status";
+    try {
+      if (isCreate) {
+        const payload = { project, name, retentionDays: Number(retentionInput.value) };
+        const slug = slugInput?.value.trim();
+        if (slug) payload.slug = slug;
+        const res = await fetch("/api/reports/groups", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "创建失败");
+        expandedReportGroups.add(`${project}/${data.group.slug}`);
+      } else {
+        const res = await fetch(`/api/reports/group?${new URLSearchParams({ project, group: group.slug })}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, retentionDays: Number(retentionInput.value) }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "保存失败");
+      }
+      invalidateReportCaches(project);
+      overlay.remove();
+      render();
+    } catch (error) {
+      status.textContent = error.message;
+      status.className = "form-status error";
+      submit.disabled = false;
+    }
+  };
+  actions.append(cancel, submit);
+
+  if (!isCreate) {
+    const remove = el("button", "btn-secondary report-danger", "删除报告组");
+    remove.type = "button";
+    remove.onclick = async () => {
+      const ok = confirm(`删除报告组「${group.name}」及其全部 ${group.reportCount} 份报告？此操作不可恢复。`);
+      if (!ok) return;
+      try {
+        const res = await fetch(`/api/reports/group?${new URLSearchParams({ project, group: group.slug })}`, { method: "DELETE" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "删除失败");
+        invalidateReportCaches(project);
+        expandedReportGroups.delete(`${project}/${group.slug}`);
+        overlay.remove();
+        render();
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = "form-status error";
+      }
+    };
+    // 危险操作放最左，和「保存」隔开，避免误点
+    actions.insertBefore(remove, actions.firstChild);
+  }
+
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  overlay.onclick = (event) => {
+    if (event.target === overlay) overlay.remove();
+  };
+  document.body.appendChild(overlay);
+  nameInput.focus();
+}
+
+const REPORT_ROUTE = parseReportRoute();
+if (REPORT_ROUTE) {
+  bootReportView(REPORT_ROUTE);
+} else {
+  startEventStream();
+  initPrefs();
+  refresh();
+}

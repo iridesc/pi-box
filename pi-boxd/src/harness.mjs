@@ -31,6 +31,7 @@ import {
   AVAILABLE_TOOL_NAMES,
 } from "./agents.mjs";
 import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta } from "./extension.mjs";
+import { ReportExtension } from "./report-tools.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
 import { SkillsExtension } from "./skills-extension.mjs";
 import { listSchedules } from "./schedules.mjs";
@@ -53,6 +54,9 @@ export async function createHarness() {
   setAssistantRequiredTools([SubagentTool]);
   piBoxExt = defineExtension({ name: "pi-box", tools: [SubagentTool], tasks: PiBoxTasks });
   registry.install(piBoxExt);
+  // 报告工具单独一个扩展：子 agent spawn 时会 remove pi-box 防递归，
+  // 而写报告的主力正是子 agent，挂在 pi-box 上会让它们失去报告能力。
+  registry.install(ReportExtension);
   // skill 注入单独一个扩展：子 agent spawn 时只 remove pi-box（防递归），skill 能力得以保留。
   registry.install(SkillsExtension);
 

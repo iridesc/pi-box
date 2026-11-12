@@ -71,7 +71,7 @@ export function ensureSkillReadTool(resolvedTools, skillCount) {
 /** 解析 .md 的 frontmatter + 正文。frontmatter：model / tools / mcps / skills / agents / locked */
 export function parseAgentDef(md) {
   const m = md.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---(?:\r?\n)?([\s\S]*)$/);
-  if (!m) return { model: null, tools: null, mcps: null, skills: null, agents: null, icon: null, instructions: md.trim() };
+  if (!m) return { model: null, tools: null, mcps: null, skills: null, agents: null, reports: null, icon: null, instructions: md.trim() };
   const fm = {};
   for (const line of m[1].split("\n")) {
     const kv = line.match(/^(\w+):\s*(.+)$/);
@@ -81,12 +81,12 @@ export function parseAgentDef(md) {
     const a = s?.match(/\[([^\]]*)\]/);
     return a ? a[1].split(",").map((x) => x.trim()).filter(Boolean) : null;
   };
-  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), skills: arr(fm.skills), agents: arr(fm.agents), locked: /^true$/i.test(fm.locked ?? ""), icon: fm.icon || null, instructions: m[2].trim() };
+  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), skills: arr(fm.skills), agents: arr(fm.agents), reports: arr(fm.reports), locked: /^true$/i.test(fm.locked ?? ""), icon: fm.icon || null, instructions: m[2].trim() };
 }
 
 /** 序列化回 .md（保存到文件）
  * icon 是纯展示用的 emoji，放在 frontmatter 首行便于人工阅读与修改。 */
-export function serializeAgentDef({ model: m, tools, mcps, skills, agents, locked, icon, instructions }) {
+export function serializeAgentDef({ model: m, tools, mcps, skills, agents, reports, locked, icon, instructions }) {
   const fm = [];
   if (icon) fm.push(`icon: ${icon}`);
   if (m) fm.push(`model: ${m}`);
@@ -95,6 +95,8 @@ export function serializeAgentDef({ model: m, tools, mcps, skills, agents, locke
   if (mcps !== null && mcps !== undefined) fm.push(`mcps: [${mcps.join(", ")}]`);
   if (skills !== null && skills !== undefined) fm.push(`skills: [${skills.join(", ")}]`);
   if (agents?.length) fm.push(`agents: [${agents.join(", ")}]`);
+  // 报告组白名单：空数组 / 未设置都不落盘（= 没有报告能力）。
+  if (reports?.length) fm.push(`reports: [${reports.join(", ")}]`);
   if (locked) fm.push(`locked: true`);
   const body = (instructions ?? "").trim();
   return fm.length ? `---\n${fm.join("\n")}\n---\n\n${body}\n` : `${body}\n`;
@@ -144,6 +146,7 @@ async function listAgentsInDir(dir, scope, projectName) {
       tools: def.tools ?? null,
       mcps: def.mcps ?? null,
       skills: def.skills ?? null,
+      reports: def.reports ?? null,
       locked: !!def.locked,
       icon: def.icon ?? null,
       instructions: def.instructions ?? "",
@@ -221,11 +224,12 @@ export async function loadAssistant(projectName) {
       mcps: def.mcps,
       skills: def.skills ?? null,
       agents: def.agents ?? [],
+      reports: def.reports ?? null,
       icon: def.icon ?? null,
       instructions: def.instructions,
     };
   } catch {
-    return { model: null, tools: null, mcps: null, skills: null, agents: [], icon: null, instructions: "" };
+    return { model: null, tools: null, mcps: null, skills: null, agents: [], reports: null, icon: null, instructions: "" };
   }
 }
 
@@ -314,17 +318,20 @@ export function agentFilePath(projectName, agentName, scope) {
   return join(PROJECTS_DIR, projectName, ".pi", "agents", `${agentName}.md`);
 }
 
-/** 保存 agent 定义到文件。未传 icon 时保留文件里已有的图标，避免在编辑器里改配置时把图标冲掉。 */
+/** 保存 agent 定义到文件。未传 icon / reports 时保留文件里已有的值，避免在编辑器里改配置时把它们冲掉。 */
 export async function saveAgentFile(projectName, name, scope, def) {
   const file = agentFilePath(projectName, name, scope);
   let icon = def.icon;
-  if (icon === undefined) {
-    icon = await readFile(file, "utf-8")
-      .then((md) => parseAgentDef(md).icon)
+  let reports = def.reports;
+  if (icon === undefined || reports === undefined) {
+    const existing = await readFile(file, "utf-8")
+      .then((md) => parseAgentDef(md))
       .catch(() => null);
+    if (icon === undefined) icon = existing?.icon ?? null;
+    if (reports === undefined) reports = existing?.reports ?? null;
   }
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, serializeAgentDef({ ...def, icon }), "utf-8");
+  await writeFile(file, serializeAgentDef({ ...def, icon, reports }), "utf-8");
   return file;
 }
 
@@ -380,15 +387,18 @@ export async function saveAssistantFile(projectName, def, { force = false } = {}
   const file = projectName === META_PROJECT
     ? join(META_DIR, "assistant.md")
     : join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
-  // 未传 icon 时保留现有图标，避免在助理编辑器里改模型/工具时把图标冲掉。
+  // 未传 icon / reports 时保留现有值，避免在助理编辑器里改模型/工具时把图标或报告绑定冲掉。
   let icon = def.icon;
-  if (icon === undefined) {
-    icon = await readFile(file, "utf-8")
-      .then((md) => parseAgentDef(md).icon)
+  let reports = def.reports;
+  if (icon === undefined || reports === undefined) {
+    const existing = await readFile(file, "utf-8")
+      .then((md) => parseAgentDef(md))
       .catch(() => null);
+    if (icon === undefined) icon = existing?.icon ?? null;
+    if (reports === undefined) reports = existing?.reports ?? null;
   }
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, serializeAgentDef({ ...def, icon }), "utf-8");
+  await writeFile(file, serializeAgentDef({ ...def, icon, reports }), "utf-8");
   return file;
 }
 
