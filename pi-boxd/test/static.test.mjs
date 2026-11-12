@@ -103,3 +103,30 @@ test("目录穿越被拒绝并回落", async () => {
     server.close();
   }
 });
+
+// ── 快照瘦身（P2-2）：确保未被前端使用的重字段不回到 SSE/state 里 ──────────
+test("boxSnapshot 不下发会话级 instructions/cwd/scheduleRunId", async () => {
+  const { boxSnapshot } = await import("../src/harness.mjs");
+  const src = await import("node:fs/promises").then((fs) => fs.readFile("src/harness.mjs", "utf8"));
+  // 会话对象里只允许保留前端实际读取的字段（结构断言，避免真实快照依赖）。
+  const start = src.indexOf("const conversations = records.map");
+  assert.ok(start >= 0, "应能在 boxSnapshot 中定位会话摘要构造处");
+  const block = src.slice(start, src.indexOf("const projects = await listProjects()", start));
+  // 用「字段: 」形式断言，避免命中注释里出现的说明文字。
+  for (const field of ["instructions:", "cwd:", "scheduleRunId:", "parent:"]) {
+    assert.ok(!block.includes(field), `会话摘要不应包含 ${field}（会撑大每次 SSE 推送）`);
+  }
+  // 必须保留的字段不能误删。
+  for (const field of ["actorType", "actorName", "title", "status", "createdAt", "parentConversationId"]) {
+    assert.ok(block.includes(field), `会话摘要应保留 ${field}`);
+  }
+  assert.equal(typeof boxSnapshot, "function");
+});
+
+test("agent 目录改为按需 API，不再随快照推送", async () => {
+  const fs = await import("node:fs/promises");
+  const harnessSrc = await fs.readFile("src/harness.mjs", "utf8");
+  assert.ok(!harnessSrc.includes("agentCatalogByProject"), "快照不应再构建 agentCatalogByProject");
+  const routesSrc = await fs.readFile("src/routes.mjs", "utf8");
+  assert.ok(routesSrc.includes('"/api/agents/catalog"'), "应保留按需 catalog 接口");
+});

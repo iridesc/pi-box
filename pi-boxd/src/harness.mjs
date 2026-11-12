@@ -16,7 +16,6 @@ import { models, currentModel, getUseFaux, getHasKey } from "./model.mjs";
 import {
   listProjects,
   listAgents,
-  listAgentCatalog,
   listGlobalAgents,
   listMetaAgents,
   loadAssistant,
@@ -323,10 +322,12 @@ export async function boxSnapshot(harness) {
   }
   // SSE 只发送会话摘要；完整 entries 由 /api/conversation 在用户打开时按需读取。
   const conversations = records.map((record) => {
+    // 只下发前端真正需要的字段。会话级 instructions（每个会话创建时快照的提示词）
+    // 在真实数据里能占快照体积的 90%+，而前端展示用的是 assistantByProject 里的
+    // 助理当前提示词，从不读这份历史快照——它只会把每次 SSE 推送撑到 MB 级。
     const c = {
       id: String(record.id),
       owner: record.owner ?? null,
-      parent: record.parent ?? null,
     };
     const info = infoById.get(c.id) ?? {};
     const cwd = info.cwd ?? null;
@@ -338,29 +339,26 @@ export async function boxSnapshot(harness) {
     const meta = info.meta ?? {};
     return {
       ...c,
-      cwd,
       project: meta.project ?? project,
-      instructions: info.instructions ?? null,
       actorType: meta.actorType ?? null,
       actorName: meta.actorName ?? null,
       source: meta.source ?? null,
       title: meta.title ?? null,
       parentConversationId: meta.parentConversationId ?? null,
       scheduleId: meta.scheduleId ?? null,
-      scheduleRunId: meta.scheduleRunId ?? null,
       createdAt: meta.createdAt ?? null,
       status: info.status ?? "idle",
     };
   });
   const projects = await listProjects();
   const agentsByProject = {};
-  const agentCatalogByProject = {};
   const assistantByProject = {};
   const schedulesByProject = {};
   const agentsStatus = {}; // { [project]: { [name]: { status, conversationId } } }
   for (const p of projects) {
     agentsByProject[p] = await listAgents(p);
-    agentCatalogByProject[p] = await listAgentCatalog(p);
+    // 助理授权页的完整 agent 目录（含全局候选）只在打开编辑器时需要，
+    // 改由 GET /api/agents/catalog 按需获取，不再随每次快照推送。
     assistantByProject[p] = await loadAssistant(p);
     const scheduleState = await listSchedules(p);
     schedulesByProject[p] = scheduleState.schedules;
@@ -416,7 +414,6 @@ export async function boxSnapshot(harness) {
     hasKey: getHasKey(),
     projects,
     agentsByProject,
-    agentCatalogByProject,
     globalAgents: await listGlobalAgents(),
     metaProject: META_PROJECT,
     metaDir: META_DIR,

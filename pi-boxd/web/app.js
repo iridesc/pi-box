@@ -2343,7 +2343,16 @@ function formRow(label, control) {
 
 async function openAssistantEditor(proj) {
   const asst = state.assistantByProject?.[proj] ?? { agents: [], instructions: "", model: null };
-  const catalog = state.agentCatalogByProject?.[proj] ?? { project: [], global: [] };
+  // agent 目录按需拉取：它只在打开编辑器时用得到，不再随 SSE 快照推送（约 100KB）。
+  let catalog = state.agentCatalogByProject?.[proj];
+  if (!catalog) {
+    try {
+      const res = await fetch(`/api/agents/catalog?project=${encodeURIComponent(proj)}`);
+      catalog = res.ok ? await res.json() : { project: [], global: [] };
+    } catch {
+      catalog = { project: [], global: [] };
+    }
+  }
   const mcpResponse = await fetch("/api/mcp");
   const mcpConfig = mcpResponse.ok ? await mcpResponse.json() : { mcpServers: {} };
   const mcpServers = Object.entries(mcpConfig.mcpServers ?? {});
