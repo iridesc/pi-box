@@ -402,7 +402,10 @@ function renderTree() {
     const filesNode = el("div", "tree-item tree-files");
     filesNode.classList.add("tree-level-1");
     filesNode.appendChild(el("span", "tree-arrow", ""));
-    filesNode.appendChild(el("span", "tree-label", "📄 文件"));
+    // 不用 📄（那是一个文档，而这里是浏览整个项目的文件集合），
+    // 也不用 🗂️/📂（黄色文件夹系，和项目行的 📁 撞色，看着像又一个子文件夹）。
+    // 🗄️ 是灰色文件柜：语义是“存放文件的地方”，且视觉重量弱于父项，层级更清楚。
+    filesNode.appendChild(el("span", "tree-label", "🗄️ 文件"));
     if (selected?.type === "files" && selected.project === proj) filesNode.classList.add("selected");
     filesNode.onclick = () => openProjectFiles(proj);
     root.appendChild(filesNode);
