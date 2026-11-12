@@ -890,6 +890,7 @@ body.mode-files #new-conversation { display: none; }
 
 @media (max-width: 760px) {
   body.mode-files #panel-tasks { grid-column: auto; }
+  body.mode-reports main { grid-template-columns: none; }
   body.mode-files [data-mobile-panel="view"] { opacity: .35; pointer-events: none; }
 }
 .file-row.file-row-current { background: rgba(31, 111, 235, .08); }
@@ -997,32 +998,65 @@ body.mode-report-view > *:not(.rp-shell) { display: none !important; }
   .rp-fab { right: 12px; bottom: 12px; width: 42px; height: 42px; }
 }
 
-/* ═══ 左栏：报告组树 ══════════════════════════════════════════════════════ */
-.tree-report-group { cursor: pointer; }
-.tree-report-icon { flex: 0 0 auto; font-size: 11px; opacity: .85; }
-.tree-report-badge {
-  flex: 0 0 auto; font-size: 9px; padding: 0 4px; border-radius: 3px; margin-left: 4px;
-  background: rgba(63, 185, 80, .16); color: #3fb950; border: 1px solid rgba(63, 185, 80, .35);
+/* ═══ 报告模式：左栏入口 → 第二栏报告组列表 → 第三栏引导 ══════════════════ */
+/* 第二栏加宽一点才放得下组名 + 份数 + 徽标；第四栏（任务图）在这个模式下没有意义。 */
+body.mode-reports main { grid-template-columns: 260px 330px minmax(0, 1fr) 0; }
+body.mode-reports #panel-tasks { display: none; }
+body.mode-reports #file-upload-btn { display: none; }
+
+.report-group-row {
+  display: flex; align-items: center; gap: 7px; padding: 7px 8px; margin-bottom: 3px;
+  border: 1px solid transparent; border-radius: 6px; cursor: pointer;
 }
-.tree-report-count {
-  flex: 0 0 auto; font-size: 9.5px; color: #6e7681; margin-left: 4px;
-  font-variant-numeric: tabular-nums;
+.report-group-row:hover { background: #1f2937; }
+.report-group-row.open { background: rgba(31, 111, 235, .12); border-color: rgba(31, 111, 235, .35); }
+.report-arrow { flex: 0 0 auto; width: 11px; color: #8b949e; font-size: 10px; }
+.report-icon { flex: 0 0 auto; font-size: 12px; }
+.report-main { flex: 1 1 auto; min-width: 0; }
+.report-name {
+  font-size: 12.5px; font-weight: 600; color: #c9d1d9;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tree-report-item { cursor: pointer; }
-.tree-report-item:hover { background: #1f2937; }
-.tree-report-time {
-  flex: 1 1 auto; min-width: 0; font-size: 11px; color: #8b949e;
-  font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.report-sub { font-size: 10px; color: #6e7681; margin-top: 2px; }
+.report-badge {
+  flex: 0 0 auto; font-size: 9px; padding: 1px 5px; border-radius: 3px;
 }
-.tree-report-format {
+.report-badge.public { background: rgba(63, 185, 80, .16); color: #3fb950; border: 1px solid rgba(63, 185, 80, .35); }
+.report-settings-btn {
+  flex: 0 0 auto; background: transparent; border: 0; color: #6e7681; cursor: pointer;
+  font-size: 12px; padding: 2px 3px; border-radius: 4px; opacity: 0;
+}
+.report-group-row:hover .report-settings-btn { opacity: 1; }
+.report-settings-btn:hover { color: #58a6ff; background: #21262d; }
+
+.report-item-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 34px;
+  border-radius: 5px; cursor: pointer; font-size: 11.5px; color: #8b949e;
+}
+.report-item-row:hover { background: #1f2937; color: #c9d1d9; }
+.report-item-time { flex: 1 1 auto; font-variant-numeric: tabular-nums; }
+.report-item-format {
   flex: 0 0 auto; font-size: 8.5px; color: #6e7681; letter-spacing: .04em;
   border: 1px solid #21262d; border-radius: 3px; padding: 0 3px;
 }
-.tree-report-more {
-  font-size: 11px; color: #58a6ff; padding: 3px 6px 6px 32px; cursor: pointer;
+.report-empty-child { font-size: 11px; color: #6e7681; padding: 3px 8px 6px 34px; }
+.report-more { font-size: 10.5px; color: #6e7681; padding: 2px 8px 8px 34px; }
+.report-empty { padding: 26px 14px; text-align: center; }
+.report-empty-text { font-size: 12px; color: #8b949e; margin-bottom: 12px; }
+.report-empty button { font-size: 12px; }
+.report-add-row {
+  width: 100%; margin-top: 6px; padding: 7px; font-size: 11.5px; cursor: pointer;
+  background: transparent; color: #58a6ff; border: 1px dashed #30363d; border-radius: 6px;
 }
-.tree-report-more:hover { text-decoration: underline; }
-.tree-agent-empty.tree-level-3 { padding-left: 32px; }
+.report-add-row:hover { background: rgba(88, 166, 255, .08); border-color: #58a6ff; }
+
+.report-guide { padding: 44px 40px; max-width: 620px; color: #8b949e; }
+.report-guide h2 { font-size: 16px; color: #c9d1d9; margin: 0 0 14px; }
+.report-guide p { font-size: 12.5px; line-height: 1.75; margin: 0 0 12px; }
+.report-guide-stats {
+  display: flex; gap: 18px; margin-top: 22px; padding-top: 16px;
+  border-top: 1px solid #21262d; font-size: 11.5px; color: #6e7681;
+}
 
 /* 报告组设置面板 */
 .report-group-modal { width: min(520px, calc(100vw - 40px)); }
@@ -1046,3 +1080,6 @@ body.mode-report-view > *:not(.rp-shell) { display: none !important; }
 .report-danger { color: #f85149 !important; border-color: rgba(248, 81, 73, .4) !important; }
 .report-danger:hover { background: rgba(248, 81, 73, .12) !important; }
 .form-hint { font-size: 10.5px; color: #6e7681; margin: -2px 0 8px; }
+.report-arrow { font-size: 9px; }
+.report-item-open { flex: 0 0 auto; font-size: 10px; color: #484f58; }
+.report-item-row:hover .report-item-open { color: #58a6ff; }

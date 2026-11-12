@@ -226,13 +226,19 @@ async function refresh() {
 
 function render() {
   const filesMode = selected?.type === "files";
+  const reportsMode = selected?.type === "reports";
   setFilesChrome(filesMode);
+  setReportsChrome(reportsMode);
   renderStatus();
   renderTree();
   if (filesMode) {
     // 文件模式：第二/第四栏由 renderFilePanels 接管，SSE 周期刷新不重绘，避免丢滚动位置和图片重载。
     ensureFileBrowser(selected.project);
     renderFilePanels();
+    return;
+  }
+  if (reportsMode) {
+    renderReportsPanels();
     return;
   }
   renderSessions();
@@ -418,97 +424,15 @@ function renderTree() {
     filesNode.onclick = () => openProjectFiles(proj);
     root.appendChild(filesNode);
 
-    // ── 报告组（按需加载，不进快照）─────────────────────────────────
-    const reportSep = el("div", "tree-sep");
-    reportSep.appendChild(el("span", "tree-sep-label", "报告"));
-    const addGroupBtn = el("button", "tree-sep-add", "＋");
-    addGroupBtn.type = "button";
-    addGroupBtn.title = "新建报告组";
-    addGroupBtn.setAttribute("aria-label", `在 ${proj} 中新建报告组`);
-    addGroupBtn.onclick = (event) => {
-      event.stopPropagation();
-      openReportGroupEditor({ project: proj });
-    };
-    reportSep.appendChild(addGroupBtn);
-    root.appendChild(reportSep);
+    // 报告入口：和「助理 / 文件」同构 —— 左栏一行，点开在第二栏展示报告组
+    const reportsNode = el("div", "tree-item tree-reports");
+    reportsNode.classList.add("tree-level-1");
+    reportsNode.appendChild(el("span", "tree-arrow", ""));
+    reportsNode.appendChild(el("span", "tree-label", "📊 报告"));
+    if (selected?.type === "reports" && selected.project === proj) reportsNode.classList.add("selected");
+    reportsNode.onclick = () => openProjectReports(proj);
+    root.appendChild(reportsNode);
 
-    const groupEntry = reportGroupsCache[proj];
-    if (!groupEntry) {
-      root.appendChild(el("div", "tree-agent-empty tree-level-2", "加载中…"));
-      loadReportGroups(proj);
-    } else if (groupEntry.groups.length === 0) {
-      root.appendChild(el("div", "tree-agent-empty tree-level-2", "暂无报告组"));
-    } else {
-      for (const group of groupEntry.groups) {
-        const groupKey = `${proj}/${group.slug}`;
-        const isOpen = expandedReportGroups.has(groupKey);
-        const groupRow = el("div", "tree-item tree-level-2 tree-report-group");
-        const groupArrow = el("span", "tree-arrow", isOpen ? "▼" : "▶");
-        groupArrow.onclick = (event) => {
-          event.stopPropagation();
-          if (isOpen) expandedReportGroups.delete(groupKey);
-          else expandedReportGroups.add(groupKey);
-          render();
-        };
-        groupRow.appendChild(groupArrow);
-        groupRow.appendChild(el("span", "tree-report-icon", "📊"));
-        groupRow.appendChild(el("span", "tree-label", group.name));
-        if (group.visibility === "public") {
-          const badge = el("span", "tree-report-badge", "公开");
-          badge.title = "公开：任何拿到链接的人都能看";
-          groupRow.appendChild(badge);
-        } else {
-          groupRow.appendChild(el("span", "tree-report-count", String(group.reportCount)));
-        }
-        const groupSettings = el("button", "tree-settings", "⚙");
-        groupSettings.type = "button";
-        groupSettings.title = "报告组设置（名称 / 可见性 / 保留期）";
-        groupSettings.setAttribute("aria-label", `配置报告组 ${group.name}`);
-        groupSettings.onclick = (event) => {
-          event.stopPropagation();
-          openReportGroupEditor({ project: proj, group });
-        };
-        groupRow.appendChild(groupSettings);
-        groupRow.onclick = () => {
-          if (isOpen) expandedReportGroups.delete(groupKey);
-          else expandedReportGroups.add(groupKey);
-          render();
-        };
-        root.appendChild(groupRow);
-
-        if (!isOpen) continue;
-        const itemEntry = reportItemsCache[groupKey];
-        if (!itemEntry) {
-          root.appendChild(el("div", "tree-agent-empty tree-level-3", "加载中…"));
-          loadReportItems(proj, group.slug);
-          continue;
-        }
-        if (itemEntry.reports.length === 0) {
-          root.appendChild(el("div", "tree-agent-empty tree-level-3", "还没有报告"));
-          continue;
-        }
-        for (const item of itemEntry.reports.slice(0, 5)) {
-          const line = el("div", "tree-item tree-level-3 tree-report-item");
-          line.appendChild(el("span", "tree-arrow", ""));
-          line.appendChild(el("span", "tree-report-time", reportTime(item.createdAt, false)));
-          line.appendChild(el("span", "tree-report-format", item.format === "html" ? "HTML" : "MD"));
-          line.title = `${item.title} · ${item.agent || "未知来源"}\n在新标签页打开`;
-          line.onclick = (event) => {
-            event.stopPropagation();
-            window.open(reportViewUrl(proj, group.slug, item.stamp), "_blank", "noopener");
-          };
-          root.appendChild(line);
-        }
-        if (itemEntry.reports.length > 5) {
-          const more = el("div", "tree-report-more tree-level-3", `查看全部 ${itemEntry.reports.length} 份 →`);
-          more.onclick = (event) => {
-            event.stopPropagation();
-            window.open(reportViewUrl(proj, group.slug, null), "_blank", "noopener");
-          };
-          root.appendChild(more);
-        }
-      }
-    }
 
     // 子 agent：直接挂在项目下，不再有折叠组（需求：随时看到圆点状态）
     const agents = agentsCache[proj] ?? [];
@@ -786,6 +710,172 @@ function parentDirOf(path) {
 }
 
 /** 进入某个项目的文件浏览：第二栏展示文件树，第四栏展示预览。 */
+/** 打开项目的报告面板：和第二栏/第三栏联动，和文件模式同构。 */
+function openProjectReports(project) {
+  selected = { type: "reports", project };
+  setMobilePanel("sessions");
+  reportPanelsDirty = true;
+  if (!reportGroupsCache[project]) loadReportGroups(project);
+  render();
+}
+
+let reportsModeMounted = false;
+// 报告数据不在快照里，SSE 每帧重绘会把滚动位置和展开状态冲掉；
+// 和文件模式一样用 dirty 标记，只有数据/交互变化时才整块重画。
+let reportPanelsDirty = true;
+
+/** 报告模式的栏样式：第二栏加宽放列表，第四栏（任务图）在这个模式下没有意义。 */
+function setReportsChrome(on) {
+  const sessionsTitle = document.getElementById("sessions-title");
+  if (!sessionsTitle) return;
+  document.body.classList.toggle("mode-reports", on);
+  if (on !== reportsModeMounted) {
+    reportsModeMounted = on;
+    // 重新进入时第二/三栏 DOM 已不属于报告面板，强制整块重画。
+    if (on) reportPanelsDirty = true;
+  }
+  if (on) {
+    if (sessionsTitle.textContent !== "报告") sessionsTitle.textContent = "报告";
+    // 报告模式下这个按钮没有意义；disable + 隐藏，避免误点，退出后 renderSessions 会恢复。
+    const createButton = document.getElementById("new-conversation");
+    if (createButton) {
+      createButton.disabled = true;
+      createButton.hidden = true;
+    }
+  } else {
+    const createButton = document.getElementById("new-conversation");
+    if (createButton) createButton.hidden = false;
+  }
+}
+
+function renderReportsPanels() {
+  if (!reportPanelsDirty) return;
+  reportPanelsDirty = false;
+  const project = selected?.project;
+  const listBody = document.getElementById("session-list");
+  const view = document.getElementById("view");
+  if (!project) return;
+
+  // ── 第二栏：报告组 + 展开后的历次报告 ──
+  const entry = reportGroupsCache[project];
+  const scrollTop = listBody.scrollTop;
+  listBody.replaceChildren();
+  if (!entry) {
+    listBody.appendChild(el("div", "session-empty", "加载中…"));
+  } else if (entry.groups.length === 0) {
+    const empty = el("div", "report-empty");
+    empty.appendChild(el("div", "report-empty-text", "还没有报告组"));
+    const createFirst = el("button", "btn-secondary", "＋ 新建报告组");
+    createFirst.type = "button";
+    createFirst.onclick = () => openReportGroupEditor({ project });
+    empty.appendChild(createFirst);
+    listBody.appendChild(empty);
+  } else {
+    for (const group of entry.groups) {
+      const key = `${project}/${group.slug}`;
+      const isOpen = expandedReportGroups.has(key);
+      const row = el("div", "report-group-row");
+      if (isOpen) row.classList.add("open");
+      const arrow = el("span", "report-arrow", isOpen ? "▼" : "▶");
+      row.appendChild(arrow);
+      row.appendChild(el("span", "report-icon", "📊"));
+      const main = el("div", "report-main");
+      main.appendChild(el("div", "report-name", group.name));
+      const sub = el("div", "report-sub");
+      const when = group.lastReportAt ? reportTime(group.lastReportAt, true) : "还没有报告";
+      sub.textContent = `${group.reportCount} 份 · ${when}`;
+      main.appendChild(sub);
+      row.appendChild(main);
+      if (group.visibility === "public") {
+        const badge = el("span", "report-badge public", "公开");
+        badge.title = "任何拿到链接的人都能看";
+        row.appendChild(badge);
+      }
+      const settings = el("button", "report-settings-btn", "⚙");
+      settings.type = "button";
+      settings.title = "报告组设置（名称 / 可见性 / 保留期 / 删除）";
+      settings.onclick = (event) => {
+        event.stopPropagation();
+        openReportGroupEditor({ project, group });
+      };
+      row.appendChild(settings);
+      row.onclick = () => {
+        if (isOpen) expandedReportGroups.delete(key);
+        else expandedReportGroups.add(key);
+        if (!reportItemsCache[key]) loadReportItems(project, group.slug);
+        reportPanelsDirty = true;
+        render();
+      };
+      listBody.appendChild(row);
+
+      if (!isOpen) continue;
+      const itemEntry = reportItemsCache[key];
+      if (!itemEntry) {
+        listBody.appendChild(el("div", "report-empty-child", "加载中…"));
+        loadReportItems(project, group.slug);
+        continue;
+      }
+      if (itemEntry.reports.length === 0) {
+        listBody.appendChild(el("div", "report-empty-child", "这个组还没有报告"));
+        continue;
+      }
+      for (const item of itemEntry.reports.slice(0, 20)) {
+        const line = el("div", "report-item-row");
+        line.appendChild(el("span", "report-item-time", reportTime(item.createdAt, true)));
+        line.appendChild(el("span", "report-item-format", item.format === "html" ? "HTML" : "MD"));
+        line.appendChild(el("span", "report-item-open", "↗"));
+        line.title = `${item.title} · ${item.agent || "未知来源"}\n在新标签页打开`;
+        line.onclick = () => window.open(reportViewUrl(project, group.slug, item.stamp), "_blank", "noopener");
+        listBody.appendChild(line);
+      }
+      if (itemEntry.reports.length > 20) {
+        const more = el("div", "report-more", `还有 ${itemEntry.reports.length - 20} 份，在阅读页右侧面板里看全部`);
+        listBody.appendChild(more);
+      }
+    }
+  }
+  if (entry?.groups?.length) {
+    const addRow = el("button", "report-add-row", "＋ 新建报告组");
+    addRow.type = "button";
+    addRow.onclick = () => openReportGroupEditor({ project });
+    listBody.appendChild(addRow);
+  }
+  listBody.scrollTop = scrollTop;
+
+  // ── 第三栏：引导 / 统计 ──
+  // 必须清 class：之前 renderView 可能留下 view-empty（它有 letter-spacing:8px，会继承给正文）。
+  view.className = "view-report";
+  view.replaceChildren();
+  const panel = el("div", "report-guide");
+  panel.appendChild(el("h2", "", "报告"));
+  panel.appendChild(
+    el(
+      "p",
+      "",
+      "点第二栏的报告组可以展开历次报告；点具体报告会在新标签页打开全屏阅读（右下角 ⇅ 可在组内前后翻）。",
+    ),
+  );
+  panel.appendChild(
+    el(
+      "p",
+      "",
+      "报告由 agent 通过 report_publish 工具写入。先在 agent 编辑器的「报告组」里勾选，agent 才有写权限。",
+    ),
+  );
+  if (entry?.groups?.length) {
+    const totalReports = entry.groups.reduce((sum, group) => sum + group.reportCount, 0);
+    const publicCount = entry.groups.filter((group) => group.visibility === "public").length;
+    const stats = el("div", "report-guide-stats");
+    stats.append(
+      el("span", "", `报告组 ${entry.groups.length} 个`),
+      el("span", "", `报告 ${totalReports} 份`),
+      el("span", "", publicCount ? `其中 ${publicCount} 个组已公开` : "全部私有"),
+    );
+    panel.appendChild(stats);
+  }
+  view.appendChild(panel);
+}
+
 function openProjectFiles(project) {
   selected = { type: "files", project };
   ensureFileBrowser(project);
@@ -4884,6 +4974,7 @@ async function loadReportGroups(project) {
     reportGroupsCache[project] = { at: Date.now(), groups: [] };
   } finally {
     reportGroupPending.delete(project);
+    reportPanelsDirty = true;
     render();
   }
 }
@@ -4902,6 +4993,7 @@ async function loadReportItems(project, group) {
     reportItemsCache[key] = { at: Date.now(), reports: [] };
   } finally {
     reportItemsPending.delete(key);
+    reportPanelsDirty = true;
     render();
   }
 }
@@ -4912,7 +5004,10 @@ function refreshReportCachesIfStale() {
   for (const project of state?.projects ?? []) {
     const entry = reportGroupsCache[project];
     if (!entry) continue;
-    if (now - entry.at > REPORT_CACHE_TTL) loadReportGroups(project);
+    if (now - entry.at > REPORT_CACHE_TTL) {
+      reportPanelsDirty = true;
+      loadReportGroups(project);
+    }
   }
   for (const key of expandedReportGroups) {
     const entry = reportItemsCache[key];
@@ -4929,6 +5024,7 @@ function invalidateReportCaches(project) {
   for (const key of Object.keys(reportItemsCache)) {
     if (!project || key.startsWith(`${project}/`)) delete reportItemsCache[key];
   }
+  reportPanelsDirty = true;
 }
 
 /**
