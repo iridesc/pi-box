@@ -934,8 +934,10 @@ body.mode-report-view > *:not(.rp-shell) { display: none !important; }
    有自己样式的报告会覆盖白底，表现得和独立打开一致。 */
 .rp-wrap.rp-wrap-html { padding: 18px; overflow: hidden; }
 .rp-doc { max-width: 860px; margin: 0 auto; padding: 0 28px; }
+/* HTML 报告是自带布局的完整页面，不设宽度上限：宽表格（如审计明细）需要整屏才能看全。
+   md 报告仍限 860px——正文要保证每行字数，两者需求不同。 */
 .rp-wrap-html .rp-doc {
-  max-width: 1100px; padding: 0; height: 100%; background: #fff;
+  max-width: none; padding: 0; height: 100%; background: #fff;
   border-radius: 8px; overflow: hidden; box-shadow: 0 6px 28px rgba(0, 0, 0, .45);
 }
 .rp-doc .markdown-body { font-size: 14.5px; line-height: 1.75; }
@@ -955,6 +957,9 @@ body.mode-report-view > *:not(.rp-shell) { display: none !important; }
   box-shadow: 0 6px 22px rgba(0, 0, 0, .55); transition: .15s; z-index: 40;
 }
 .rp-fab:hover { color: #58a6ff; border-color: #58a6ff; transform: translateY(-1px); }
+/* HTML 报告撑满时内容会铺到右下角，FAB 常驻会挡住末列：默认淡化，hover 恢复 */
+body.rp-html-mode .rp-fab { opacity: .38; }
+body.rp-html-mode .rp-fab:hover, body.rp-html-mode .rp-pop.on ~ .rp-fab { opacity: 1; }
 .rp-fab .cnt {
   position: absolute; bottom: -3px; right: -3px; background: #1f6feb; color: #fff;
   font-size: 9px; line-height: 1; padding: 2px 4px; border-radius: 8px; font-weight: 600;

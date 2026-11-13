@@ -4900,8 +4900,11 @@ function bootReportView(route) {
       frame.srcdoc = report.content;
       doc.appendChild(frame);
       wrap.classList.add("rp-wrap-html");
+      // HTML 报告要撑满（自带布局），此时右下角 FAB 会挡住表格末列，降低存在感
+      document.body.classList.add("rp-html-mode");
     } else {
       wrap.classList.remove("rp-wrap-html");
+      document.body.classList.remove("rp-html-mode");
       doc.appendChild(markdownBlock(report.content));
     }
 
