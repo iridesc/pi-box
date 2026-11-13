@@ -111,7 +111,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
   const harness = runtimeHarness;
   const context = runtimeContext;
   const mcpBridge = runtimeMcpBridge;
-  return guardMaintenance({
+  return guardErrors(guardMaintenance({
     // 浏览器标签页图标（index.html 里的 <link rel="icon"> 指向这里）。
     "/favicon.svg": {
       method: "GET",
@@ -196,12 +196,20 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           res.writeHead(400, { "Content-Type": "application/json" });
           return res.end(JSON.stringify({ error: "名称过长（最多 120 字符）" }));
         }
-        const conversation = await harness.conversation(id, context);
+        // 前端拿到的会话 id 是字符串（/api/conversations 返回 String(conv.id)），
+        // 但存储层 document 的 owner 必须是 number —— 传字符串会被 pi-durable
+        // 的 ownerId() 判为非法直接抛 TypeError。
+        const numericId = Number(id);
+        if (!Number.isSafeInteger(numericId) || numericId <= 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "conversationId 无效" }));
+        }
+        const conversation = await harness.conversation(numericId, context);
         if (!conversation) {
           res.writeHead(404, { "Content-Type": "application/json" });
           return res.end(JSON.stringify({ error: "会话不存在" }));
         }
-        await harness.commit((tx) => setConversationMeta(tx, id, { title: value }), context);
+        await harness.commit((tx) => setConversationMeta(tx, numericId, { title: value }), context);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, title: value }));
       },
@@ -1345,7 +1353,36 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
         }));
       },
     },
-  });
+  }));
+}
+
+/** 兜底原因：pi-durable-web 是 `return extra.handler(req, res)`，没有 try/catch。
+ *  任一 handler 抛出的异常都会变成 unhandledRejection，Node 默认终止整个进程——
+ *  也就是「一个接口写错，所有人被踢下线」。这里统一兜住：单个请求失败就返回 500，
+ *  绝不允许单个接口的错误连累整个服务。 */
+export function guardErrors(routes) {
+  for (const [path, route] of Object.entries(routes)) {
+    if (typeof route?.handler !== "function") continue;
+    const original = route.handler;
+    route.handler = async (req, res) => {
+      try {
+        return await original(req, res);
+      } catch (error) {
+        console.error(`[routes] ${path} 处理失败:`, error);
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+          }
+          if (!res.writableEnded) {
+            res.end(JSON.stringify({ error: error?.message ?? String(error) }));
+          }
+        } catch {
+          // 响应已断开（客户端提前关闭），忽略
+        }
+      }
+    };
+  }
+  return routes;
 }
 
 /** 维护窗口内（重建 Harness 期间）拒绝其它写/读请求，避免撞上正在关闭的存储。 */

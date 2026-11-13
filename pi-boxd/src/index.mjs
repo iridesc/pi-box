@@ -55,6 +55,12 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP Basic Auth: ${auth.enabled ? `已启用（用户 ${auth.username}）` : "未启用"}`);
 });
 
+// 进程级兜底：任何漏网的 Promise 拒绝都只记日志，不让服务整体退出。
+// 单个请求/任务出错不该导致所有人掉线；真正的 bug 看日志修。
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection] 未捕获的 Promise 拒绝（服务继续运行）:", reason);
+});
+
 let shuttingDown = false;
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, async () => {
