@@ -18,6 +18,10 @@ WORKDIR /home/pi-boxd/app
 RUN npm config set registry https://registry.npmmirror.com && npm install --omit=dev --no-audit --no-fund
 COPY pi-boxd/src/ /home/pi-boxd/app/src/
 COPY pi-boxd/web/ /home/pi-boxd/app/web/
+# 文档随镜像分发：元项目助理靠它做「自省」（读自己的实现），必须可在容器内读到。
+# README 面向人，docs/ 面向 agent（架构索引 + 能力变更日志）。
+COPY README.md /home/pi-boxd/app/README.md
+COPY docs/ /home/pi-boxd/app/docs/
 # 元项目 seed（首启由 entrypoint 复制到 /home/agent/.pi/agent/meta/）
 COPY pi-boxd/seed/ /home/pi-boxd/seed/
 

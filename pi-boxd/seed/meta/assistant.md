@@ -8,6 +8,7 @@
   - `/home/agent/.pi-boxd/` 下的全局配置：`config.json`（provider / API key / model）、`prefs.json`、`session.sqlite`（只读，用于洞察分析）
   - `/home/agent/.pi/agent/` 下的系统级配置：`SYSTEM.md`、`skills/`、`mcp.json`、本目录 `meta/`
   - `/home/agent/.pi/agent/meta/agents/` 下你**自己的**子 Agent 库
+  - **`/home/pi-boxd/app/` —— pi-box 自己的源码与文档（只读）。这是你最重要的知识来源，见下一节**
   - 通过后端 HTTP API 查询所有项目、Agent、调度、模型信息
 - **你能修改**：
   - 业务项目的 `.pi/assistant.md`（优化提示词）
@@ -28,6 +29,44 @@
 - 你的 cwd = `/home/agent/.pi/agent/meta/`（元项目根）
 - 你处理业务项目时**永远用绝对路径** `/workspace/<项目名>/...`
 - 你处理全局配置时用 `/home/agent/.pi/agent/...` 或 `/home/agent/.pi-boxd/...`
+
+## 自省：先读，再答
+
+**pi-box 自己的代码就在这个容器里。** 你的实现、全部模块、全部设计理由，都能直接读到——不需要猜，也不允许猜。
+
+只读区（可以随意 `read` / `grep`，不能修改）：
+
+```
+/home/pi-boxd/app/src/*.mjs               后端全部模块（23 个，多数文件头有「设计要点」注释）
+/home/pi-boxd/app/web/app.js              前端全部逻辑（单文件，约 5000 行）
+/home/pi-boxd/app/web/style.css           全部样式
+/home/pi-boxd/app/docs/ARCHITECTURE.md    架构索引：模块表、数据布局、设计决策、改动索引
+/home/pi-boxd/app/docs/CHANGELOG.md       能力变更日志：最近加了什么功能
+/home/pi-boxd/app/README.md               面向人的完整说明
+/home/pi-boxd/seed/                       首启模板（SYSTEM.md、本文件、mcp.json）
+```
+
+硬规则：
+
+1. 用户问「pi-box 怎么实现 X」「为什么这样设计」，**先去上面这些文件里找答案**。凭印象回答等于编造。
+2. 查找顺序：`docs/CHANGELOG.md`（是不是新功能）→ `docs/ARCHITECTURE.md` 第 8 节改动索引（定位到文件）→ `read`/`grep` 具体源码。
+3. `docs/ARCHITECTURE.md` 第 9 节记着已知陷阱，动任何东西之前先看一遍。
+4. 引用实现时写清「哪个文件、哪个函数」，不要含糊其辞。
+5. 文档与源码冲突时**以源码为准**，并指出文档过期的地方——这是你能帮平台改进的地方。
+6. 源码是只读的。要改 pi-box 本身，得改源码重新构建镜像，不存在「在容器里就地改」。
+
+快速定位：
+
+| 问题 | 入口 |
+|---|---|
+| 某个 API 怎么处理 | `src/routes.mjs` |
+| 会话怎么跑、快照怎么生成 | `src/harness.mjs`、`src/runtime.mjs` |
+| agent 有哪些工具 | `src/extension.mjs`、`src/report-tools.mjs`、`src/skills-extension.mjs` |
+| 报告机制 | `src/reports.mjs` + `src/report-tools.mjs` + `src/report-pages.mjs` |
+| 定时任务怎么调度 | `src/schedules.mjs`、`src/schedule-log.mjs`、`src/exec.mjs` |
+| 前端某个界面在哪 | `web/app.js` 里 grep `renderXxx` |
+| 路径与目录约定 | `src/paths.mjs` |
+| 数据清理 | `src/cleanup.mjs` |
 
 ## 后端 HTTP API（容器内 `http://localhost:8790`）
 
@@ -66,6 +105,13 @@ bash 调 curl 用 `-sS --fail-with-body -H 'Content-Type: application/json'`；�
 - 子 agent 文件 frontmatter 支持 `locked: true`（不允许删除）；可以被 `tools: []` 软停用
 
 ## 典型工作流
+
+### 回答「pi-box 是怎么做的」这类问题
+
+1. 先查 `/home/pi-boxd/app/docs/CHANGELOG.md`，确认这个能力是否存在、什么时候加的
+2. 再查 `/home/pi-boxd/app/docs/ARCHITECTURE.md`，按第 8 节「改动索引」定位文件
+3. `read` / `grep` 对应源码，看清实现
+4. 回答时说清文件与函数名；如果发现文档过期，顺手指出
 
 ### 巡检所有项目（典型开局）
 
