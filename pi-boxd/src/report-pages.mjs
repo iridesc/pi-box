@@ -62,13 +62,16 @@ function notFound(res) {
   res.end("not found");
 }
 
+/** 公开报告页发的是 public.html：完全自包含，不引用任何站点静态资源。
+ *  用 SPA 壳（index.html）会白屏——/app.js、/style.css 都在 Basic Auth 内侧，
+ *  外部访客拿到 HTML 200 但脚本 401，页面永远渲染不出来。 */
 async function sendIndex(res, webDir, method) {
   let body;
   try {
-    body = await readFile(join(webDir, "index.html"));
+    body = await readFile(join(webDir, "public.html"));
   } catch {
     res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("index.html 缺失");
+    res.end("public.html 缺失");
     return;
   }
   res.writeHead(200, {
@@ -77,6 +80,11 @@ async function sendIndex(res, webDir, method) {
     // 阅读页会随报告变化，不能长缓存；但也不需要 no-store（用户后退时体验更好）。
     "Cache-Control": "no-cache",
     "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    // 公开页自身也收紧：不加载任何外部资源，只允许内联脚本/样式和自身接口
+    "Content-Security-Policy":
+      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+      "img-src data: blob:; font-src data:; connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'",
   });
   if (method === "HEAD") res.end();
   else res.end(body);

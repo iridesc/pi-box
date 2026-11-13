@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>报告 · pi-box</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<!-- 公开报告页：完全自包含，不引用任何站点静态资源。
+     原因：/app.js、/style.css 都在 Basic Auth 内侧，外部访客拿不到；
+     借用 SPA 壳会导致 HTML 200 但脚本 401，页面白屏。
+     这里内联样式与脚本，保证「拿到链接就能看」。 -->
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #0d1117; color: #c9d1d9;
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; height: 100%;
+  }
+  header {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    height: 52px; padding: 0 16px; border-bottom: 1px solid #21262d; background: #161b22;
+    overflow: hidden;
+  }
+  .brand { font-weight: 600; color: #c9d1d9; white-space: nowrap; }
+  .brand span { color: #58a6ff; }
+  .sep { color: #30363d; }
+  .title { font-weight: 600; color: #c9d1d9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta { color: #6e7681; font-size: 12px; white-space: nowrap; }
+  .grow { flex: 1 1 auto; }
+  .nav { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+  .nav button {
+    width: 28px; height: 28px; border-radius: 6px; cursor: pointer;
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+    font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  }
+  .nav button:disabled { opacity: .35; cursor: default; }
+  .nav button:not(:disabled):hover { border-color: #58a6ff; color: #58a6ff; }
+  .count { font-size: 11px; color: #6e7681; min-width: 34px; text-align: center; }
+  main { flex: 1 1 auto; min-height: 0; padding: 16px; }
+  iframe { width: 100%; height: 100%; border: 0; border-radius: 8px; background: #fff; display: block; }
+  .doc {
+    max-width: 900px; margin: 0 auto; height: 100%; overflow: auto;
+    background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 28px 32px;
+  }
+  .doc h1, .doc h2, .doc h3, .doc h4 { color: #e6edf3; line-height: 1.3; margin: 1.4em 0 .6em; }
+  .doc h1 { font-size: 24px; margin-top: 0; }
+  .doc h2 { font-size: 19px; border-bottom: 1px solid #21262d; padding-bottom: .3em; }
+  .doc h3 { font-size: 16px; }
+  .doc p { margin: .7em 0; }
+  .doc code { background: #0d1117; padding: 2px 5px; border-radius: 4px; font-size: 12.5px; color: #ffa657; }
+  .doc pre { background: #0d1117; padding: 14px 16px; border-radius: 6px; overflow: auto; border: 1px solid #21262d; }
+  .doc pre code { background: none; padding: 0; color: #c9d1d9; }
+  .doc table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 13px; }
+  .doc th, .doc td { border: 1px solid #21262d; padding: 6px 10px; text-align: left; vertical-align: top; }
+  .doc th { background: #1c2128; }
+  .doc a { color: #58a6ff; }
+  .doc ul, .doc ol { padding-left: 1.4em; }
+  .doc blockquote { margin: 1em 0; padding: 0 1em; color: #8b949e; border-left: 3px solid #30363d; }
+  .doc hr { border: 0; border-top: 1px solid #21262d; margin: 1.6em 0; }
+  .msg {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 8px; color: #6e7681; text-align: center; padding: 0 24px;
+  }
+  .msg b { color: #c9d1d9; font-size: 16px; font-weight: 600; }
+  .msg small { font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">π<span>-box</span></div>
+  <div class="sep">/</div>
+  <div class="title" id="title">加载中…</div>
+  <div class="meta" id="meta"></div>
+  <div class="grow"></div>
+  <div class="nav">
+    <button id="prev" type="button" title="上一份（←）" aria-label="上一份">‹</button>
+    <div class="count" id="count"></div>
+    <button id="next" type="button" title="下一份（→）" aria-label="下一份">›</button>
+  </div>
+</header>
+<main id="stage"></main>
+<script>
+(function () {
+  "use strict";
+  var PARTS = location.pathname.split("/").filter(Boolean); // ["r", slug, ...]
+  var SLUG = PARTS[1];
+  var STAMP = /^\d{8}-\d{6}(?:-\d+)?$/.test(PARTS[2] || "") ? PARTS[2] : null;
+  var stage = document.getElementById("stage");
+  var titleEl = document.getElementById("title");
+  var metaEl = document.getElementById("meta");
+  var countEl = document.getElementById("count");
+  var prevBtn = document.getElementById("prev");
+  var nextBtn = document.getElementById("next");
+
+  function showMessage(title, detail) {
+    stage.innerHTML = "";
+    var box = document.createElement("div");
+    box.className = "msg";
+    var b = document.createElement("b");
+    b.textContent = title;
+    box.appendChild(b);
+    if (detail) {
+      var s = document.createElement("small");
+      s.textContent = detail;
+      box.appendChild(s);
+    }
+    stage.appendChild(box);
+  }
+
+  function fetchJson(url) {
+    return fetch(url, { headers: { Accept: "application/json" }, credentials: "omit" }).then(function (res) {
+      if (!res.ok) {
+        var err = new Error(res.status === 404 ? "报告不存在，或公开链接已被撤销" : "加载失败（HTTP " + res.status + "）");
+        err.status = res.status;
+        throw err;
+      }
+      return res.json();
+    });
+  }
+
+  // 极简 Markdown → DOM（公开页不加载站点脚本，只能自带一份最小实现）
+  function inline(text, parent) {
+    var rest = String(text);
+    var re = /\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/;
+    var m;
+    while ((m = re.exec(rest))) {
+      if (m.index > 0) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
+      if (m[1] !== undefined) {
+        var strong = document.createElement("strong");
+        strong.textContent = m[1];
+        parent.appendChild(strong);
+      } else if (m[2] !== undefined) {
+        var code = document.createElement("code");
+        code.textContent = m[2];
+        parent.appendChild(code);
+      } else {
+        var a = document.createElement("a");
+        a.textContent = m[3];
+        a.href = m[4];
+        a.rel = "noopener noreferrer nofollow";
+        a.target = "_blank";
+        parent.appendChild(a);
+      }
+      rest = rest.slice(m.index + m[0].length);
+    }
+    if (rest) parent.appendChild(document.createTextNode(rest));
+  }
+
+  function renderMarkdown(text) {
+    var root = document.createElement("div");
+    root.className = "doc markdown-body";
+    var lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+    var i = 0;
+    while (i < lines.length) {
+      var line = lines[i];
+      if (!line.trim()) { i++; continue; }
+      if (line.indexOf("```") === 0) {
+        var buf = [];
+        i++;
+        while (i < lines.length && lines[i].indexOf("```") !== 0) buf.push(lines[i++]);
+        if (i < lines.length) i++;
+        var pre = document.createElement("pre");
+        var codeEl = document.createElement("code");
+        codeEl.textContent = buf.join("\n");
+        pre.appendChild(codeEl);
+        root.appendChild(pre);
+        continue;
+      }
+      var h = /^(#{1,6})\s+(.+)$/.exec(line);
+      if (h) {
+        var node = document.createElement("h" + h[1].length);
+        inline(h[2], node);
+        root.appendChild(node);
+        i++;
+        continue;
+      }
+      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+        root.appendChild(document.createElement("hr"));
+        i++;
+        continue;
+      }
+      if (/^>\s?/.test(line)) {
+        var bq = document.createElement("blockquote");
+        var bufl = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) bufl.push(lines[i++].replace(/^>\s?/, ""));
+        inline(bufl.join(" "), bq);
+        root.appendChild(bq);
+        continue;
+      }
+      if (line.indexOf("|") >= 0 && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
+        var rows = [];
+        var split = function (v) { return v.trim().replace(/^\||\|$/g, "").split("|").map(function (c) { return c.trim(); }); };
+        rows.push(split(line));
+        i += 2;
+        while (i < lines.length && lines[i].indexOf("|") >= 0 && lines[i].trim()) rows.push(split(lines[i++]));
+        var table = document.createElement("table");
+        rows.forEach(function (cells, ri) {
+          var tr = document.createElement("tr");
+          cells.forEach(function (cell) {
+            var td = document.createElement(ri === 0 ? "th" : "td");
+            inline(cell, td);
+            tr.appendChild(td);
+          });
+          if (ri === 0) { var th = document.createElement("thead"); th.appendChild(tr); table.appendChild(th); }
+          else { if (!table.tBodies.length) table.appendChild(document.createElement("tbody")); table.tBodies[0].appendChild(tr); }
+        });
+        root.appendChild(table);
+        continue;
+      }
+      var li = /^\s*([-*+] |\d+\. )(.+)$/.exec(line);
+      if (li) {
+        var ordered = /\d/.test(li[1].charAt(0));
+        var list = document.createElement(ordered ? "ol" : "ul");
+        while (i < lines.length) {
+          var item = /^\s*([-*+] |\d+\. )(.+)$/.exec(lines[i]);
+          if (!item || /\d/.test(item[1].charAt(0)) !== ordered) break;
+          var line_1 = document.createElement("li");
+          inline(item[2], line_1);
+          list.appendChild(line_1);
+          i++;
+        }
+        root.appendChild(list);
+        continue;
+      }
+      var para = [];
+      while (i < lines.length && lines[i].trim() && lines[i].indexOf("```") !== 0 && !/^(#{1,6})\s+/.test(lines[i])) {
+        para.push(lines[i++]);
+      }
+      var p = document.createElement("p");
+      inline(para.join(" "), p);
+      root.appendChild(p);
+    }
+    return root;
+  }
+
+  var state = { reports: [], index: 0 };
+
+  function render(data) {
+    var report = data.report || {};
+    var group = data.group || {};
+    titleEl.textContent = report.title || group.name || "报告";
+    document.title = (report.title || group.name || "报告") + " · pi-box";
+    metaEl.textContent = (group.name ? group.name + " · " : "") + (report.createdAt ? new Date(report.createdAt).toLocaleString("zh-CN") : "");
+
+    stage.innerHTML = "";
+    if (report.format === "html") {
+      // 报告本身是单文件自包含的，直接走 content 端点（服务端下发 sandbox CSP）
+      var frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.setAttribute("referrerpolicy", "no-referrer");
+      frame.src = "/r/" + SLUG + "/" + report.stamp + "/content";
+      stage.appendChild(frame);
+    } else {
+      stage.appendChild(renderMarkdown(data.content));
+    }
+  }
+
+  function navInfo(data) {
+    // nav.index 是 1-based（服务端已 +1）；older/newer 直接给邻份报告
+    var nav = data.nav || {};
+    var total = typeof nav.total === "number" ? nav.total : 1;
+    var index = typeof nav.index === "number" ? nav.index : 1;
+    countEl.textContent = total > 1 ? index + "/" + total : "";
+    state.older = nav.older || null;
+    state.newer = nav.newer || null;
+    prevBtn.disabled = !state.older;
+    nextBtn.disabled = !state.newer;
+  }
+
+  function load(stamp) {
+    var url = "/r/" + SLUG + (stamp ? "/" + stamp : "") + "/data";
+    return fetchJson(url).then(function (data) {
+      if (!data.report) throw new Error("报告不存在");
+      state.current = data;
+      render(data);
+      navInfo(data);
+      if (data.report.stamp) {
+        var target = "/r/" + SLUG + "/" + data.report.stamp;
+        if (location.pathname !== target) history.replaceState(null, "", target);
+      }
+    }).catch(function (err) {
+      titleEl.textContent = "无法打开报告";
+      showMessage(err.message || "加载失败", err.status === 404 ? "链接可能已过期，或该报告组已关闭公开访问。" : "请稍后重试。");
+    });
+  }
+
+  // ‹ 往时间更早走（older），› 往时间更新走（newer）
+  prevBtn.addEventListener("click", function () { if (state.older) load(state.older.stamp); });
+  nextBtn.addEventListener("click", function () { if (state.newer) load(state.newer.stamp); });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "ArrowLeft" && state.older) load(state.older.stamp);
+    else if (event.key === "ArrowRight" && state.newer) load(state.newer.stamp);
+  });
+
+  if (!SLUG || !/^[0-9a-f]{16,64}$/.test(SLUG)) {
+    showMessage("链接无效", "请确认地址完整。");
+  } else {
+    load(STAMP);
+  }
+})();
+</script>
+</body>
+</html>
