@@ -71,9 +71,14 @@ section:last-child { border-right: none; }
   color: #3fb950;
   animation: gear-spin 1.9s linear infinite;
 }
+/* 未读用「亮 → 更亮 + 光晕」脉冲，而不是复用 agent-pulse（那条是往暗处闪，看着像坏了） */
 .tree-item .tree-settings.tree-settings-unread {
-  color: #58a6ff;
-  animation: agent-pulse 1.2s ease-in-out infinite;
+  color: #79c0ff;
+  animation: gear-blink 1.05s ease-in-out infinite;
+}
+@keyframes gear-blink {
+  0%, 100% { color: #79c0ff; text-shadow: 0 0 2px rgba(121, 192, 255, .35); }
+  50%      { color: #d6ecff; text-shadow: 0 0 9px rgba(121, 192, 255, .95); }
 }
 /* 锁定/不可编辑的 Agent 原本压到 0.4 透明，状态色会被冲淡，这里保住可读性。 */
 .tree-item .tree-settings.tree-settings-busy:disabled,
