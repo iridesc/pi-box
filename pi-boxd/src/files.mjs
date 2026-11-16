@@ -195,9 +195,19 @@ const MIME_BY_EXT = {
   m4a: "audio/mp4",
   flac: "audio/flac",
   mp4: "video/mp4",
+  m4v: "video/x-m4v",
   webm: "video/webm",
   mov: "video/quicktime",
   mkv: "video/x-matroska",
+  avi: "video/x-msvideo",
+  flv: "video/x-flv",
+  wmv: "video/x-ms-wmv",
+  mpg: "video/mpeg",
+  mpeg: "video/mpeg",
+  m2ts: "video/mp2t",
+  "3gp": "video/3gpp",
+  ogv: "video/ogg",
+  rmvb: "application/vnd.rn-realmedia-vbr",
   zip: "application/zip",
   gz: "application/gzip",
   tgz: "application/gzip",
@@ -211,6 +221,30 @@ const MIME_BY_EXT = {
 export function mimeFor(rel) {
   const ext = extname(rel).slice(1).toLowerCase();
   return MIME_BY_EXT[ext] ?? "application/octet-stream";
+}
+
+/** 按文件头识别视频容器。只在「扩展名没给出媒体类型且内容是二进制」时兜底，
+ *  主要解决 .ts 的冲突：TypeScript 源码和 MPEG-TS 视频流用同一个后缀。 */
+export function sniffVideoMime(head) {
+  if (head.length < 12) return null;
+  // MPEG-TS：每 188 字节一个 0x47 同步字节，连续三次命中才算
+  if (head[0] === 0x47 && head[188] === 0x47 && head[376] === 0x47) return "video/mp2t";
+  // MP4 / MOV 家族：偏移 4 处是 ftyp box
+  if (head.toString("ascii", 4, 8) === "ftyp") {
+    const brand = head.toString("ascii", 8, 12);
+    return brand.startsWith("qt") ? "video/quicktime" : "video/mp4";
+  }
+  // Matroska / WebM
+  if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) {
+    return head.includes(Buffer.from("webm", "ascii")) ? "video/webm" : "video/x-matroska";
+  }
+  // AVI：RIFF....AVI
+  if (head.toString("ascii", 0, 4) === "RIFF" && head.toString("ascii", 8, 12) === "AVI ") {
+    return "video/x-msvideo";
+  }
+  if (head.toString("ascii", 0, 3) === "FLV") return "video/x-flv";
+  if (head.toString("ascii", 0, 4) === "OggS") return "video/ogg";
+  return null;
 }
 
 /** 可 inline 预览的媒体类型。 */
@@ -282,7 +316,12 @@ export async function readFilePreview(project, relInput) {
     const headLength = Math.min(target.info.size, 8192);
     const head = Buffer.alloc(headLength);
     if (headLength > 0) await handle.read(head, 0, headLength, 0);
-    if (looksBinary(head)) return { ...base, kind: "binary" };
+    if (looksBinary(head)) {
+      // 扩展名没给出媒体类型（或被 .ts 这种同名后缀误导）时，用文件头兜底。
+      const sniffed = sniffVideoMime(head);
+      if (sniffed) return { ...base, mime: sniffed, kind: "media", mediaKind: mediaKindOf(sniffed) };
+      return { ...base, kind: "binary" };
+    }
 
     const limit = Math.min(target.info.size, PREVIEW_TEXT_BYTES);
     const buffer = Buffer.alloc(limit);
@@ -311,14 +350,31 @@ export async function readFilePreview(project, relInput) {
  */
 export async function sendProjectFile(req, res, target, { download = false } = {}) {
   if (target.info.isDirectory()) throw fileError(400, "目标是目录，无法下载");
-  const mime = mimeFor(target.rel);
-  const inline = !download && mediaKindOf(mime) !== null;
+  let mime = mimeFor(target.rel);
+  let mediaKind = mediaKindOf(mime);
   const size = target.info.size;
+  // 媒体类型靠扩展名判断不出时（典型是 .ts 视频流），读文件头兜底。
+  if (mediaKind === null && !download && size > 0) {
+    const handle = await open(target.abs, "r");
+    try {
+      const head = Buffer.alloc(Math.min(size, 512));
+      await handle.read(head, 0, head.length, 0);
+      const sniffed = sniffVideoMime(head);
+      if (sniffed) {
+        mime = sniffed;
+        mediaKind = mediaKindOf(sniffed);
+      }
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  }
+  const inline = !download && mediaKind !== null;
   const headers = {
     "Content-Type": mime,
     "Content-Disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(basename(target.rel))}`,
     "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "no-store",
+    // 媒体用 no-cache（可缓存但每次验证）：no-store 会让浏览器每次 seek 都重下。
+    "Cache-Control": inline ? "private, no-cache" : "no-store",
   };
   // 直接打开 SVG 时不允许执行脚本（<img> 场景本来也不会执行，这里是兜底）。
   if (inline && mime === "image/svg+xml") headers["Content-Security-Policy"] = "sandbox";

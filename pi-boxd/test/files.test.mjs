@@ -27,6 +27,7 @@ const {
   sanitizeFileName,
   languageFor,
   mimeFor,
+  sniffVideoMime,
 } = await import("../src/files.mjs");
 
 await writeFile(join(root, "workspace", "demo", "README.md"), "# demo\n\nhello\n");
@@ -216,4 +217,63 @@ test("MIME 与语言映射", () => {
   assert.equal(languageFor("Dockerfile"), "dockerfile");
   assert.equal(languageFor("unknown.zzz"), null);
   assert.ok(LIST_MAX_ENTRIES > 0);
+});
+
+// ── 视频预览：MIME 覆盖 + 容器嗅探（.ts 与 TypeScript 同名冲突） ──
+test("常见视频扩展名都能识别为 video", () => {
+  for (const [ext, mime] of Object.entries({
+    mp4: "video/mp4", m4v: "video/x-m4v", webm: "video/webm", mov: "video/quicktime",
+    mkv: "video/x-matroska", avi: "video/x-msvideo", flv: "video/x-flv",
+    wmv: "video/x-ms-wmv", mpg: "video/mpeg", mpeg: "video/mpeg",
+    m2ts: "video/mp2t", "3gp": "video/3gpp", ogv: "video/ogg",
+  })) {
+    assert.equal(mimeFor(`a.${ext}`), mime, ext);
+  }
+});
+
+test("sniffVideoMime 认出 MPEG-TS（188 字节同步）", () => {
+  const head = Buffer.alloc(400);
+  head[0] = 0x47; head[188] = 0x47; head[376] = 0x47;
+  assert.equal(sniffVideoMime(head), "video/mp2t");
+});
+
+test("sniffVideoMime 认出 MP4 / MOV / MKV / AVI / FLV / Ogg", () => {
+  const ftyp = (brand) => {
+    const b = Buffer.alloc(32);
+    b.write("ftyp", 4, "ascii");
+    b.write(brand, 8, "ascii");
+    return b;
+  };
+  assert.equal(sniffVideoMime(ftyp("isom")), "video/mp4");
+  assert.equal(sniffVideoMime(ftyp("qt  ")), "video/quicktime");
+  const mkv = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(20)]);
+  assert.equal(sniffVideoMime(mkv), "video/x-matroska");
+  const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from("webm"), Buffer.alloc(20)]);
+  assert.equal(sniffVideoMime(webm), "video/webm");
+  const avi = Buffer.alloc(16); avi.write("RIFF", 0, "ascii"); avi.write("AVI ", 8, "ascii");
+  assert.equal(sniffVideoMime(avi), "video/x-msvideo");
+  const flv = Buffer.alloc(16); flv.write("FLV", 0, "ascii");
+  assert.equal(sniffVideoMime(flv), "video/x-flv");
+  const ogg = Buffer.alloc(16); ogg.write("OggS", 0, "ascii");
+  assert.equal(sniffVideoMime(ogg), "video/ogg");
+});
+
+test("扩展名骗人的视频：.ts 内容是 TS 流时预览按视频处理", async () => {
+  const { writeFile } = await import("node:fs/promises");
+  const file = join(root, "workspace", "demo", "clip.ts");
+  const buf = Buffer.alloc(2000, 0xff);
+  buf[0] = 0x47; buf[188] = 0x47; buf[376] = 0x47; buf[564] = 0x47;
+  await writeFile(file, buf);
+  const preview = await readFilePreview("demo", "clip.ts");
+  assert.equal(preview.kind, "media");
+  assert.equal(preview.mediaKind, "video");
+  assert.equal(preview.mime, "video/mp2t");
+});
+
+test("真正的 TypeScript 源码仍然按文本预览（不被嗅探误判）", async () => {
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(join(root, "workspace", "demo", "code.ts"), "export const a = 1;\n", "utf-8");
+  const preview = await readFilePreview("demo", "code.ts");
+  assert.equal(preview.kind, "text");
+  assert.equal(preview.language, "typescript");
 });

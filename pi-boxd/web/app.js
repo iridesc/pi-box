@@ -1173,11 +1173,38 @@ function renderMediaPreview(body, fb, preview) {
     body.appendChild(frame);
     return;
   }
-  const node = document.createElement(preview.mediaKind === "video" ? "video" : "audio");
+  const tag = preview.mediaKind === "video" ? "video" : "audio";
+  const mime = String(preview.mime ?? "").split(";")[0].trim();
+  // canPlayType 只能判断「容器」，判断不了编码；返回空串就是明确不支持，别硬渲染个黑框。
+  const probe = document.createElement(tag);
+  if (mime && probe.canPlayType(mime) === "") {
+    renderUnplayableMedia(body, fb, preview, mime, "容器格式不受支持");
+    return;
+  }
+  const node = document.createElement(tag);
   node.className = "file-media";
   node.controls = true;
+  node.preload = "metadata";
   node.src = url;
+  // 容器支持但编码不支持（典型 H.265/HEVC）时，浏览器只会静默失败，这里兜住。
+  node.onerror = () => {
+    node.remove();
+    renderUnplayableMedia(body, fb, preview, mime, "解码失败");
+  };
   body.appendChild(node);
+}
+
+/** 浏览器放不出来的媒体：给原因 + 下载入口，而不是留一个点了没反应的播放器。 */
+function renderUnplayableMedia(body, fb, preview, mime, detail) {
+  const wrap = el("div", "file-binary");
+  wrap.appendChild(el("div", "", `浏览器无法直接播放 ${preview.name ?? preview.path}。`));
+  wrap.appendChild(el("div", "muted", `${formatBytes(preview.size)} · ${mime || "未知类型"}${detail ? ` · ${detail}` : ""}`));
+  wrap.appendChild(el("div", "muted", "常见原因：.mov / .avi / .wmv 容器，或 H.265(HEVC) 编码。下载后用本地播放器打开即可。"));
+  const link = el("a", "panel-link", "⬇ 下载文件");
+  link.href = rawFileUrl(fb.project, preview.path, true);
+  link.download = preview.name ?? "";
+  wrap.appendChild(link);
+  body.appendChild(wrap);
 }
 
 function renderBinaryPreview(body, fb, preview) {
