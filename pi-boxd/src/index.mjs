@@ -9,6 +9,7 @@ import { bootRuntime, closeScheduler, context, harness, mcpBridge, startCleanupS
 import { installBasicAuth } from "./auth.mjs";
 import { installStaticOptimizer } from "./static.mjs";
 import { installReportPages, isPublicReportRequest } from "./report-pages.mjs";
+import { installSseHeartbeat } from "./sse.mjs";
 
 // 初始化 model（用 config.json 或回退到 faux）
 await initProvider();
@@ -36,6 +37,10 @@ const server = createWebServer({
 
 // 静态资源优化：gzip + ETag + 缓存头。装在认证内侧，认证仍然覆盖静态资源。
 installStaticOptimizer(server, { webDir: WEB_DIR });
+
+// SSE 加固（心跳 + 错误降级 + 失败自断）。也必须装在 basicAuth 内侧：
+// 事件流是登录后的资源，只是把它换成一条不会「假死」的连接。
+installSseHeartbeat(server, { getSnapshot: () => boxSnapshot(harness) });
 
 // 报告阅读页（/reports）与公开报告（/r/<slug>）。
 // 必须在 basicAuth 之前安装，否则豁免后的请求还得再穿过一层。

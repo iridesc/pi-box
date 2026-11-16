@@ -246,17 +246,28 @@ function flashHint(node, msg) {
 }
 
 /** 更新右上角 SSE 连接指示器。 */
-function updateSseIndicator(state) {
+function updateSseIndicator(state, reason) {
   const elx = document.getElementById("sse-indicator");
   if (!elx) return;
   if (state === "reconnecting") {
     elx.className = "sse-indicator sse-reconnecting";
     elx.textContent = "🟡 重连中…";
-    elx.title = "SSE 正在重新连接";
+    elx.title = `SSE 正在重新连接${reason ? `（${reason}）` : ""}；点击立即重连`;
+    elx.style.cursor = "pointer";
+    elx.onclick = () => {
+      sseRetry = 0;
+      if (sseRetryTimer) {
+        clearTimeout(sseRetryTimer);
+        sseRetryTimer = null;
+      }
+      restartSse("手动重连");
+    };
   } else {
     elx.className = "sse-indicator sse-ok";
     elx.textContent = "🟢";
-    elx.title = "SSE 已连接";
+    elx.title = "SSE 已连接（15 秒一次心跳）";
+    elx.style.cursor = "default";
+    elx.onclick = null;
   }
 }
 
@@ -5330,11 +5341,99 @@ function applySnapshotDiff(prev, diff) {
   maybeRefreshConversationDetail(conv);
 }
 
-/** 建立 SSE 连接。报告阅读页不需要它，所以包成函数，只在主界面调用。 */
-function startEventStream() {
-  const es = new EventSource("/api/events");
+// ── SSE 连接自愈 ─────────────────────────────────────────────────────────
+// 浏览器只在「正常断开」时自动重连。以下三种情况它不重连、UI 也看不出来：
+//   TCP 半开、服务端持续报错只剩 event: error、解析失败被判 fail the connection。
+// 表现统一是「页面不动了，刷新才有结果」。所以这里自己看着办：
+//   - 25s 收不到任何字节 → 判定假死，重建连接；
+//   - onerror 且 readyState 已是 CLOSED → 立即重建（1s/2s/5s/10s 退避）；
+//   - 回到前台 / 网络恢复 → 检查一次；
+//   - 指示器可点击，手动救。
+const SSE_SILENCE_MS = 25000;
+const SSE_BACKOFF_MS = [1000, 2000, 5000, 10000];
+
+let sseSource = null;
+let sseWatchdog = null;
+let sseRetry = 0;
+let sseRetryTimer = null;
+let sseLastRxAt = Date.now();
+let sseStarted = false;
+
+function closeSse() {
+  if (sseRetryTimer) {
+    clearTimeout(sseRetryTimer);
+    sseRetryTimer = null;
+  }
+  if (sseSource) {
+    sseSource.onmessage = null;
+    sseSource.onerror = null;
+    sseSource.onopen = null;
+    try {
+      sseSource.close();
+    } catch {
+      // 已经关了
+    }
+    sseSource = null;
+  }
+}
+
+/** 重建连接前先补一次快照：即使事件流恢复不了，界面也不至于停在旧状态。 */
+function resyncSnapshot() {
+  fetch("/api/state")
+    .then((r) => r.json())
+    .then((next) => {
+      if (!next || !Array.isArray(next.conversations)) return;
+      const prev = state;
+      const diff = diffSnapshot(prev, next);
+      state = next;
+      agentsCache = state.agentsByProject ?? {};
+      schedulesCache = state.schedulesByProject ?? {};
+      applySnapshotDiff(prev, diff);
+    })
+    .catch(() => {});
+}
+
+function restartSse(reason) {
+  closeSse();
+  if (!sseStarted) return;
+  const delay = SSE_BACKOFF_MS[Math.min(sseRetry, SSE_BACKOFF_MS.length - 1)];
+  sseRetry += 1;
+  updateSseIndicator("reconnecting", reason);
+  sseRetryTimer = setTimeout(() => {
+    sseRetryTimer = null;
+    resyncSnapshot();
+    connectSse();
+  }, delay);
+}
+
+function connectSse() {
+  if (!sseStarted) return;
+  closeSse();
+  sseLastRxAt = Date.now();
+  let es;
+  try {
+    es = new EventSource("/api/events");
+  } catch {
+    restartSse("创建连接失败");
+    return;
+  }
+  sseSource = es;
+  es.onopen = () => {
+    sseRetry = 0;
+    sseLastRxAt = Date.now();
+    updateSseIndicator("ok");
+  };
   es.onmessage = (ev) => {
-    const next = JSON.parse(ev.data);
+    sseLastRxAt = Date.now();
+    sseRetry = 0;
+    let next;
+    try {
+      next = JSON.parse(ev.data);
+    } catch {
+      // 半截包：直接重连，别再拿坏数据去 diff
+      restartSse("收到无法解析的数据");
+      return;
+    }
     const prev = state;
     const diff = diffSnapshot(prev, next);
     state = next;
@@ -5345,11 +5444,64 @@ function startEventStream() {
     updateSseIndicator("ok");
   };
   es.onerror = () => {
-    // EventSource 自带重连；只更新指示器状态
-    updateSseIndicator("reconnecting");
+    // readyState === CLOSED 表示浏览器已经放弃这条连接，不会自己再来
+    if (es.readyState === EventSource.CLOSED) restartSse("连接已关闭");
+    else updateSseIndicator("reconnecting");
   };
-  es.onopen = () => updateSseIndicator("ok");
-  return es;
+}
+
+/** 看门狗：连接对象可能还「OPEN」，但字节早就不来了。 */
+function startSseWatchdog() {
+  if (sseWatchdog) clearInterval(sseWatchdog);
+  sseWatchdog = setInterval(() => {
+    if (!sseStarted) return;
+    if (sseSource && sseSource.readyState === EventSource.CLOSED) {
+      restartSse("连接已关闭");
+      return;
+    }
+    if (Date.now() - sseLastRxAt > SSE_SILENCE_MS) {
+      restartSse("超过 25 秒没有收到数据");
+    }
+  }, 5000);
+}
+
+/** 会话详情轮询不该依赖 SSE：SSE 一静默，正在跑的会话就再也不刷新了。
+ *  这里给它一个独立定时器，只对「当前选中且正在跑」的会话发请求。 */
+let detailPoller = null;
+function startDetailPoller() {
+  if (detailPoller) clearInterval(detailPoller);
+  detailPoller = setInterval(() => {
+    if (document.hidden) return;
+    if (selected?.type !== "conversation" || !state) return;
+    const key = String(selected.id);
+    const conv = state.conversations.find((c) => String(c.id) === key);
+    if (!conv || !isActiveConversationStatus(conv.status)) return;
+    if (!conversationDetailCache.has(key)) return; // 首次加载由 renderConversation 负责
+    const record = detailRefreshState.get(key);
+    if (record && Date.now() - record.lastFetch < DETAIL_POLL_ACTIVE_MS) return;
+    maybeRefreshConversationDetail(conv);
+  }, DETAIL_POLL_ACTIVE_MS);
+}
+
+/** 建立 SSE 连接。报告阅读页不需要它，所以包成函数，只在主界面调用。 */
+function startEventStream() {
+  sseStarted = true;
+  connectSse();
+  startSseWatchdog();
+  startDetailPoller();
+  // 回到前台、网络恢复时主动检查一次：手机切回来最容易是假死状态。
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    if (!sseSource || sseSource.readyState === EventSource.CLOSED || Date.now() - sseLastRxAt > SSE_SILENCE_MS) {
+      sseRetry = 0;
+      restartSse("页面重新可见");
+    }
+  });
+  window.addEventListener("online", () => {
+    sseRetry = 0;
+    restartSse("网络恢复");
+  });
+  return () => closeSse();
 }
 
 // 启动时先拉一次偏好，应用标题 / 图标 / 主题 / 密度（失败则保持默认外观）
