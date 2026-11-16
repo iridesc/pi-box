@@ -105,6 +105,18 @@ function mapImages(messages, visit) {
   return changed ? next : messages;
 }
 
+/** 环境变量里的预算阈值（PI_BOX_IMAGE_TRIGGER_MB / TARGET_MB），harness 与占用展示共用同一份。 */
+export function imageBudgetLimits() {
+  const megabytes = (name, fallback) => {
+    const value = Number(process.env[name] ?? "");
+    return Number.isFinite(value) && value > 0 ? Math.round(value * 1024 * 1024) : fallback;
+  };
+  return {
+    triggerBytes: megabytes("PI_BOX_IMAGE_TRIGGER_MB", IMAGE_BUDGET_DEFAULTS.triggerBytes),
+    targetBytes: megabytes("PI_BOX_IMAGE_TARGET_MB", IMAGE_BUDGET_DEFAULTS.targetBytes),
+  };
+}
+
 function resolveLimits(limits = {}) {
   const triggerBytes = Number(limits.triggerBytes);
   const targetBytes = Number(limits.targetBytes);

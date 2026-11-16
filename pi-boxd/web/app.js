@@ -1948,7 +1948,13 @@ function renderContextBar(conv) {
   const parts = [];
   parts.push(ratio === null ? `上下文 ${formatTokens(used)}` : `上下文 ${(ratio * 100).toFixed(ratio < 0.1 ? 1 : 0)}%`);
   parts.push(ratio === null ? "上限未知" : `${formatTokens(used)} / ${formatTokens(window)}`);
-  if (summary.images?.count > 0) parts.push(`图 ${summary.images.count} 张 ${formatBytes(summary.images.bytes)}`);
+  if (summary.images?.count > 0) {
+    const stored = formatBytes(summary.images.bytes);
+    const sending = summary.images.sending?.bytes;
+    // 存量 vs 本轮实际发送：请求级预算会把老图换成占位，两者可能差一个数量级。
+    const trimmed = Number.isFinite(sending) && sending < summary.images.bytes - 1024;
+    parts.push(`图 ${summary.images.count} 张 ${stored}${trimmed ? ` → 本轮 ${formatBytes(sending)}` : ""}`);
+  }
   parts.push(`${summary.messages} 条消息`);
 
   const busy = (summary.compactions ?? []).length > 0;

@@ -31,7 +31,24 @@ test("图片按字节单列（token 估算里每张图恒为 4800 chars）", () 
   const summary = summarizeContext({ messages: [image], contextWindow: 100000 });
   assert.equal(summary.images.count, 1);
   assert.equal(summary.images.bytes, 2048);
+  assert.equal(summary.images.sending.bytes, 2048); // 没超预算，原样发
   assert.ok(summary.tokens.estimated > 0);
+});
+
+test("超过图片预算时，sending 按裁剪后的算，stored 保留存量", () => {
+  const image = (id, bytes) => ({ role: "toolResult", toolCallId: id, content: [{ type: "image", data: "a".repeat(bytes), mimeType: "image/png" }] });
+  const messages = [image("c1", 4096), image("c2", 4096), image("c3", 4096)];
+  const summary = summarizeContext({
+    messages,
+    contextWindow: 100000,
+    limits: { triggerBytes: 9000, targetBytes: 5000 },
+  });
+  assert.equal(summary.images.count, 3);
+  assert.equal(summary.images.bytes, 12288);
+  // 超了 trigger：从最老的裁到 ≤ target，只剩最新一张真的发出去。
+  assert.equal(summary.images.sending.count, 1);
+  assert.equal(summary.images.sending.bytes, 4096);
+  assert.deepEqual(summary.budget, { triggerBytes: 9000, targetBytes: 5000 });
 });
 
 test("上限未知时 ratio 为 null，压缩状态原样透出", () => {
@@ -53,5 +70,5 @@ test("空会话不会算出 NaN", () => {
   assert.equal(summary.tokens.measured, null);
   assert.equal(summary.tokens.estimated, 0);
   assert.equal(summary.ratio, 0);
-  assert.deepEqual(summary.images, { count: 0, bytes: 0 });
+  assert.deepEqual(summary.images, { count: 0, bytes: 0, sending: { count: 0, bytes: 0 } });
 });

@@ -37,7 +37,7 @@ import {
 import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta, setPiBoxExtensionGetter } from "./extension.mjs";
 import { ReportExtension } from "./report-tools.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
-import { createImageBudgetExtension, IMAGE_BUDGET_DEFAULTS, sumInlineImages } from "./image-budget.mjs";
+import { boundImages, createImageBudgetExtension, imageBudgetLimits, sumInlineImages } from "./image-budget.mjs";
 import { calculateContextTokens, estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { SkillsExtension } from "./skills-extension.mjs";
 import { ToolGuardExtension } from "./tool-guard-extension.mjs";
@@ -45,12 +45,6 @@ import { listSchedules } from "./schedules.mjs";
 
 const context = BACKGROUND_CONTEXT;
 export { context };
-
-/** 环境变量里的 MB 数（PI_BOX_IMAGE_TRIGGER_MB / PI_BOX_IMAGE_TARGET_MB）；无效或未设时用默认值。 */
-function envMegabytes(name, fallback) {
-  const value = Number(process.env[name] ?? "");
-  return Number.isFinite(value) && value > 0 ? Math.round(value * 1024 * 1024) : fallback;
-}
 
 /** 环境变量里的正整数 token 数（PI_BOX_COMPACT_KEEP_TOKENS 等）；无效或未设时用默认值。 */
 function envTokens(name, fallback) {
@@ -70,10 +64,7 @@ export async function createHarness() {
   registry.install(createCodingTools({ images: await createNodePhotonImages() }));
   // 图片预算：历史图片每轮都要重发，超字节阈值就从最老的开始换成占位文本（只影响这一次请求）。
   registry.install(
-    createImageBudgetExtension({
-      triggerBytes: envMegabytes("PI_BOX_IMAGE_TRIGGER_MB", IMAGE_BUDGET_DEFAULTS.triggerBytes),
-      targetBytes: envMegabytes("PI_BOX_IMAGE_TARGET_MB", IMAGE_BUDGET_DEFAULTS.targetBytes),
-    }),
+    createImageBudgetExtension(imageBudgetLimits()),
   );
 
   // 先建一个占位扩展，工具里通过 getter 拿到它（解决循环引用）
@@ -403,10 +394,16 @@ export function aggregateActorStatus(projectConversations) {
  * `estimated` 恒给出：没有实测时它就是唯一答案；有实测时它≈实测+尾部长度的估算。
  * 图片单列字节数，因为 token 估算里一张图恒为 4800 chars，跟真实体积无关。
  */
-export function summarizeContext({ messages, contextWindow, compactions = [], failure = null }) {
+export function summarizeContext({ messages, contextWindow, compactions = [], failure = null, limits = imageBudgetLimits() }) {
+  // 请求级图片预算会先把老图换成占位，所以「实际发出去」的 token 和字节都要按裁剪后的算，
+  // 同时保留裁剪前的存量数字，前端才能显示「309 张 232MB → 本轮 7.8MB」这种对比。
+  const bounded = boundImages(messages, limits).messages;
+  const stored = sumInlineImages(messages);
+  const sending = sumInlineImages(bounded);
+
   let measured = null;
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
+  for (let index = bounded.length - 1; index >= 0; index--) {
+    const message = bounded[index];
     if (message?.role !== "assistant") continue;
     const tokens = calculateContextTokens(message.usage ?? {});
     if (tokens > 0) {
@@ -416,14 +413,15 @@ export function summarizeContext({ messages, contextWindow, compactions = [], fa
   }
   const from = measured === null ? 0 : measured.index + 1;
   let estimated = measured?.tokens ?? 0;
-  for (const message of messages.slice(from)) estimated += estimateMessageTokens(message);
+  for (const message of bounded.slice(from)) estimated += estimateMessageTokens(message);
   const window = Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null;
   return {
     messages: messages.length,
     tokens: { measured: measured?.tokens ?? null, estimated },
     contextWindow: window,
     ratio: window === null ? null : estimated / window,
-    images: sumInlineImages(messages),
+    images: { ...stored, sending },
+    budget: { triggerBytes: limits.triggerBytes, targetBytes: limits.targetBytes },
     compactions,
     failure,
   };
