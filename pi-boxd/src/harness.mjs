@@ -232,30 +232,45 @@ export async function syncSubagentInstances(harness, projectName, agentName, { r
   const def = await loadAgentDef(projectName, agentName);
   if (!def) return;
   const cwd = projectName === META_PROJECT ? META_DIR : join(PROJECTS_DIR, projectName);
+  const tools = resolveAgentTools(def.tools, def.mcps, def.mcpTools, { role: "agent" });
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
+
+  const targets = [];
   for (const rec of records) {
-    if (rec.owner !== null && rec.owner !== undefined) continue; // 只看主会话
+    // 情况一：会话本身就是这个 agent 角色（手动新建的会话、定时任务会话）。
+    // 这类会话不在 Subagents 注册表里，以前两头都管不到 → 配置永远停在创建时的快照。
+    const meta = await harness.snapshot(ConversationMeta, rec.id, context);
+    if (meta?.actorType === "agent" && meta?.actorName === agentName && meta?.project === projectName) {
+      targets.push(rec.id);
+      continue;
+    }
+    // 情况二：主会话通过 subagent 工具 spawn 出来的子会话。
+    if (rec.owner !== null && rec.owner !== undefined) continue;
     const a = await harness.snapshot(AgentDoc, rec.id, context);
     if (a?.cwd !== cwd) continue;
     const st = await harness.snapshot(Subagents, rec.id, context);
     const found = st?.agents?.[agentName];
     if (!found) continue;
+    targets.push(found.conversationId);
+  }
+
+  for (const conversationId of [...new Set(targets)]) {
     await harness.commit(
-      (tx) => configure(tx, found.conversationId, {
+      (tx) => configure(tx, conversationId, {
         instructions: def.instructions,
         model: resolveAgentModel(def.model),
-        tools: resolveAgentTools(def.tools, def.mcps, def.mcpTools, { role: "agent" }),
+        tools,
       }),
       context,
     );
     if (resetContext) {
-      const conversation = await harness.conversation(found.conversationId, context);
-      if (!conversation) throw new Error(`找不到子 agent ${agentName} 的会话 #${found.conversationId}`);
+      const conversation = await harness.conversation(conversationId, context);
+      if (!conversation) throw new Error(`找不到子 agent ${agentName} 的会话 #${conversationId}`);
       // Durable reset 只切换活跃模型上下文；历史条目仍保留供页面查看。
       // 如果会话正在执行，reset 会在当前运行边界安全落位，下一项任务使用新配置。
       await conversation.reset(undefined, context);
     }
-    console.log(`[sync] 刷新子 agent ${agentName} 会话 #${found.conversationId}${resetContext ? "，已重置活跃上下文" : ""}`);
+    console.log(`[sync] 刷新子 agent ${agentName} 会话 #${conversationId}${resetContext ? "，已重置活跃上下文" : ""}`);
   }
 }
 
