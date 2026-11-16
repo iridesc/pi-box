@@ -17,14 +17,16 @@
 import { readdir, readFile, writeFile, copyFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+// APP_DIR 指向 pi-boxd 的 src 所在父目录：本地默认 ../pi-boxd，容器内是 /home/pi-boxd/app。
+const APP_DIR = process.env.PI_BOXD_APP_DIR ?? new URL("../pi-boxd", import.meta.url).pathname;
 const {
   WORKSPACE,
   PROJECTS_DIR,
   GLOBAL_AGENTS_DIR,
   META_AGENTS_DIR,
   META_DIR,
-} = await import("../pi-boxd/src/paths.mjs");
-const { parseAgentDef, serializeAgentDef } = await import("../pi-boxd/src/agents.mjs");
+} = await import(`${APP_DIR}/src/paths.mjs`);
+const { parseAgentDef, serializeAgentDef } = await import(`${APP_DIR}/src/agents.mjs`);
 
 const WRITE = process.argv.includes("--write");
 const BUILTIN = ["read", "write", "edit", "bash"];

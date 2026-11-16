@@ -47,6 +47,8 @@ export function setToolCatalog(entries) {
   for (const { extension, tool } of entries) {
     if (tool.name.startsWith("mcp__")) continue;   // MCP 单独按 server 管理，不进 tools 白名单
     if (BUILTIN_TOOL_BY_NAME.has(tool.name)) continue;  // 内置工具单独成组，避免重复
+    // 只给模型可调用的工具（codemode 内部工具 callers:["tools"]，勾了也没用）
+    if (tool.callers !== undefined && !tool.callers.includes("model")) continue;
     const group = groupOf(extension.name);
     byName.set(tool.name, { tool, group, extension: extension.name });
     if (!groups.has(group)) groups.set(group, []);

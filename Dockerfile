@@ -22,6 +22,8 @@ COPY pi-boxd/web/ /home/pi-boxd/app/web/
 # README 面向人，docs/ 面向 agent（架构索引 + 能力变更日志）。
 COPY README.md /home/pi-boxd/app/README.md
 COPY docs/ /home/pi-boxd/app/docs/
+# 运维脚本（迁移等）：随镜像发布，升级时可直接在容器内执行
+COPY scripts/ /home/pi-boxd/app/scripts/
 # 元项目 seed（首启由 entrypoint 复制到 /home/agent/.pi/agent/meta/）
 COPY pi-boxd/seed/ /home/pi-boxd/seed/
 
