@@ -269,6 +269,8 @@ section:last-child { border-right: none; }
 .checkbox-box { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; }
 .checkbox-item { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; }
 .muted { color: #8b949e; font-size: 12px; }
+.muted.warn { color: #d29922; }
+.muted.ok { color: #3fb950; }
 .form-actions { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
 .btn-primary {
   background: #238636; border: 1px solid #2ea043; color: #fff;

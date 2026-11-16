@@ -131,6 +131,9 @@ export const DEFAULT_PREFS = {
   appTitle: "pi-box · 多 Agent 平台",
   // 标签页图标：default（内置 svg）| emoji | upload（用户上传到 DATA_DIR/branding/）
   appIcon: { type: "default" },
+  // agent 回复完成后是否弹浏览器通知（"off" | "hidden" | "always"）。
+  // "hidden"：只在页面切到后台时提醒；"always"：不管在不在前台都提醒。
+  browserNotify: "hidden",
 };
 export const APP_TITLE_MAX = 120;
 export const APP_ICON_EXTS = ["png", "jpg", "webp", "svg", "ico"];
@@ -163,6 +166,7 @@ function normalizePrefs(raw) {
   const title = typeof merged.appTitle === "string" ? merged.appTitle.trim() : "";
   merged.appTitle = title ? title.slice(0, APP_TITLE_MAX) : DEFAULT_PREFS.appTitle;
   merged.appIcon = normalizeAppIcon(merged.appIcon);
+  if (!["off", "hidden", "always"].includes(merged.browserNotify)) merged.browserNotify = DEFAULT_PREFS.browserNotify;
   return merged;
 }
 

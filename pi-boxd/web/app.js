@@ -44,21 +44,27 @@ function saveUnread() {
     /* 隐私模式下 localStorage 可能不可写，忽略 */
   }
 }
-/** 观察会话状态跃迁，返回是否有变化（用于触发左栏重绘）。 */
+/** 观察会话状态跃迁，返回 { changed, finished }。
+ *  changed 用于触发左栏重绘；finished 是「刚跑完、值得提醒」的会话，交给通知逻辑。 */
 function trackUnreadConversations(conversations) {
   const alive = new Set();
+  const finished = [];
   let changed = false;
+  const pageVisible = document.visibilityState === "visible";
   for (const conv of conversations ?? []) {
     const id = String(conv.id);
     alive.add(id);
     const prev = previousConvStatus.get(id);
     // 首次见到该会话不标记（打开页面不该刷出一屏未读）
     if (prev !== undefined && isActiveConversationStatus(prev) && !isActiveConversationStatus(conv.status)) {
-      const viewing = selected?.type === "conversation" && String(selected.id) === id;
+      // 只有「页面在前台且正看着这个会话」才算真的看过了；
+      // 切到后台时即便它还选中着，也应该标未读并提醒。
+      const viewing = pageVisible && selected?.type === "conversation" && String(selected.id) === id;
       // 定时任务的独立会话跑完就完，结果不回给助理/用户，不该当成「待查看」。
       const backgroundOnly = conv.source === "schedule";
       if (!viewing && !backgroundOnly && !unreadConversations.has(id)) {
         unreadConversations.add(id);
+        finished.push(conv);
         changed = true;
       }
     }
@@ -70,8 +76,11 @@ function trackUnreadConversations(conversations) {
       changed = true;
     }
   }
-  if (changed) saveUnread();
-  return changed;
+  if (changed) {
+    saveUnread();
+    updateTitleBadge();
+  }
+  return { changed, finished };
 }
 let expandedProjectSchedules = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
@@ -173,7 +182,8 @@ function appIconHref(icon) {
 
 /** 应用标题 / 图标 / 主题 / 密度（页面初次加载与保存后都走这里）。 */
 function applyBranding(prefs) {
-  document.title = prefs?.appTitle || DEFAULT_APP_TITLE;
+  if (prefs && typeof prefs === "object") appPrefs = { ...appPrefs, ...prefs };
+  updateTitleBadge();
   const link = document.getElementById("app-favicon");
   if (link) link.href = appIconHref(prefs?.appIcon);
   if (prefs?.density) document.body.classList.toggle("density-compact", prefs.density === "compact");
@@ -291,6 +301,7 @@ function render() {
   if (selected?.type === "conversation" && selected.id
     && unreadConversations.delete(String(selected.id))) {
     saveUnread();
+    updateTitleBadge();
   }
   const filesMode = selected?.type === "files";
   const reportsMode = selected?.type === "reports";
@@ -1612,6 +1623,115 @@ function renderTextPreview(body, preview) {
   wrap.appendChild(gutter);
   wrap.appendChild(code);
   body.appendChild(wrap);
+}
+
+// ── agent 回复后的提醒 ────────────────────────────────────────────────
+// 两条路并行，谁可用用谁：
+//   1) 系统通知（Notification API）：只在 HTTPS 或 localhost 下可用，
+//      内网 http://<ip>:<port> 属于非安全上下文，Chrome 直接禁用；
+//   2) 标签页标题计数（(3) 前缀）：任何环境都能用，通知不可用时靠它兜底。
+let appPrefs = { browserNotify: "hidden" };
+let notifyPermissionAsked = false;
+
+function browserNotifyMode() {
+  return appPrefs?.browserNotify ?? "hidden";
+}
+
+/** 系统通知是否真的能发：开关不是 off、权限已授予、API 存在。 */
+function canUseSystemNotification() {
+  if (browserNotifyMode() === "off") return false;
+  if (typeof Notification === "undefined") return false;
+  return Notification.permission === "granted";
+}
+
+/** 主动申请权限。必须由用户手势触发（浏览器规定），所以只从设置里的按钮调。 */
+async function requestNotifyPermission() {
+  if (typeof Notification === "undefined") {
+    return { ok: false, reason: "当前环境不支持浏览器通知（需要 HTTPS 或 localhost）" };
+  }
+  if (!window.isSecureContext) {
+    return { ok: false, reason: "当前是非安全上下文（http + IP），浏览器不允许通知。用 https 或 localhost 访问才行" };
+  }
+  notifyPermissionAsked = true;
+  const permission = await Notification.requestPermission();
+  if (permission === "granted") return { ok: true };
+  if (permission === "denied") return { ok: false, reason: "已被浏览器拒绝，需要到站点设置里手动允许" };
+  return { ok: false, reason: "未授予通知权限" };
+}
+
+/** 标题前缀显示未读条数；没有未读就还原成偏好的标题。 */
+function updateTitleBadge() {
+  const base = appPrefs?.appTitle || DEFAULT_APP_TITLE;
+  const count = unreadConversations.size;
+  const next = count > 0 ? `(${count}) ${base}` : base;
+  if (document.title !== next) document.title = next;
+}
+
+/** 会话标题：项目 / 助理或 Agent 名；没有就用会话标题。 */
+function conversationNotifyTitle(conv) {
+  const who = conv.actorName || (conv.actorType === "assistant" ? "助理" : "");
+  const project = conv.project || "";
+  if (project && who) return `${project} · ${who}`;
+  return conv.title || project || "pi-box";
+}
+
+/** 取最后一条 assistant 文本当通知正文，拿不到就退化成状态描述。 */
+async function conversationSummary(conv) {
+  const key = String(conv.id);
+  try {
+    let detail = conversationDetailCache.get(key);
+    if (!detail) detail = await (await fetch(`/api/conversation?id=${encodeURIComponent(key)}`)).json();
+    const entries = Array.isArray(detail?.entries) ? detail.entries : [];
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const entry = entries[i];
+      const messages = entry?.model;
+      if (!Array.isArray(messages)) continue;
+      for (let j = messages.length - 1; j >= 0; j -= 1) {
+        const msg = messages[j];
+        if (msg?.role !== "assistant") continue;
+        const text = messageText(msg).replace(/\s+/g, " ").trim();
+        if (text && !text.startsWith("[thinking]")) return text.slice(0, 120);
+      }
+    }
+  } catch {
+    // 摘要拿不到不影响提醒本身
+  }
+  return "已回复，点开查看结果";
+}
+
+/** Agent 跑完了：按偏好弹通知，并把未读计数刷到标题上。 */
+async function notifyConversationFinished(conv) {
+  updateTitleBadge();
+  const mode = browserNotifyMode();
+  if (mode === "off") return;
+  if (mode === "hidden" && document.visibilityState === "visible") return;
+  if (!canUseSystemNotification()) return;
+  const title = conversationNotifyTitle(conv);
+  const body = await conversationSummary(conv);
+  try {
+    const notification = new Notification(title, {
+      body,
+      tag: `pibox-conv-${conv.id}`, // 同一会话重复完成会替换，不会堆一屏
+      icon: appIconHref(appPrefs?.appIcon),
+      silent: false,
+    });
+    notification.onclick = () => {
+      window.focus();
+      notification.close();
+      openConversationFromNotification(conv);
+    };
+  } catch {
+    // 某些环境（如 macOS 未授权）构造会抛错，忽略即可
+  }
+}
+
+/** 点通知回到该会话：项目要展开，并把它选中。 */
+function openConversationFromNotification(conv) {
+  if (!conv?.project) return;
+  expandedProjects.add(conv.project);
+  selected = { type: "conversation", id: String(conv.id) };
+  render();
+  maybeRefreshConversationDetail(conv);
 }
 
 /** 文件选择器：选完直接传到指定目录。 */
@@ -4988,6 +5108,54 @@ async function renderDrawerSystem(panel) {
   };
   themeRow.appendChild(themeSel);
   sec4.appendChild(themeRow);
+
+  // agent 回复后的提醒
+  const notifyRow = el("div", "form-row");
+  notifyRow.appendChild(el("label", "", "完成提醒"));
+  const notifySel = document.createElement("select");
+  for (const [v, text] of [["off", "关闭"], ["hidden", "页面在后台时"], ["always", "总是"]]) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    if (v === (prefs.browserNotify ?? "hidden")) o.selected = true;
+    notifySel.appendChild(o);
+  }
+  notifySel.onchange = async () => {
+    if (notifySel.value === "off") {
+      appPrefs = { ...appPrefs, browserNotify: "off" };
+      await savePrefsPatch({ browserNotify: "off" });
+      notifyHint.textContent = "已关闭。";
+      notifyHint.className = "muted";
+      return;
+    }
+    // 打开开关就是用户手势，正好用来申请权限
+    const result = await requestNotifyPermission();
+    if (!result.ok) {
+      notifySel.value = "off";
+      appPrefs = { ...appPrefs, browserNotify: "off" };
+      await savePrefsPatch({ browserNotify: "off" });
+      notifyHint.textContent = `⚠️ 无法开启：${result.reason}`;
+      notifyHint.className = "muted warn";
+      return;
+    }
+    appPrefs = { ...appPrefs, browserNotify: notifySel.value };
+    await savePrefsPatch({ browserNotify: notifySel.value });
+    notifyHint.textContent = notifySel.value === "hidden"
+      ? "页面切到后台时提醒（系统通知不可用的环境，靠标签页标题上的未读计数）。"
+      : "每次跑完都提醒（系统通知不可用的环境，靠标签页标题上的未读计数）。";
+    notifyHint.className = "muted";
+  };
+  notifyRow.appendChild(notifySel);
+  sec4.appendChild(notifyRow);
+
+  const notifyHint = el("div", "muted",
+    typeof Notification === "undefined" || !window.isSecureContext
+      ? "当前环境不支持系统通知（需要 HTTPS 或 localhost），会用标签页标题的未读计数提醒。"
+      : "Agent 回复完成后弹系统通知；系统通知不可用时用标签页标题的未读计数。");
+  if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+    notifyHint.textContent = "浏览器已拒绝本站通知权限，需要到站点设置里手动允许后才能开启。";
+  }
+  sec4.appendChild(notifyHint);
   panel.appendChild(sec4);
 
   // 品牌：浏览器标签页标题 + 图标（品牌名 h1 不可修改）
@@ -5439,7 +5607,9 @@ function connectSse() {
     state = next;
     agentsCache = state.agentsByProject ?? {};
     schedulesCache = state.schedulesByProject ?? {};
-    if (trackUnreadConversations(state.conversations)) diff.agents = true;
+    const unread = trackUnreadConversations(state.conversations);
+    if (unread.changed) diff.agents = true;
+    for (const conv of unread.finished) notifyConversationFinished(conv);
     applySnapshotDiff(prev, diff);
     updateSseIndicator("ok");
   };
