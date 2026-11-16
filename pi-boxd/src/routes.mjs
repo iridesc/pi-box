@@ -8,7 +8,7 @@ import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, res
 import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR, WEB_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, agentFilePath, ensureSkillReadTool, loadProjectIcon, saveProjectIcon, setAssistantIcon, setAgentIcon, normalizeIcon } from "./agents.mjs";
+import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, validateAgentConfig, toolCatalog, mcpCatalog, agentFilePath, ensureSkillReadTool, loadProjectIcon, saveProjectIcon, setAssistantIcon, setAgentIcon, normalizeIcon } from "./agents.mjs";
 import { createRoleConversation, renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
@@ -736,7 +736,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           res.end(JSON.stringify({ project, agents: await listAgents(project) }));
           return;
         }
-        const { project, name, oldName, scope = "project", model: m, tools, mcps, skills, reports, instructions, icon } = await readBody(req);
+        const { project, name, oldName, scope = "project", model: m, tools, mcps, mcpTools, skills, reports, instructions, icon } = await readBody(req);
         if (!name || !AGENT_NAME_RE.test(name)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Agent 名只能含中文或其他语言的字母、数字、-、_" }));
@@ -757,7 +757,9 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           return;
         }
         try {
-          resolveAgentTools(tools);
+          // scope=global 的模板可能被任何项目使用，按 assistant 规则放宽（允许 subagent）。
+          resolveAgentTools(tools, [], null, { role: scope === "global" ? "assistant" : "agent" });
+          validateAgentConfig({ tools, mcps, mcpTools, reports, skills, role: scope === "global" ? "assistant" : "agent" });
         } catch (error) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: error.message }));
@@ -784,7 +786,10 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           if (invalid.length > 0) {
             throw new Error(`Skill 定义非法：${invalid.map((item) => `${item.name}（${item.error}）`).join("; ")}`);
           }
-          ensureSkillReadTool(resolveAgentTools(tools, Array.isArray(mcps) ? mcps : []), resolvedSkills.length);
+          ensureSkillReadTool(
+            resolveAgentTools(tools, Array.isArray(mcps) ? mcps : [], mcpTools, { role: scope === "global" ? "assistant" : "agent" }),
+            resolvedSkills.length,
+          );
           if (oldName && oldName !== name) {
             await renameAgentFile(project, oldName, name, scope);
             await renameSubagentRecords(harness, { scope, projectName: project, oldName, newName: name });
@@ -803,8 +808,10 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           }
           const file = await saveAgentFile(project, name, scope, {
             model: m,
-            tools,
+            // tools 缺失 → 空数组落盘（显式模型：没有就是没有）
+            tools: Array.isArray(tools) ? tools : [],
             mcps: Array.isArray(mcps) ? mcps : [],
+            mcpTools: Array.isArray(mcpTools) && mcpTools.length > 0 ? mcpTools : null,
             skills: Array.isArray(skills) ? skills : null,
             reports: resolvedReports,
             icon: icon === undefined ? undefined : normalizeIcon(icon),
@@ -839,6 +846,16 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(await listAgentCatalog(project)));
+      },
+    },
+    // 工具目录：按角色给出可勾选项（分组 + 可用性 + 锁定原因）
+    "/api/tool-catalog": {
+      method: "GET",
+      async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const role = url.searchParams.get("role") === "assistant" ? "assistant" : "agent";
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ role, groups: toolCatalog({ role }), mcp: mcpCatalog() }));
       },
     },
     // agent 删除
@@ -896,7 +913,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           res.end(JSON.stringify({ project, assistant: await loadAssistant(project) }));
           return;
         }
-        const { project, model: m, tools, mcps, skills, agents, reports, instructions, icon } = await readBody(req);
+        const { project, model: m, tools, mcps, mcpTools, skills, agents, reports, instructions, icon } = await readBody(req);
         if (!project) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "缺少 project" }));
@@ -910,7 +927,8 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
         const selectedGlobals = Array.isArray(agents) ? agents.filter((name) => globalNames.has(name)) : [];
         try {
           // 同时完成内置工具名与 MCP 可用性的校验；subagent 由后端强制附加，不落入用户配置。
-          resolveAssistantTools(tools, mcps);
+          resolveAssistantTools(tools, mcps, mcpTools);
+          validateAgentConfig({ tools, mcps, mcpTools, reports, skills, role: "assistant" });
           const { skills: resolvedSkills, missing, invalid } = await resolveSkills(skills, project);
           if (missing.length > 0) {
             throw new Error(`未知 Skill：${missing.join(", ")}（请先在系统设置 → Skills 中上传）`);
@@ -918,7 +936,7 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           if (invalid.length > 0) {
             throw new Error(`Skill 定义非法：${invalid.map((item) => `${item.name}（${item.error}）`).join("; ")}`);
           }
-          ensureSkillReadTool(resolveAssistantTools(tools, mcps), resolvedSkills.length);
+          ensureSkillReadTool(resolveAssistantTools(tools, mcps, mcpTools), resolvedSkills.length);
           // 报告组绑定：助理也能写报告；必须是已存在的组。
           let resolvedReports = null;
           if (Array.isArray(reports)) {
@@ -931,8 +949,10 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
           }
           const file = await saveAssistantFile(project, {
             model: m,
-            tools,
-            mcps,
+            // tools 缺失 → 空数组落盘（显式模型）；subagent 仍由后端强制注入，不写入文件。
+            tools: Array.isArray(tools) ? tools : [],
+            mcps: Array.isArray(mcps) ? mcps : [],
+            mcpTools: Array.isArray(mcpTools) && mcpTools.length > 0 ? mcpTools : null,
             skills: Array.isArray(skills) ? skills : null,
             agents: selectedGlobals,
             reports: resolvedReports,

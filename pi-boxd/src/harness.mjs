@@ -28,12 +28,16 @@ import {
   resolveAssistantTools,
   setAssistantRequiredTools,
   setMcpToolsByServer,
-  AVAILABLE_TOOL_NAMES,
+  setToolCatalog,
+  availableToolNames,
+  toolCatalog,
+  mcpCatalog,
 } from "./agents.mjs";
-import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta } from "./extension.mjs";
+import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta, setPiBoxExtensionGetter } from "./extension.mjs";
 import { ReportExtension } from "./report-tools.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
 import { SkillsExtension } from "./skills-extension.mjs";
+import { ToolGuardExtension } from "./tool-guard-extension.mjs";
 import { listSchedules } from "./schedules.mjs";
 
 const context = BACKGROUND_CONTEXT;
@@ -53,12 +57,15 @@ export async function createHarness() {
   const SubagentTool = makeSubagentTool(() => piBoxExt);
   setAssistantRequiredTools([SubagentTool]);
   piBoxExt = defineExtension({ name: "pi-box", tools: [SubagentTool], tasks: PiBoxTasks });
+  setPiBoxExtensionGetter(() => piBoxExt);
   registry.install(piBoxExt);
   // 报告工具单独一个扩展：子 agent spawn 时会 remove pi-box 防递归，
   // 而写报告的主力正是子 agent，挂在 pi-box 上会让它们失去报告能力。
   registry.install(ReportExtension);
   // skill 注入单独一个扩展：子 agent spawn 时只 remove pi-box（防递归），skill 能力得以保留。
   registry.install(SkillsExtension);
+  // 缺工具必须报错的硬约束；同样不能挂在 pi-box 扩展上，否则子 agent 拿不到。
+  registry.install(ToolGuardExtension);
 
   // MCP 工具先注册为独立 extension；codemode/tool_search 使用 Durable 1.2 的嵌套工具机制调用它们。
   const mcpBridge = new McpDurableBridge(registry);
@@ -73,6 +80,9 @@ export async function createHarness() {
   registry.install(codemodeExtension);
   registry.install(toolSearchExtension);
   setMcpToolsByServer(mcpBridge.toolsByServer, [codemodeExtension.tools[0], toolSearchExtension.tools[0]]);
+  // 把 registry 里除 MCP 之外的扩展工具注入 agents.mjs（它是纯逻辑模块，拿不到 registry）。
+  // MCP 工具按 server 单独管理，不进 tools 白名单。
+  setToolCatalog(registry.snapshot().tools());
 
   const harness = await Harness.open(
     storage,
@@ -110,7 +120,7 @@ export async function ensureProjectConversations(harness) {
         agent: {
           model: resolveAgentModel(assistant.model),
           instructions: assistantInstructions(name, assistant, agents),
-          tools: resolveAssistantTools(assistant.tools, assistant.mcps),
+          tools: resolveAssistantTools(assistant.tools, assistant.mcps, assistant.mcpTools),
           cwd,
         },
         init: (tx, conversationId) => setConversationMeta(tx, conversationId, {
@@ -151,7 +161,7 @@ export async function createRoleConversation(harness, projectName, actorType, ac
     config = {
       model: resolveAgentModel(assistant.model),
       instructions: assistantInstructions(projectName, assistant, agents),
-      tools: resolveAssistantTools(assistant.tools, assistant.mcps),
+      tools: resolveAssistantTools(assistant.tools, assistant.mcps, assistant.mcpTools),
       cwd,
     };
     resolvedActorName = "助理";
@@ -161,7 +171,7 @@ export async function createRoleConversation(harness, projectName, actorType, ac
     config = {
       model: resolveAgentModel(def.model),
       instructions: def.instructions,
-      tools: resolveAgentTools(def.tools, def.mcps),
+      tools: resolveAgentTools(def.tools, def.mcps, def.mcpTools, { role: "agent" }),
       cwd,
     };
     resolvedActorName = def.name;
@@ -199,7 +209,7 @@ async function syncProjectAssistant(harness, projectName) {
   const agents = await listAgents(projectName);
   const instructions = assistantInstructions(projectName, assistant, agents);
   const assistantModel = resolveAgentModel(assistant.model);
-  const assistantTools = resolveAssistantTools(assistant.tools, assistant.mcps);
+  const assistantTools = resolveAssistantTools(assistant.tools, assistant.mcps, assistant.mcpTools);
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
   let n = 0;
   for (const rec of records) {
@@ -234,7 +244,7 @@ export async function syncSubagentInstances(harness, projectName, agentName, { r
       (tx) => configure(tx, found.conversationId, {
         instructions: def.instructions,
         model: resolveAgentModel(def.model),
-        tools: resolveAgentTools(def.tools, def.mcps),
+        tools: resolveAgentTools(def.tools, def.mcps, def.mcpTools, { role: "agent" }),
       }),
       context,
     );
@@ -430,6 +440,8 @@ export async function boxSnapshot(harness) {
     assistantByProject,
     schedulesByProject,
     agentsStatus,
-    availableTools: AVAILABLE_TOOL_NAMES,
+    availableTools: availableToolNames(),
+    toolCatalog: toolCatalog(),
+    mcpCatalog: mcpCatalog(),
   };
 }

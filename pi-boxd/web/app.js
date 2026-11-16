@@ -2852,24 +2852,16 @@ async function openAssistantEditor(proj) {
   populateAgentModelSelect(modelSelect, asst.model ?? "");
   modal.appendChild(formRow("模型", modelSelect));
 
-  const selectedTools = new Set(asst.tools ?? state.availableTools ?? []);
+  // 显式模型：文件里没有 tools 就是零工具（不再默认全选），迁移脚本会把老配置补全。
+  const toolCatalogData = await fetchToolCatalog("assistant");
+  const selectedTools = new Set(asst.tools ?? []);
   const enabledMcpNames = new Set(mcpServers.filter(([, config]) => config.enabled !== false).map(([name]) => name));
   const selectedMcps = new Set((asst.mcps ?? []).filter((name) => enabledMcpNames.has(name)));
   const skillLibrary = (await fetchSkillLibrary(proj)).skills ?? [];
   const selectedSkills = new Set(asst.skills ?? []);
   const linkage = skillReadLinkage(selectedSkills, selectedTools);
   linkage.sync(); // 已有 skill 引用时，把 read 补进将要提交的工具集，与界面展示保持一致
-  const toolsGroup = appendAgentCheckboxGroup(modal, {
-    title: "工具",
-    description: "选择助理可以直接调用的内置工具；任务派发工具由系统固定启用。启用 skill 时必须保留 read。",
-    choices: [
-      { value: "subagent", label: "subagent（系统必需，不可关闭）", required: true },
-      ...(state.availableTools ?? ["read", "write", "edit", "bash"]).map((tool) => ({ value: tool, label: tool })),
-    ],
-    selectedValues: selectedTools,
-    disabledWhen: linkage.toolDisabled,
-    checkedWhen: linkage.toolChecked,
-  });
+  const toolsGroup = appendToolGroups(modal, { catalog: toolCatalogData, selected: selectedTools });
   appendAgentCheckboxGroup(modal, {
     title: "Skills",
     description: "从全局技能库启用；勾选后自动附带 read（Skill 正文由模型读取）。未勾选则不注入任何 skill。",
@@ -2877,12 +2869,11 @@ async function openAssistantEditor(proj) {
     selectedValues: selectedSkills,
     onChange: () => { linkage.sync(); toolsGroup.refresh(); },
   });
-  appendAgentCheckboxGroup(modal, {
-    title: "MCP",
-    description: "选择助理可以使用的 MCP 服务；已停用的服务不可选择。",
-    choices: mcpServers.map(([name, config]) => ({ value: name, label: config.enabled === false ? `${name}（已停用）` : name, config })),
-    selectedValues: selectedMcps,
-    disabledWhen: (choice) => choice.config.enabled === false,
+  const mcpPicker = appendMcpPicker(modal, {
+    catalog: toolCatalogData.mcp ?? [],
+    selectedServers: selectedMcps,
+    selectedTools: new Set(asst.mcpTools ?? []),
+    isEnabled: (name) => enabledMcpNames.has(name),
   });
   const selectedGlobals = new Set(asst.agents ?? []);
   appendAgentCheckboxGroup(modal, {
@@ -2935,7 +2926,7 @@ async function openAssistantEditor(proj) {
         project: proj,
         model: modelSelect.value || null,
         tools: [...selectedTools],
-        mcps: [...selectedMcps],
+        ...(() => { const picked = mcpPicker.collect(); return { mcps: picked.mcps, mcpTools: picked.mcpTools }; })(),
         skills: [...selectedSkills],
         agents: [...selectedGlobals],
         reports: [...selectedReports],
@@ -3427,6 +3418,181 @@ function appendAgentCheckboxGroup(modal, {
   return { refresh };
 }
 
+/** 拉取工具目录：分组 + 可用性 + 锁定原因。role=assistant|agent 决定 subagent 是否可勾。 */
+async function fetchToolCatalog(role = "agent") {
+  try {
+    const res = await fetch(`/api/tool-catalog?role=${encodeURIComponent(role)}`);
+    if (!res.ok) return { role, groups: [], mcp: [] };
+    return await res.json();
+  } catch {
+    return { role, groups: [], mcp: [] };
+  }
+}
+
+/** 工具分组面板：内置 / 系统 / 报告 / 高级各成一组。
+ *  不可用项置灰并显示原因，锁定项显示 🔒（例如助理的 subagent）。 */
+function appendToolGroups(modal, { catalog, selected, onChange = () => {} }) {
+  const section = el("section", "agent-editor-section");
+  section.appendChild(el("div", "agent-editor-section-title", "工具"));
+  section.appendChild(el("div", "muted agent-editor-section-desc",
+    "勾选即启用，没勾就是没有（不会自动继承）。灰掉的是当前角色不可用项。"));
+  const items = [];
+  for (const group of catalog.groups ?? []) {
+    const block = el("div", "tool-group");
+    block.appendChild(el("div", "tool-group-title", group.name));
+    const grid = el("div", "agent-option-grid");
+    for (const tool of group.tools ?? []) {
+      const label = el("label", "agent-option");
+      if (tool.reason) label.title = tool.reason;
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = tool.name;
+      checkbox.disabled = tool.available === false;
+      checkbox.checked = selected.has(tool.name);
+      checkbox.onchange = () => {
+        if (checkbox.checked) selected.add(tool.name);
+        else selected.delete(tool.name);
+        onChange();
+      };
+      label.appendChild(checkbox);
+      label.appendChild(el("span", "agent-option-text", tool.label ?? tool.name));
+      if (tool.locked) label.appendChild(el("span", "agent-option-note", "🔒 必需"));
+      else if (tool.available === false) label.appendChild(el("span", "agent-option-note", tool.reason ?? "不可用"));
+      if (tool.available === false) label.classList.add("agent-option-disabled");
+      grid.appendChild(label);
+      items.push({ tool, checkbox, label });
+    }
+    block.appendChild(grid);
+    section.appendChild(block);
+  }
+  if (!(catalog.groups ?? []).length) section.appendChild(el("div", "muted", "（工具目录为空）"));
+  modal.appendChild(section);
+  return {
+    refresh() {
+      for (const { tool, checkbox } of items) {
+        checkbox.checked = selected.has(tool.name);
+        checkbox.disabled = tool.available === false;
+      }
+    },
+  };
+}
+
+/** MCP 面板：每个 server 一行「整组」开关 + 子工具。
+ *  整组勾 → 落盘 mcps，不收窄；只勾部分 → 落盘 mcps + mcpTools（该 server 收窄）。
+ *  收集规则与服务端一致：mcpTools 里出现的 server 按勾选收窄，没出现的给全部。 */
+function appendMcpPicker(modal, { catalog, selectedServers, selectedTools, isEnabled }) {
+  const section = el("section", "agent-editor-section");
+  section.appendChild(el("div", "agent-editor-section-title", "MCP 工具"));
+  section.appendChild(el("div", "muted agent-editor-section-desc",
+    "勾「整组」= 该服务全部工具；只勾部分工具则按勾选收窄。已停用的服务不可选。"));
+  const state = new Map();
+  const rows = [];
+
+  for (const entry of catalog ?? []) {
+    const tools = entry.tools ?? [];
+    const allNames = tools.map((t) => t.name);
+    const enabled = selectedServers.has(entry.server);
+    const picked = new Set(allNames.filter((name) => selectedTools?.has(name)));
+    // 从文件推导：启用了且没收窄 → 整组
+    const all = enabled && picked.size === 0;
+    state.set(entry.server, {
+      all,
+      picked: all ? new Set(allNames) : picked,
+    });
+
+    const row = el("div", "tool-group");
+    const head = el("label", "agent-option tool-group-head");
+    const groupBox = document.createElement("input");
+    groupBox.type = "checkbox";
+    groupBox.disabled = !isEnabled(entry.server);
+    head.appendChild(groupBox);
+    head.appendChild(el("span", "agent-option-text", `${entry.server}（整组）`));
+    head.appendChild(el("span", "agent-option-note", `${allNames.length} 个工具`));
+    row.appendChild(head);
+
+    const grid = el("div", "agent-option-grid tool-group-children");
+    const childBoxes = [];
+    for (const tool of tools) {
+      const label = el("label", "agent-option");
+      label.title = tool.name;
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.disabled = !isEnabled(entry.server);
+      label.appendChild(box);
+      label.appendChild(el("span", "agent-option-text", tool.label ?? tool.name));
+      grid.appendChild(label);
+      childBoxes.push({ name: tool.name, box, label });
+    }
+    row.appendChild(grid);
+    section.appendChild(row);
+    rows.push({ server: entry.server, groupBox, childBoxes, allNames });
+  }
+
+  function sync() {
+    for (const row of rows) {
+      const st = state.get(row.server);
+      const disabled = !isEnabled(row.server);
+      row.groupBox.disabled = disabled;
+      row.groupBox.checked = st.all;
+      // 部分勾选显示半选态
+      row.groupBox.indeterminate = !st.all && st.picked.size > 0;
+      for (const child of row.childBoxes) {
+        child.box.disabled = disabled;
+        child.box.checked = st.picked.has(child.name);
+      }
+    }
+  }
+
+  for (const row of rows) {
+    const st = state.get(row.server);
+    row.groupBox.onchange = () => {
+      if (row.groupBox.checked) {
+        st.all = true;
+        st.picked = new Set(row.allNames);
+      } else {
+        st.all = false;
+        st.picked = new Set();
+      }
+      sync();
+    };
+    for (const child of row.childBoxes) {
+      child.box.onchange = () => {
+        st.all = false;
+        if (child.box.checked) st.picked.add(child.name);
+        else st.picked.delete(child.name);
+        // 全部勾上时回到「整组」，避免落盘出多余的 mcpTools 列表
+        if (st.picked.size === row.allNames.length) st.all = true;
+        sync();
+      };
+    }
+  }
+
+  sync();
+  if (!rows.length) section.appendChild(el("div", "muted", "（没有已连接的 MCP 服务）"));
+  modal.appendChild(section);
+
+  return {
+    collect() {
+      const mcps = [];
+      const mcpTools = [];
+      for (const [server, st] of state) {
+        if (st.all) {
+          mcps.push(server);
+          continue;
+        }
+        if (st.picked.size === 0) continue;
+        mcps.push(server);
+        mcpTools.push(...st.picked);
+      }
+      // 当前未连接的 server 不在目录里：原样保留，避免打开编辑器点保存就丢掉配置。
+      for (const name of selectedServers) {
+        if (!state.has(name)) mcps.push(name);
+      }
+      return { mcps, mcpTools };
+    },
+  };
+}
+
 /** 拉取技能库（项目参数决定是否包含项目私有 skill）。 */
 async function fetchSkillLibrary(project) {
   const url = project ? `/api/skills?project=${encodeURIComponent(project)}` : "/api/skills";
@@ -3496,21 +3662,17 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
   populateAgentModelSelect(modelSelect, existing?.model ?? "");
   modal.appendChild(formRow("模型", modelSelect));
 
-  const selectedTools = new Set(existing ? (existing.tools ?? state.availableTools ?? []) : ["read", "bash"]);
+  // 显式模型：已有 agent 按文件显示（缺 tools = 零工具）；新建默认给 4 个内置工具。
+  const editorRole = scope === "global" ? "assistant" : "agent";
+  const toolCatalogData = await fetchToolCatalog(editorRole);
+  const selectedTools = new Set(existing ? (existing.tools ?? []) : ["read", "write", "edit", "bash"]);
   const enabledMcpNames = new Set(mcpServers.filter(([, config]) => config.enabled !== false).map(([name]) => name));
   const selectedMcps = new Set((existing?.mcps ?? []).filter((name) => enabledMcpNames.has(name)));
   const skillLibrary = (await fetchSkillLibrary(project)).skills ?? [];
   const selectedSkills = new Set(existing?.skills ?? []);
   const linkage = skillReadLinkage(selectedSkills, selectedTools);
   linkage.sync(); // 已有 skill 引用时，把 read 补进将要提交的工具集，与界面展示保持一致
-  const toolsGroup = appendAgentCheckboxGroup(modal, {
-    title: "工具",
-    description: "选择该 Agent 可以直接调用的内置工具。启用 skill 时必须保留 read。",
-    choices: (state.availableTools ?? ["read", "write", "edit", "bash"]).map((tool) => ({ value: tool, label: tool })),
-    selectedValues: selectedTools,
-    disabledWhen: linkage.toolDisabled,
-    checkedWhen: linkage.toolChecked,
-  });
+  const toolsGroup = appendToolGroups(modal, { catalog: toolCatalogData, selected: selectedTools });
   appendAgentCheckboxGroup(modal, {
     title: "Skills",
     description: "从全局技能库启用；勾选后自动附带 read（Skill 正文由模型读取）。未勾选则不注入任何 skill。",
@@ -3518,12 +3680,11 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
     selectedValues: selectedSkills,
     onChange: () => { linkage.sync(); toolsGroup.refresh(); },
   });
-  appendAgentCheckboxGroup(modal, {
-    title: "MCP",
-    description: "选择该 Agent 可以使用的 MCP 服务；已停用的服务不可选择。",
-    choices: mcpServers.map(([name, config]) => ({ value: name, label: config.enabled === false ? `${name}（已停用）` : name, config })),
-    selectedValues: selectedMcps,
-    disabledWhen: (choice) => choice.config.enabled === false,
+  const mcpPicker = appendMcpPicker(modal, {
+    catalog: toolCatalogData.mcp ?? [],
+    selectedServers: selectedMcps,
+    selectedTools: new Set(existing?.mcpTools ?? []),
+    isEnabled: (name) => enabledMcpNames.has(name),
   });
   // 报告组绑定：勾选后 agent 才拿到 report_* 工具（对应 frontmatter 的 reports）。
   // 全局 Agent 不绑定（它被复制进各项目使用，而报告组是项目级的）。
@@ -3597,7 +3758,7 @@ async function openAgentEditor({ scope, project = null, existing = null, onSaved
         scope,
         model: modelSelect.value || null,
         tools: [...selectedTools],
-        mcps: [...selectedMcps],
+        ...(() => { const picked = mcpPicker.collect(); return { mcps: picked.mcps, mcpTools: picked.mcpTools }; })(),
         skills: [...selectedSkills],
         reports: [...selectedReports],
         instructions: prompt,

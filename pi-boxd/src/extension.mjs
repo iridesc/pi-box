@@ -110,6 +110,12 @@ export const ReporterTask = defineTask({
     }, ctx),
 });
 
+/** pi-box 扩展的 getter。spawn 与定时任务都要用它做 `extensions.remove`（防递归派发）。 */
+let piBoxExtensionGetter = () => null;
+export function setPiBoxExtensionGetter(getter) {
+  piBoxExtensionGetter = getter;
+}
+
 /** 构造 subagent 工具（用 getter 解决与 PiBoxExtension 的循环引用）。调用时再拿 PiBoxExtension 引用。 */
 export function makeSubagentTool(getPiBoxExtension) {
   return defineTool({
@@ -177,7 +183,7 @@ export function makeSubagentTool(getPiBoxExtension) {
             await configure(tx, child.id, {
               model: resolveAgentModel(def.model),
               instructions: def.instructions,
-              tools: resolveAgentTools(def.tools, def.mcps),
+              tools: resolveAgentTools(def.tools, def.mcps, def.mcpTools, { role: "agent" }),
               extensions: { remove: [getPiBoxExtension()] },
               cwd,
             });
@@ -321,7 +327,7 @@ async function resolveScheduleRole(project, agentRef) {
       config: {
         model: resolveAgentModel(assistant.model),
         instructions: assistantInstructions(project, assistant, agents),
-        tools: resolveAssistantTools(assistant.tools, assistant.mcps),
+        tools: resolveAssistantTools(assistant.tools, assistant.mcps, assistant.mcpTools),
       },
     };
   }
@@ -331,7 +337,11 @@ async function resolveScheduleRole(project, agentRef) {
   return {
     actorType: "agent",
     actorName: def.name,
-    config: { model: resolveAgentModel(def.model), instructions: def.instructions, tools: resolveAgentTools(def.tools, def.mcps) },
+    config: {
+      model: resolveAgentModel(def.model),
+      instructions: def.instructions,
+      tools: resolveAgentTools(def.tools, def.mcps, def.mcpTools, { role: "agent" }),
+    },
   };
 }
 
@@ -529,7 +539,11 @@ export const ScheduleCommandTask = defineTask({
           let createdId = null;
           await runtime.commit(async (tx) => {
             const child = await tx.createConversation({ ownership: { kind: "task", taskId: task.id } });
-            await configure(tx, child.id, { ...role.config, cwd });
+            // 子 agent 角色同样要移除 pi-box 扩展：否则定时会话能拿到 subagent 工具而递归派发。
+            const piBoxExtension = piBoxExtensionGetter();
+            await configure(tx, child.id, role.actorType === "agent" && piBoxExtension
+              ? { ...role.config, cwd, extensions: { remove: [piBoxExtension] } }
+              : { ...role.config, cwd });
             await setConversationMeta(tx, child.id, {
               project: input.project,
               actorType: role.actorType,

@@ -12,10 +12,49 @@ import { PROJECTS_DIR, GLOBAL_AGENTS_DIR, META_PROJECT, META_DIR, META_AGENTS_DI
 import { models, currentModel, resolveModelRef } from "./model.mjs";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 
-const TOOL_BY_NAME = new Map((CodingTools.tools ?? []).map((tool) => [tool.name, tool]));
+/** 内置工具（CodingTools）：名字允许写进 tools，且严格校验，写错即报错。 */
+const BUILTIN_TOOL_BY_NAME = new Map((CodingTools.tools ?? []).map((tool) => [tool.name, tool]));
+
+/** 运行时扩展工具目录（报告 / 系统 / 高级 / MCP），由 harness 装好扩展后注入。
+ *  为什么必须注入而不是从 CodingTools 读：registry 是运行时的，本模块是纯逻辑模块。 */
+let extensionToolByName = new Map();   // name → { tool, group }
+let extensionGroups = [];              // [{ name, tools: [name...] }]，保持稳定顺序
 let mcpToolsByServer = new Map();
 let mcpSupportTools = [];
 let assistantRequiredTools = [];
+
+/** MCP 工具名一定是这个前缀；用于区分「动态工具暂时不在」和「名字写错」。 */
+const MCP_PREFIX = "mcp__";
+
+/** 扩展名 → 前端分组名。未知扩展回落到扩展名本身。 */
+const GROUP_LABELS = {
+  "pi-box": "系统",
+  "pi-box-reports": "报告",
+  codemode: "高级",
+  "tool-search": "高级",
+};
+
+function groupOf(extensionName) {
+  if (extensionName.startsWith("mcp:")) return `MCP: ${extensionName.slice(4)}`;
+  return GROUP_LABELS[extensionName] ?? extensionName;
+}
+
+/** harness 装完所有扩展后调用（含 MCP reload），把 registry 快照注入本模块。
+ *  builtinOnly=false 时把内置工具也算进目录（用于前端展示与校验）。 */
+export function setToolCatalog(entries) {
+  const byName = new Map();
+  const groups = new Map();
+  for (const { extension, tool } of entries) {
+    if (tool.name.startsWith("mcp__")) continue;   // MCP 单独按 server 管理，不进 tools 白名单
+    if (BUILTIN_TOOL_BY_NAME.has(tool.name)) continue;  // 内置工具单独成组，避免重复
+    const group = groupOf(extension.name);
+    byName.set(tool.name, { tool, group, extension: extension.name });
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(tool.name);
+  }
+  extensionToolByName = byName;
+  extensionGroups = [...groups].map(([name, tools]) => ({ name, tools }));
+}
 
 /** MCP bridge 热更新后替换工具目录；Agent 文件只持久化 MCP server 名。 */
 export function setMcpToolsByServer(next, supportTools = mcpSupportTools) {
@@ -28,36 +67,179 @@ export function setAssistantRequiredTools(tools) {
   assistantRequiredTools = [...tools];
 }
 
-/** Agent 文件里的工具名转换成 registry 中真实的工具定义；null 表示继承默认工具集。 */
-export function resolveAgentTools(toolNames, mcpNames = []) {
-  if (toolNames === null || toolNames === undefined) return undefined;
-  if (!Array.isArray(toolNames)) throw new Error("tools 必须是工具名数组");
-  const unknown = toolNames.filter((name) => !TOOL_BY_NAME.has(name));
-  if (unknown.length > 0) {
-    throw new Error(`未知工具：${unknown.join(", ")}；可用工具：${[...TOOL_BY_NAME.keys()].join(", ")}`);
+/** 可选工具名（内置 + 已注册的扩展工具）；用于报错信息与前端展示。 */
+export function availableToolNames() {
+  return [...BUILTIN_TOOL_BY_NAME.keys(), ...extensionToolByName.keys()];
+}
+
+/** 去重（保持首次出现的顺序）。 */
+function dedupeTools(tools) {
+  const seen = new Set();
+  const out = [];
+  for (const tool of tools) {
+    if (!tool || seen.has(tool.name)) continue;
+    seen.add(tool.name);
+    out.push(tool);
   }
-  if (mcpNames === null || mcpNames === undefined) mcpNames = [];
-  if (!Array.isArray(mcpNames)) throw new Error("mcps 必须是 MCP 名称数组");
-  const missingMcps = mcpNames.filter((name) => !mcpToolsByServer.has(name));
-  if (missingMcps.length > 0) throw new Error(`MCP 未连接或不存在：${missingMcps.join(", ")}`);
-  const mcpTools = mcpNames.flatMap((name) => mcpToolsByServer.get(name) ?? []);
+  return out;
+}
+
+function findMcpTool(name) {
+  for (const tools of mcpToolsByServer.values()) {
+    const hit = tools.find((tool) => tool.name === name);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** mcps + mcpTools → 具体 MCP 工具。
+ *  收窄规则：某 server 的工具有出现在 mcpTools 里 → 只给列出的；没有出现 → 该 server 全部给。
+ *  这样「整组勾 A + 单选 B 的一个工具」可以同时表达。 */
+function resolveMcpTools(mcpNames, mcpToolNames) {
+  const servers = Array.isArray(mcpNames) ? [...new Set(mcpNames)] : [];
+  const missing = servers.filter((name) => !mcpToolsByServer.has(name));
+  if (missing.length > 0) throw new Error(`MCP 未连接或不存在：${missing.join(", ")}`);
+  const narrowed = Array.isArray(mcpToolNames) && mcpToolNames.length > 0
+    ? new Set(mcpToolNames.map(String))
+    : null;
+  const out = [];
+  for (const server of servers) {
+    const all = mcpToolsByServer.get(server) ?? [];
+    if (narrowed === null) {
+      out.push(...all);
+      continue;
+    }
+    const chosen = all.filter((tool) => narrowed.has(tool.name));
+    out.push(...(chosen.length > 0 ? chosen : all));
+  }
+  return out;
+}
+
+/** tools / mcps / mcpTools → registry 中的真实工具定义。
+ *
+ *  显式模型，没有隐式默认：
+ *    - tools 缺失或空数组 = 没有任何内置/扩展工具（不再「继承全部」）
+ *    - mcps 列出的 server = 该 server 全部工具，mcpTools 非空时按 server 收窄
+ *    - 助理额外强制注入 assistantRequiredTools（subagent），其他角色没有
+ *    - codemode / tool_search 仅在 MCP 工具需要时追加（不写 tools 也不会白送）
+ */
+export function resolveAgentTools(toolNames, mcpNames = [], mcpToolNames = null, { role = "agent" } = {}) {
+  if (toolNames !== null && toolNames !== undefined && !Array.isArray(toolNames)) {
+    throw new Error("tools 必须是工具名数组");
+  }
+  const picked = Array.isArray(toolNames) ? [...new Set(toolNames.map(String))] : [];
+  const resolved = [];
+  const staleMcpNames = [];
+  for (const name of picked) {
+    const builtin = BUILTIN_TOOL_BY_NAME.get(name);
+    if (builtin) {
+      resolved.push(builtin);
+      continue;
+    }
+    const ext = extensionToolByName.get(name);
+    if (ext) {
+      resolved.push(ext.tool);
+      continue;
+    }
+    // MCP 工具名是动态的（server 可能临时掉线）。写错名字必须报错，掉线不能阻止启动。
+    if (name.startsWith(MCP_PREFIX)) {
+      staleMcpNames.push(name);
+      continue;
+    }
+    throw new Error(`未知工具：${name}；可用工具：${availableToolNames().join("、")}`);
+  }
+
+  const mcpTools = resolveMcpTools(mcpNames, mcpToolNames);
+  // 老配置兼容：MCP 工具名直接写在 tools 里
+  for (const name of staleMcpNames) {
+    const found = findMcpTool(name);
+    if (found) {
+      mcpTools.push(found);
+      continue;
+    }
+    console.error(`[tools] MCP 工具当前不可用，已跳过：${name}`);
+  }
+
   const needsCodemode = mcpTools.some((tool) => tool.callers?.includes("tools"));
   const needsSearch = mcpTools.some((tool) => tool.deferred === true);
   const support = mcpSupportTools.filter((tool) =>
     (needsCodemode && tool.name === "codemode") || (needsSearch && tool.name === "tool_search"));
-  return [...toolNames.map((name) => TOOL_BY_NAME.get(name)), ...mcpTools, ...support];
+
+  const required = role === "assistant" ? assistantRequiredTools : [];
+  return dedupeTools([...resolved, ...mcpTools, ...support, ...required]);
 }
 
-/** 助理工具 = 用户选择的内置/MCP 工具 + 系统强制工具。 */
-export function resolveAssistantTools(toolNames, mcpNames = []) {
-  const selected = resolveAgentTools(toolNames, mcpNames);
-  if (selected === undefined) return undefined;
-  const byName = new Map(selected.map((tool) => [tool.name, tool]));
-  for (const tool of assistantRequiredTools) byName.set(tool.name, tool);
-  return [...byName.values()];
+/** 助理工具 = 显式选择 + 系统强制工具（subagent）。 */
+export function resolveAssistantTools(toolNames, mcpNames = [], mcpToolNames = null) {
+  return resolveAgentTools(toolNames, mcpNames, mcpToolNames, { role: "assistant" });
 }
 
-export const AVAILABLE_TOOL_NAMES = [...TOOL_BY_NAME.keys()];
+/** 保存前的配置一致性校验：配置错当场失败，不要留到运行时让模型发懵。
+ *  这是 fail fast 的主落点 —— 运行时的模型不该为配置错误买单。 */
+export function validateAgentConfig({ tools, mcps, mcpTools, reports, skills, role = "agent" } = {}) {
+  const picked = Array.isArray(tools) ? tools.map(String) : [];
+  const has = (name) => picked.includes(name);
+
+  if (Array.isArray(reports) && reports.length > 0 && !has("report_publish")) {
+    throw new Error("绑定了报告组但没有勾选 report_publish：请在工具里勾上报告工具，或解除报告组绑定");
+  }
+  if (Array.isArray(skills) && skills.length > 0 && !has("read") && !has("bash")) {
+    throw new Error("启用了 Skill 但没有 read/bash 工具：Skill 正文只能靠 read 读取");
+  }
+  if (role === "agent" && has("subagent")) {
+    throw new Error("子 Agent 不能勾选 subagent：它只属于项目助理（防止递归派发）");
+  }
+  if (Array.isArray(mcpTools) && mcpTools.length > 0) {
+    const known = new Set([...mcpToolsByServer.values()].flat().map((tool) => tool.name));
+    const unknown = mcpTools.filter((name) => !known.has(name));
+    // server 掉线时名字会暂时查不到，这里只提示不阻断。
+    if (unknown.length > 0) console.error(`[tools] mcpTools 里有当前不可用的工具：${unknown.join(", ")}`);
+  }
+  if (Array.isArray(mcps) && mcps.length > 0) {
+    const missing = mcps.filter((name) => !mcpToolsByServer.has(name));
+    if (missing.length > 0) throw new Error(`MCP 未连接或不存在：${missing.join(", ")}`);
+  }
+}
+
+/** 前端工具目录：分组 + 可用性 + 锁定原因。
+ *  role 决定哪些项可勾选（子 agent 不能拿 subagent）。 */
+export function toolCatalog({ role = "agent" } = {}) {
+  const isAssistant = role === "assistant";
+  const groups = [];
+
+  const builtin = [...BUILTIN_TOOL_BY_NAME.keys()].map((name) => ({
+    name, label: name, available: true, locked: false, reason: null,
+  }));
+  if (builtin.length > 0) groups.push({ name: "内置", tools: builtin });
+
+  for (const group of extensionGroups) {
+    const tools = group.tools.map((name) => {
+      const isSubagent = name === "subagent";
+      return {
+        name,
+        label: name,
+        available: isSubagent ? isAssistant : true,
+        locked: isSubagent && isAssistant,
+        reason: isSubagent && !isAssistant ? "子 Agent 不能派发子 Agent（防止递归）" : null,
+      };
+    });
+    groups.push({ name: group.name, tools });
+  }
+
+  return groups;
+}
+
+/** 前端 MCP 目录：按 server 分组，供「整组勾 + 单勾」界面使用。 */
+export function mcpCatalog() {
+  return [...mcpToolsByServer].map(([server, tools]) => ({
+    server,
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      label: tool.name.slice(`mcp__${server}__`.length) || tool.name,
+      exposure: tool.deferred === true ? "deferred" : tool.callers?.includes("tools") ? "codemode" : "direct",
+    })),
+  }));
+}
 
 /** 启用 skill 时必须有读取手段：SKILL.md 正文只能靠 read 工具加载。
  *  注意 resolvedTools === undefined 表示"继承默认全部工具"，此时天然包含 read，不应报错。 */
@@ -71,7 +253,7 @@ export function ensureSkillReadTool(resolvedTools, skillCount) {
 /** 解析 .md 的 frontmatter + 正文。frontmatter：model / tools / mcps / skills / agents / locked */
 export function parseAgentDef(md) {
   const m = md.match(/^---\r?\n([\s\S]*?)(?:\r?\n)?---(?:\r?\n)?([\s\S]*)$/);
-  if (!m) return { model: null, tools: null, mcps: null, skills: null, agents: null, reports: null, icon: null, instructions: md.trim() };
+  if (!m) return { model: null, tools: null, mcps: null, mcpTools: null, skills: null, agents: null, reports: null, icon: null, instructions: md.trim() };
   const fm = {};
   for (const line of m[1].split("\n")) {
     const kv = line.match(/^(\w+):\s*(.+)$/);
@@ -81,18 +263,20 @@ export function parseAgentDef(md) {
     const a = s?.match(/\[([^\]]*)\]/);
     return a ? a[1].split(",").map((x) => x.trim()).filter(Boolean) : null;
   };
-  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), skills: arr(fm.skills), agents: arr(fm.agents), reports: arr(fm.reports), locked: /^true$/i.test(fm.locked ?? ""), icon: fm.icon || null, instructions: m[2].trim() };
+  return { model: fm.model || null, tools: arr(fm.tools), mcps: arr(fm.mcps), mcpTools: arr(fm.mcpTools), skills: arr(fm.skills), agents: arr(fm.agents), reports: arr(fm.reports), locked: /^true$/i.test(fm.locked ?? ""), icon: fm.icon || null, instructions: m[2].trim() };
 }
 
 /** 序列化回 .md（保存到文件）
  * icon 是纯展示用的 emoji，放在 frontmatter 首行便于人工阅读与修改。 */
-export function serializeAgentDef({ model: m, tools, mcps, skills, agents, reports, locked, icon, instructions }) {
+export function serializeAgentDef({ model: m, tools, mcps, mcpTools, skills, agents, reports, locked, icon, instructions }) {
   const fm = [];
   if (icon) fm.push(`icon: ${icon}`);
   if (m) fm.push(`model: ${m}`);
   // 空数组也要落盘，否则会被解释成 null（继承全部默认工具）。
   if (tools !== null && tools !== undefined) fm.push(`tools: [${tools.join(", ")}]`);
   if (mcps !== null && mcps !== undefined) fm.push(`mcps: [${mcps.join(", ")}]`);
+  // mcpTools 只在被收窄时落盘；空数组 = 不收窄（各 server 全部工具）。
+  if (mcpTools?.length) fm.push(`mcpTools: [${mcpTools.join(", ")}]`);
   if (skills !== null && skills !== undefined) fm.push(`skills: [${skills.join(", ")}]`);
   if (agents?.length) fm.push(`agents: [${agents.join(", ")}]`);
   // 报告组白名单：空数组 / 未设置都不落盘（= 没有报告能力）。
@@ -145,6 +329,7 @@ async function listAgentsInDir(dir, scope, projectName) {
       model: def.model ?? null,
       tools: def.tools ?? null,
       mcps: def.mcps ?? null,
+      mcpTools: def.mcpTools ?? null,
       skills: def.skills ?? null,
       reports: def.reports ?? null,
       locked: !!def.locked,
@@ -222,6 +407,7 @@ export async function loadAssistant(projectName) {
       model: def.model,
       tools: def.tools,
       mcps: def.mcps,
+      mcpTools: def.mcpTools ?? null,
       skills: def.skills ?? null,
       agents: def.agents ?? [],
       reports: def.reports ?? null,
@@ -229,7 +415,7 @@ export async function loadAssistant(projectName) {
       instructions: def.instructions,
     };
   } catch {
-    return { model: null, tools: null, mcps: null, skills: null, agents: [], reports: null, icon: null, instructions: "" };
+    return { model: null, tools: null, mcps: null, mcpTools: null, skills: null, agents: [], reports: null, icon: null, instructions: "" };
   }
 }
 
@@ -323,15 +509,17 @@ export async function saveAgentFile(projectName, name, scope, def) {
   const file = agentFilePath(projectName, name, scope);
   let icon = def.icon;
   let reports = def.reports;
-  if (icon === undefined || reports === undefined) {
+  let mcpTools = def.mcpTools;
+  if (icon === undefined || reports === undefined || mcpTools === undefined) {
     const existing = await readFile(file, "utf-8")
       .then((md) => parseAgentDef(md))
       .catch(() => null);
     if (icon === undefined) icon = existing?.icon ?? null;
     if (reports === undefined) reports = existing?.reports ?? null;
+    if (mcpTools === undefined) mcpTools = existing?.mcpTools ?? null;
   }
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, serializeAgentDef({ ...def, icon, reports }), "utf-8");
+  await writeFile(file, serializeAgentDef({ ...def, icon, reports, mcpTools }), "utf-8");
   return file;
 }
 
@@ -387,18 +575,20 @@ export async function saveAssistantFile(projectName, def, { force = false } = {}
   const file = projectName === META_PROJECT
     ? join(META_DIR, "assistant.md")
     : join(PROJECTS_DIR, projectName, ".pi", "assistant.md");
-  // 未传 icon / reports 时保留现有值，避免在助理编辑器里改模型/工具时把图标或报告绑定冲掉。
+  // 未传 icon / reports / mcpTools 时保留现有值，避免改模型或工具时把它们冲掉。
   let icon = def.icon;
   let reports = def.reports;
-  if (icon === undefined || reports === undefined) {
+  let mcpTools = def.mcpTools;
+  if (icon === undefined || reports === undefined || mcpTools === undefined) {
     const existing = await readFile(file, "utf-8")
       .then((md) => parseAgentDef(md))
       .catch(() => null);
     if (icon === undefined) icon = existing?.icon ?? null;
     if (reports === undefined) reports = existing?.reports ?? null;
+    if (mcpTools === undefined) mcpTools = existing?.mcpTools ?? null;
   }
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, serializeAgentDef({ ...def, icon, reports }), "utf-8");
+  await writeFile(file, serializeAgentDef({ ...def, icon, reports, mcpTools }), "utf-8");
   return file;
 }
 

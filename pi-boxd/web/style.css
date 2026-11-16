@@ -675,6 +675,15 @@ button:disabled, input:disabled, select:disabled { opacity: 0.5; cursor: not-all
   display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 7px; padding: 10px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117;
 }
+/* 工具分组：内置 / 系统 / 报告 / 高级 各成一块；MCP 按 server 一块。 */
+.tool-group { margin-bottom: 10px; }
+.tool-group:last-child { margin-bottom: 0; }
+.tool-group-title {
+  font-size: 12px; font-weight: 600; color: #8b949e;
+  margin: 0 0 6px; letter-spacing: .02em;
+}
+.tool-group-head { width: fit-content; font-weight: 600; }
+.tool-group-children { margin-top: 7px; }
 .agent-option {
   display: flex; align-items: center; gap: 7px; min-width: 0; padding: 6px 8px;
   border: 1px solid #30363d; border-radius: 5px; color: #c9d1d9; cursor: pointer;
