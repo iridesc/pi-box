@@ -55,7 +55,9 @@ function trackUnreadConversations(conversations) {
     // 首次见到该会话不标记（打开页面不该刷出一屏未读）
     if (prev !== undefined && isActiveConversationStatus(prev) && !isActiveConversationStatus(conv.status)) {
       const viewing = selected?.type === "conversation" && String(selected.id) === id;
-      if (!viewing && !unreadConversations.has(id)) {
+      // 定时任务的独立会话跑完就完，结果不回给助理/用户，不该当成「待查看」。
+      const backgroundOnly = conv.source === "schedule";
+      if (!viewing && !backgroundOnly && !unreadConversations.has(id)) {
         unreadConversations.add(id);
         changed = true;
       }
@@ -528,22 +530,6 @@ function renderTree() {
             });
           }, `agent-avatar agent-avatar-${a.scope} entity-icon-avatar`);
       n.appendChild(avatar);
-      // 运行状态 / 未读点：放在图标和名字之间，不占额外布局宽度
-      const agentState = state?.agentsStatus?.[proj]?.[a.name];
-      if (agentState) {
-        const convIds = (agentState.conversationIds ?? (agentState.conversationId ? [agentState.conversationId] : [])).map(String);
-        const busy = isActiveConversationStatus(agentState.status);
-        const hasUnread = !busy && convIds.some((id) => unreadConversations.has(id));
-        if (busy || hasUnread) {
-          const dot = el("span", busy
-            ? `agent-status-dot agent-status-dot-${agentState.status}`
-            : "agent-status-dot agent-status-dot-unread");
-          dot.title = busy
-            ? `${agentStatusLabel(agentState.status)}（${convIds.length} 个会话）`
-            : "有新结果，点开查看后消失";
-          n.appendChild(dot);
-        }
-      }
       n.appendChild(el("span", "tree-label", a.name));
 
       // 配置入口：name 后的 ⚙ 小按钮
@@ -555,6 +541,19 @@ function renderTree() {
           ? "元项目子 agent 不可通过 UI 编辑；请在宿主机直接编辑 /home/agent/.pi/agent/meta/agents/"
           : "Agent 配置";
       agentSettings.setAttribute("aria-label", `配置 Agent ${a.name}`);
+      // 状态用这个 ⚙ 表达，不再额外插入元素：
+      //   在跑 → 转起来；跑完且结果会回到助理/用户 → 蓝色闪烁；纯后台任务跑完 → 静止。
+      const agentState = state?.agentsStatus?.[proj]?.[a.name];
+      if (agentState) {
+        const convIds = (agentState.conversationIds ?? (agentState.conversationId ? [agentState.conversationId] : [])).map(String);
+        if (isActiveConversationStatus(agentState.status)) {
+          agentSettings.classList.add("tree-settings-busy");
+          agentSettings.title = `${agentStatusLabel(agentState.status)}（${convIds.length} 个会话）`;
+        } else if (convIds.some((id) => unreadConversations.has(id))) {
+          agentSettings.classList.add("tree-settings-unread");
+          agentSettings.title = "有新结果未查看，点开对应会话后消失";
+        }
+      }
       if (!a.locked && a.scope !== "meta") {
         agentSettings.onclick = (ev) => {
           ev.stopPropagation();
