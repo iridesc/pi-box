@@ -22,6 +22,55 @@ function saveExpandedProjects() {
 }
 
 let expandedProjects = loadExpandedProjects();
+
+// ── 未读标记 ──
+// 没有后端时间戳可用（LiveDoc 不带时间、entries 表无时间列），所以用「跑完的瞬间」判定：
+// 会话状态从 running/waiting-tool/pending 掉回 idle 就标未读，用户点进该会话后清除。
+const UNREAD_STORAGE_KEY = "pi-box.unread-conversations.v1";
+function loadUnread() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(UNREAD_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(saved) ? saved.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+let unreadConversations = loadUnread();
+const previousConvStatus = new Map();
+function saveUnread() {
+  try {
+    localStorage.setItem(UNREAD_STORAGE_KEY, JSON.stringify([...unreadConversations].slice(-500)));
+  } catch {
+    /* 隐私模式下 localStorage 可能不可写，忽略 */
+  }
+}
+/** 观察会话状态跃迁，返回是否有变化（用于触发左栏重绘）。 */
+function trackUnreadConversations(conversations) {
+  const alive = new Set();
+  let changed = false;
+  for (const conv of conversations ?? []) {
+    const id = String(conv.id);
+    alive.add(id);
+    const prev = previousConvStatus.get(id);
+    // 首次见到该会话不标记（打开页面不该刷出一屏未读）
+    if (prev !== undefined && isActiveConversationStatus(prev) && !isActiveConversationStatus(conv.status)) {
+      const viewing = selected?.type === "conversation" && String(selected.id) === id;
+      if (!viewing && !unreadConversations.has(id)) {
+        unreadConversations.add(id);
+        changed = true;
+      }
+    }
+    previousConvStatus.set(id, conv.status);
+  }
+  for (const id of [...unreadConversations]) {
+    if (!alive.has(id)) {
+      unreadConversations.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) saveUnread();
+  return changed;
+}
 let expandedProjectSchedules = new Set();
 let agentsCache = {}; // project -> agent 列表（来自快照 agentsByProject）
 let schedulesCache = {}; // project -> schedule 列表
@@ -225,6 +274,11 @@ async function refresh() {
 }
 
 function render() {
+  // 正在看的会话算已读；清除后本轮 renderTree 就会把未读点去掉。
+  if (selected?.type === "conversation" && selected.id
+    && unreadConversations.delete(String(selected.id))) {
+    saveUnread();
+  }
   const filesMode = selected?.type === "files";
   const reportsMode = selected?.type === "reports";
   setFilesChrome(filesMode);
@@ -294,6 +348,8 @@ function diffSnapshot(prev, next) {
     diff.projects = true;
   }
   if (!sameJson(prev.agentsByProject, next.agentsByProject)) diff.agents = true;
+  // Agent 运行状态变了也要重绘左栏（状态点/未读点）
+  if (!sameJson(prev.agentsStatus, next.agentsStatus)) diff.agents = true;
   if (!sameJson(prev.taskGraph, next.taskGraph)) diff.tasks = true;
   if (!sameJson(prev.model, next.model) || prev.hasKey !== next.hasKey) diff.status = true;
 
@@ -472,6 +528,22 @@ function renderTree() {
             });
           }, `agent-avatar agent-avatar-${a.scope} entity-icon-avatar`);
       n.appendChild(avatar);
+      // 运行状态 / 未读点：放在图标和名字之间，不占额外布局宽度
+      const agentState = state?.agentsStatus?.[proj]?.[a.name];
+      if (agentState) {
+        const convIds = (agentState.conversationIds ?? (agentState.conversationId ? [agentState.conversationId] : [])).map(String);
+        const busy = isActiveConversationStatus(agentState.status);
+        const hasUnread = !busy && convIds.some((id) => unreadConversations.has(id));
+        if (busy || hasUnread) {
+          const dot = el("span", busy
+            ? `agent-status-dot agent-status-dot-${agentState.status}`
+            : "agent-status-dot agent-status-dot-unread");
+          dot.title = busy
+            ? `${agentStatusLabel(agentState.status)}（${convIds.length} 个会话）`
+            : "有新结果，点开查看后消失";
+          n.appendChild(dot);
+        }
+      }
       n.appendChild(el("span", "tree-label", a.name));
 
       // 配置入口：name 后的 ⚙ 小按钮
@@ -4893,6 +4965,7 @@ function startEventStream() {
     state = next;
     agentsCache = state.agentsByProject ?? {};
     schedulesCache = state.schedulesByProject ?? {};
+    if (trackUnreadConversations(state.conversations)) diff.agents = true;
     applySnapshotDiff(prev, diff);
     updateSseIndicator("ok");
   };

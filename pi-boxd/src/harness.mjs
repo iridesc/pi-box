@@ -433,11 +433,22 @@ export async function boxSnapshot(harness) {
           child.title = name;
           child.parentConversationId = assistantConversation.id;
         }
-        // 保留旧字段供已有客户端兼容；同名 Agent 多会话时优先展示运行中的一个。
-        const candidate = { status: child?.status ?? "idle", conversationId: childId };
-        const current = agentsStatus[p][name];
-        if (!current || (current.status === "idle" && candidate.status !== "idle")) agentsStatus[p][name] = candidate;
       }
+    }
+    // 统一聚合（含手动创建、定时任务派生的 agent 会话，不只是 spawn 出来的）：
+    // 同名 Agent 可能有多个会话，状态取最活跃的那个，并保留全部会话 id 供未读判断。
+    agentsStatus[p] = {};
+    const RANK = { running: 4, "waiting-tool": 3, pending: 2, idle: 1 };
+    for (const conv of conversations) {
+      if (conv.project !== p || conv.actorType !== "agent" || !conv.actorName) continue;
+      const entry = agentsStatus[p][conv.actorName]
+        ?? { status: "idle", conversationId: conv.id, conversationIds: [] };
+      entry.conversationIds.push(conv.id);
+      if ((RANK[conv.status] ?? 0) > (RANK[entry.status] ?? 0)) {
+        entry.status = conv.status ?? "idle";
+        entry.conversationId = conv.id;
+      }
+      agentsStatus[p][conv.actorName] = entry;
     }
   }
   return {

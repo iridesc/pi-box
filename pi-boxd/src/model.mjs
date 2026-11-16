@@ -84,7 +84,10 @@ export async function initProvider() {
     useFaux = false;
   } else {
     useFaux = true;
-    faux = fauxProvider();
+    // 调试用：本地没有真实模型时，让 faux 按固定速度吐字，
+    // 这样「运行中 → 完成」的状态跃迁能持续足够久（便于验证 UI 状态与未读标记）。
+    const fauxRate = Number(process.env.PI_BOX_FAUX_TOKENS_PER_SEC ?? "");
+    faux = fauxProvider(Number.isFinite(fauxRate) && fauxRate > 0 ? { tokensPerSecond: fauxRate } : {});
     model = { provider: "faux", modelId: "faux-1" };
     models.setProvider(faux.provider);
   }
