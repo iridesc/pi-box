@@ -351,7 +351,39 @@ function deriveAgentStatus(live) {
   return "running";
 }
 
-/** 完整快照：会话 + cwd/project + agentsByProject + assistantByProject + agentsStatus + 全局 model */
+/** 状态活跃度排序：取「最活跃的那个会话」代表一个 Agent / 助理。 */
+const ACTOR_STATUS_RANK = { running: 4, "waiting-tool": 3, pending: 2, idle: 1 };
+
+/**
+ * 把某个项目的会话聚合成左栏要的两份状态：
+ *   agents    —— { [agentName]: { status, conversationId, conversationIds } }，只收 actorType=agent；
+ *   assistant —— { status, conversationId, conversationIds }，收 actorType=assistant 的全部会话。
+ * 助理不在 agents 目录里（那是子 Agent 的清单），但左栏「助理」行的 ⚙ 也要表达状态，所以单算一份。
+ * 同名 Actor 常有多个会话（手动新建、定时任务派生、spawn 出来的），状态取最活跃的，id 全留。
+ */
+export function aggregateActorStatus(projectConversations) {
+  const agents = {};
+  const assistant = { status: "idle", conversationId: null, conversationIds: [] };
+  const bump = (entry, conv) => {
+    entry.conversationIds.push(conv.id);
+    if ((ACTOR_STATUS_RANK[conv.status] ?? 0) > (ACTOR_STATUS_RANK[entry.status] ?? 0)) {
+      entry.status = conv.status ?? "idle";
+      entry.conversationId = conv.id;
+    }
+  };
+  for (const conv of projectConversations) {
+    if (conv.actorType === "agent" && conv.actorName) {
+      const entry = agents[conv.actorName] ?? { status: "idle", conversationId: conv.id, conversationIds: [] };
+      bump(entry, conv);
+      agents[conv.actorName] = entry;
+    } else if (conv.actorType === "assistant") {
+      bump(assistant, conv);
+    }
+  }
+  return { agents, assistant };
+}
+
+/** 完整快照：会话 + cwd/project + agentsByProject + assistantByProject + agentsStatus + assistantStatus + 全局 model */
 export async function boxSnapshot(harness) {
   const { items: records } = await harness.commit((tx) => tx.scanConversations({}, 1000, undefined), context);
   const taskGraph = (await harness.taskGraph(context)).value;
@@ -402,6 +434,7 @@ export async function boxSnapshot(harness) {
   const assistantByProject = {};
   const schedulesByProject = {};
   const agentsStatus = {}; // { [project]: { [name]: { status, conversationId } } }
+  const assistantStatus = {}; // { [project]: { status, conversationId, conversationIds } }
   const projectIcons = {}; // { [project]: emoji } —— 只有自定义过的项目才有键
   for (const p of projects) {
     agentsByProject[p] = await listAgents(p);
@@ -454,19 +487,9 @@ export async function boxSnapshot(harness) {
     }
     // 统一聚合（含手动创建、定时任务派生的 agent 会话，不只是 spawn 出来的）：
     // 同名 Agent 可能有多个会话，状态取最活跃的那个，并保留全部会话 id 供未读判断。
-    agentsStatus[p] = {};
-    const RANK = { running: 4, "waiting-tool": 3, pending: 2, idle: 1 };
-    for (const conv of conversations) {
-      if (conv.project !== p || conv.actorType !== "agent" || !conv.actorName) continue;
-      const entry = agentsStatus[p][conv.actorName]
-        ?? { status: "idle", conversationId: conv.id, conversationIds: [] };
-      entry.conversationIds.push(conv.id);
-      if ((RANK[conv.status] ?? 0) > (RANK[entry.status] ?? 0)) {
-        entry.status = conv.status ?? "idle";
-        entry.conversationId = conv.id;
-      }
-      agentsStatus[p][conv.actorName] = entry;
-    }
+    const aggregated = aggregateActorStatus(conversations.filter((conv) => conv.project === p));
+    agentsStatus[p] = aggregated.agents;
+    assistantStatus[p] = aggregated.assistant;
   }
   return {
     conversations,
@@ -483,6 +506,7 @@ export async function boxSnapshot(harness) {
     assistantByProject,
     schedulesByProject,
     agentsStatus,
+    assistantStatus,
     availableTools: availableToolNames(),
     toolCatalog: toolCatalog(),
     mcpCatalog: mcpCatalog(),

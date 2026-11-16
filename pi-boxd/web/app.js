@@ -372,8 +372,9 @@ function diffSnapshot(prev, next) {
     diff.projects = true;
   }
   if (!sameJson(prev.agentsByProject, next.agentsByProject)) diff.agents = true;
-  // Agent 运行状态变了也要重绘左栏（状态点/未读点）
+  // Agent / 助理运行状态变了也要重绘左栏（⚙ 转速/闪烁）
   if (!sameJson(prev.agentsStatus, next.agentsStatus)) diff.agents = true;
+  if (!sameJson(prev.assistantStatus, next.assistantStatus)) diff.agents = true;
   if (!sameJson(prev.taskGraph, next.taskGraph)) diff.tasks = true;
   if (!sameJson(prev.model, next.model) || prev.hasKey !== next.hasKey) diff.status = true;
 
@@ -476,6 +477,19 @@ function renderTree() {
       ev.stopPropagation();
       openAssistantEditor(proj);
     };
+    // 和子 Agent 同一套表达：在跑 → ⚙ 转起来；跑完且有未读结果 → ⚙ 蓝色闪烁。
+    // 助理会话不止主会话一个（手动新建、定时任务派生），所以看全量 conversationIds。
+    const assistantState = state?.assistantStatus?.[proj];
+    if (assistantState) {
+      const convIds = (assistantState.conversationIds ?? (assistantState.conversationId ? [assistantState.conversationId] : [])).map(String);
+      if (isActiveConversationStatus(assistantState.status)) {
+        assistantSettings.classList.add("tree-settings-busy");
+        assistantSettings.title = `${agentStatusLabel(assistantState.status)}（${convIds.length} 个会话）`;
+      } else if (convIds.some((id) => unreadConversations.has(id))) {
+        assistantSettings.classList.add("tree-settings-unread");
+        assistantSettings.title = "有新结果未查看，点开对应会话后消失";
+      }
+    }
     if (isMeta) {
       assistantSettings.disabled = true;
       assistantSettings.title = "元项目助理文件受保护，不可编辑";
