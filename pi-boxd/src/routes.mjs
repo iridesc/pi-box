@@ -9,7 +9,7 @@ import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR, WEB_DIR } from "./paths
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
 import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, validateAgentConfig, toolCatalog, mcpCatalog, agentFilePath, ensureSkillReadTool, loadProjectIcon, saveProjectIcon, setAssistantIcon, setAgentIcon, normalizeIcon } from "./agents.mjs";
-import { createRoleConversation, renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
+import { conversationContextSummary, createRoleConversation, renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
 import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upsertSchedule } from "./schedules.mjs";
@@ -145,6 +145,51 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
         }));
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ id: String(id), entries }));
+      },
+    },
+    // 上下文占用：会话顶部的「上下文 xx%」和压缩按钮靠它。
+    "/api/context": {
+      method: "GET",
+      async handler(req, res) {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const id = url.searchParams.get("id");
+        const conversation = id ? await harness.conversation(id, context) : undefined;
+        if (!conversation) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "会话不存在" }));
+        }
+        const summary = await conversationContextSummary(harness, conversation);
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify(summary));
+      },
+    },
+    // 手动压缩：唯一的压缩入口（自动压缩已关）。忙碌时 durable 会排到下一个边界落摘要。
+    "/api/compact": {
+      method: "POST",
+      async handler(req, res) {
+        const { conversationId, instructions } = await readBody(req);
+        const conversation = conversationId ? await harness.conversation(String(conversationId), context) : undefined;
+        if (!conversation) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "会话不存在" }));
+        }
+        const focus = typeof instructions === "string" && instructions.trim() ? instructions.trim() : undefined;
+        // 上下文本来就比「保留的最近上下文」还短时，压缩不会产出摘要——先说清楚，别让用户点了没反应。
+        const summary = await conversationContextSummary(harness, conversation);
+        const used = Number.isFinite(summary.tokens?.measured) ? summary.tokens.measured : summary.tokens?.estimated ?? 0;
+        const keep = Number(process.env.PI_BOX_COMPACT_KEEP_TOKENS ?? "") > 0 ? Number(process.env.PI_BOX_COMPACT_KEEP_TOKENS) : 8000;
+        if (used <= keep) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: true, skipped: `上下文只有 ${Math.round(used)} tokens，比保留窗口（${keep}）还短，没有可压缩的内容` }));
+        }
+        try {
+          const taskId = await conversation.compact(focus, context);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, taskId: String(taskId) }));
+        } catch (error) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        }
       },
     },
     // 发送消息：whenBusy 决定会话忙碌时是排队（followUp）还是插话引导（steer）。

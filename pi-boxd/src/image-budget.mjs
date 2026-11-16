@@ -114,6 +114,21 @@ function resolveLimits(limits = {}) {
 }
 
 /**
+ * 上下文里内联图片的总量与字节数。占用展示靠它：durable 的 token 估算把每张图恒当 4800 chars，
+ * 完全看不见真实字节，而字节才是撞网关 body 上限的那个量。
+ */
+export function sumInlineImages(messages) {
+  let count = 0;
+  let bytes = 0;
+  mapImages(messages, (block) => {
+    count += 1;
+    bytes += imageByteLength(block);
+    return undefined;
+  });
+  return { count, bytes };
+}
+
+/**
  * 请求级裁剪：历史图片字节超过 trigger 时，从最老的开始换成占位文本，直到降到 target。
  *
  * 迟滞：cut 由「按序累加、只在超 trigger 时前进」决定，所以同一份历史得到同一个 cut；

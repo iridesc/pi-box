@@ -37,7 +37,8 @@ import {
 import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta, setPiBoxExtensionGetter } from "./extension.mjs";
 import { ReportExtension } from "./report-tools.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
-import { createImageBudgetExtension, IMAGE_BUDGET_DEFAULTS } from "./image-budget.mjs";
+import { createImageBudgetExtension, IMAGE_BUDGET_DEFAULTS, sumInlineImages } from "./image-budget.mjs";
+import { calculateContextTokens, estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { SkillsExtension } from "./skills-extension.mjs";
 import { ToolGuardExtension } from "./tool-guard-extension.mjs";
 import { listSchedules } from "./schedules.mjs";
@@ -49,6 +50,12 @@ export { context };
 function envMegabytes(name, fallback) {
   const value = Number(process.env[name] ?? "");
   return Number.isFinite(value) && value > 0 ? Math.round(value * 1024 * 1024) : fallback;
+}
+
+/** 环境变量里的正整数 token 数（PI_BOX_COMPACT_KEEP_TOKENS 等）；无效或未设时用默认值。 */
+function envTokens(name, fallback) {
+  const value = Number(process.env[name] ?? "");
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 /** 装好 pi-box 扩展的 Harness + 全局对象。返回时 PiBoxExtension 已注册。 */
@@ -108,6 +115,11 @@ export async function createHarness() {
       registry,
       env: (target) => new NodeExecutionEnv({ cwd: target.cwd ?? process.cwd() }),
       onReport: (e) => console.error("[harness report]", String(e?.stack ?? e)),
+      // 关掉自动压缩：durable 的阈值压缩与溢出恢复压缩都受这个开关控制，pi-box 只用
+      // 「会话顶部手动压缩」这一条路。上下文超限时宁可让请求直接报错，也不悄悄改历史。
+      // keepRecentTokens 决定手动压缩保留多少最近上下文（默认 8k，durable 默认是 20k）：
+      // 用户主动点压缩多半是为了让请求体真的小下来，留 20k 等于白点。
+      settings: { compaction: { enabled: false, keepRecentTokens: envTokens("PI_BOX_COMPACT_KEEP_TOKENS", 8000) } },
     },
     context,
   );
@@ -381,6 +393,60 @@ export function aggregateActorStatus(projectConversations) {
     }
   }
   return { agents, assistant };
+}
+
+/**
+ * 上下文占用摘要（纯函数，便于单测）。
+ *
+ * token 优先用实测：provider 会在 assistant 消息里报 usage，`calculateContextTokens` 就是那次请求的真实
+ * 上下文大小；只有它之后的消息才需要估算。没有 usage（例如纯本地跑出来的历史）时全部按估算走。
+ * `estimated` 恒给出：没有实测时它就是唯一答案；有实测时它≈实测+尾部长度的估算。
+ * 图片单列字节数，因为 token 估算里一张图恒为 4800 chars，跟真实体积无关。
+ */
+export function summarizeContext({ messages, contextWindow, compactions = [], failure = null }) {
+  let measured = null;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    const tokens = calculateContextTokens(message.usage ?? {});
+    if (tokens > 0) {
+      measured = { index, tokens };
+      break;
+    }
+  }
+  const from = measured === null ? 0 : measured.index + 1;
+  let estimated = measured?.tokens ?? 0;
+  for (const message of messages.slice(from)) estimated += estimateMessageTokens(message);
+  const window = Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null;
+  return {
+    messages: messages.length,
+    tokens: { measured: measured?.tokens ?? null, estimated },
+    contextWindow: window,
+    ratio: window === null ? null : estimated / window,
+    images: sumInlineImages(messages),
+    compactions,
+    failure,
+  };
+}
+
+/** 某个会话的上下文占用：取当前活跃上下文 + 正在跑的压缩任务。 */
+export async function conversationContextSummary(harness, conversation) {
+  const conversationId = Number(conversation.id);
+  const view = await conversation.context(context);
+  const agent = await harness.snapshot(AgentDoc, conversationId, context);
+  const ref = agent?.model;
+  const model = ref === undefined ? undefined : models.getModel(ref.provider, ref.modelId);
+  const live = await harness.snapshot(LiveDoc, conversationId, context);
+  return {
+    conversationId: String(conversationId),
+    model: ref ? `${ref.provider}/${ref.modelId}` : null,
+    ...summarizeContext({
+      messages: view.messages ?? [],
+      contextWindow: model?.contextWindow,
+      compactions: live?.compactions ?? [],
+      failure: live?.compactionFailure ?? null,
+    }),
+  };
 }
 
 /** 完整快照：会话 + cwd/project + agentsByProject + assistantByProject + agentsStatus + assistantStatus + 全局 model */

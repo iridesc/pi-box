@@ -1896,6 +1896,142 @@ function actorFromSelection() {
   return { project: conversation.project, actorType: conversation.actorType, actorName: conversation.actorName };
 }
 
+// ─── 上下文占用 ─────────────────────────────────────────────────────────────
+// 会话顶部显示：估算/实测 token、上限、内联图片体积、压缩任务状态。
+// 压缩只有手动一条路（harness 里关了 durable 的自动压缩），所以按钮就在这里。
+const contextSummaryCache = new Map(); // conversationId -> /api/context 的响应
+const contextSummaryRequests = new Map();
+const contextPolling = new Set(); // 正在等压缩落地的会话 id
+
+async function loadContextSummary(id, { force = false } = {}) {
+  const key = String(id);
+  if (!force && contextSummaryCache.has(key)) return contextSummaryCache.get(key);
+  if (contextSummaryRequests.has(key)) return contextSummaryRequests.get(key);
+  const request = fetch(`/api/context?id=${encodeURIComponent(key)}`)
+    .then(async (response) => {
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "加载上下文占用失败");
+      contextSummaryCache.set(key, result);
+      return result;
+    })
+    .catch(() => null)
+    .finally(() => contextSummaryRequests.delete(key));
+  contextSummaryRequests.set(key, request);
+  return request;
+}
+
+/** 83_000 → 83k，1_000_000 → 1M。 */
+function formatTokens(value) {
+  if (!Number.isFinite(value)) return "?";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1).replace(/\.0$/, "")}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, "")}k`;
+  return String(Math.round(value));
+}
+
+/** 占用条：一行文字 + 压缩按钮。数据没到就显示「正在计算」。 */
+function renderContextBar(conv) {
+  const key = String(conv.id);
+  const wrap = el("div", "view-context");
+  const summary = contextSummaryCache.get(key);
+  if (summary === undefined) {
+    loadContextSummary(key, { force: true }).then(() => {
+      if (selected?.type === "conversation" && String(selected.id) === key) renderView();
+    });
+    wrap.appendChild(el("span", "view-context-text muted", "上下文：正在计算…"));
+    return wrap;
+  }
+
+  const tokens = summary.tokens ?? {};
+  const used = Number.isFinite(tokens.measured) ? tokens.measured : tokens.estimated;
+  const window = summary.contextWindow;
+  const ratio = Number.isFinite(used) && window ? used / window : null;
+  const parts = [];
+  parts.push(ratio === null ? `上下文 ${formatTokens(used)}` : `上下文 ${(ratio * 100).toFixed(ratio < 0.1 ? 1 : 0)}%`);
+  parts.push(ratio === null ? "上限未知" : `${formatTokens(used)} / ${formatTokens(window)}`);
+  if (summary.images?.count > 0) parts.push(`图 ${summary.images.count} 张 ${formatBytes(summary.images.bytes)}`);
+  parts.push(`${summary.messages} 条消息`);
+
+  const busy = (summary.compactions ?? []).length > 0;
+  if (busy) parts.push("压缩中…");
+  const text = el("span", `view-context-text${busy ? " busy" : ""}`, parts.join(" · "));
+  text.title = "token 取模型最近一次请求上报的实测值；图片按 base64 体积单列（token 估算看不见字节）";
+  if (summary.failure?.error) {
+    text.classList.add("failed");
+    text.textContent = `${parts.join(" · ")} · 上次压缩失败：${summary.failure.error}`;
+  }
+  // 只是提醒，不自动做任何事：80% 黄、95% 红。
+  if (ratio !== null && ratio >= 0.95) wrap.classList.add("danger");
+  else if (ratio !== null && ratio >= 0.8) wrap.classList.add("warn");
+  wrap.appendChild(text);
+
+  const nearLimit = ratio !== null && ratio >= 0.95;
+  const compactBtn = el(
+    "button",
+    `btn view-context-compact${nearLimit && !busy ? " suggest" : ""}`,
+    busy ? "压缩中…" : nearLimit ? "压缩上下文（建议）" : "压缩上下文",
+  );
+  compactBtn.type = "button";
+  compactBtn.disabled = busy;
+  compactBtn.title = busy
+    ? "压缩任务正在跑，完成后这里会自动刷新"
+    : "把早期历史摘要成一段文字（原始记录仍保留在页面历史里，但不再发给模型）";
+  compactBtn.onclick = async () => {
+    const ok = confirm(
+      "把早期历史压缩成一段摘要？\n\n" +
+        "· 压缩后早期消息不再发给模型，原始记录仍能在页面里翻看\n" +
+        "· 需要保留的细节，先让助理写进文件或笔记再压",
+    );
+    if (!ok) return;
+    compactBtn.disabled = true;
+    compactBtn.textContent = "已提交…";
+    try {
+      const res = await fetch("/api/compact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: key }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "压缩失败");
+      if (data.skipped) {
+        alert(data.skipped);
+        compactBtn.disabled = false;
+        compactBtn.textContent = "压缩上下文";
+        return;
+      }
+      pollContextUntilIdle(key);
+    } catch (error) {
+      alert(error.message);
+      compactBtn.disabled = false;
+      compactBtn.textContent = "压缩上下文";
+    }
+  };
+  wrap.appendChild(compactBtn);
+  return wrap;
+}
+
+/** 压缩任务落地前后轮询占用信息，完成后再刷新一次会话详情。 */
+function pollContextUntilIdle(id, attempt = 0) {
+  const key = String(id);
+  if (contextPolling.has(key)) return;
+  contextPolling.add(key);
+  const tick = async () => {
+    const summary = await loadContextSummary(key, { force: true });
+    const busy = (summary?.compactions ?? []).length > 0;
+    if (selected?.type === "conversation" && String(selected.id) === key) renderView();
+    if (busy && attempt < 150) {
+      attempt += 1;
+      setTimeout(tick, 1200);
+      return;
+    }
+    contextPolling.delete(key);
+    if (!busy) {
+      refreshConversationDetail({ id: key, status: "running" }, Date.now());
+      if (selected?.type === "conversation" && String(selected.id) === key) renderView();
+    }
+  };
+  setTimeout(tick, 800);
+}
+
 async function loadConversationDetail(id, { force = false } = {}) {
   const key = String(id);
   if (!force && conversationDetailCache.has(key)) return conversationDetailCache.get(key);
@@ -3296,6 +3432,7 @@ function renderConversation(view) {
   titleSpan.appendChild(renameBtn);
   head.appendChild(titleSpan);
   head.appendChild(el("span", "view-sub", sub));
+  head.appendChild(renderContextBar(conv));
   const stopBtn = el("button", "btn-danger view-stop", "终止会话");
   stopBtn.type = "button";
   stopBtn.title = "终止当前会话正在进行的任务";
@@ -5494,6 +5631,10 @@ function maybeRefreshConversationDetail(conv) {
 function refreshConversationDetail(conv, now) {
   const key = String(conv.id);
   detailRefreshState.set(key, { lastFetch: now, status: conv.status });
+  // 上下文占用跟着一起刷：运行中 token 会涨，用户要能看到它涨到哪儿了。
+  loadContextSummary(key, { force: true }).then(() => {
+    if (selected?.type === "conversation" && String(selected.id) === key) renderView();
+  }).catch(() => {});
   loadConversationDetail(conv.id, { force: true }).then(() => {
     if (selected?.type === "conversation" && String(selected.id) === key) renderView();
   }).catch(() => {});
