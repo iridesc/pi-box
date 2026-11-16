@@ -28,6 +28,9 @@ const {
   languageFor,
   mimeFor,
   sniffVideoMime,
+  deleteProjectPath,
+  createProjectDir,
+  renameProjectPath,
 } = await import("../src/files.mjs");
 
 await writeFile(join(root, "workspace", "demo", "README.md"), "# demo\n\nhello\n");
@@ -276,4 +279,82 @@ test("真正的 TypeScript 源码仍然按文本预览（不被嗅探误判）",
   const preview = await readFilePreview("demo", "code.ts");
   assert.equal(preview.kind, "text");
   assert.equal(preview.language, "typescript");
+});
+
+// ── 写操作：删除 / 新建目录 / 重命名 ──────────────────────────────────
+
+test("删除文件与目录（递归），路径不存在报 404", async () => {
+  await writeFile(join(root, "workspace", "demo", "del-me.txt"), "x");
+  await mkdir(join(root, "workspace", "demo", "del-dir", "inner"), { recursive: true });
+  await writeFile(join(root, "workspace", "demo", "del-dir", "inner", "a.txt"), "a");
+
+  assert.deepEqual(await deleteProjectPath("demo", "del-me.txt"), { project: "demo", path: "del-me.txt" });
+  await assert.rejects(() => readFilePreview("demo", "del-me.txt"), /路径不存在/);
+
+  await deleteProjectPath("demo", "del-dir");
+  await assert.rejects(() => readFilePreview("demo", "del-dir/inner/a.txt"), /路径不存在/);
+
+  await assert.rejects(() => deleteProjectPath("demo", "nope.txt"), (e) => e.status === 404);
+});
+
+test("受保护目录拒绝删除与改名", async () => {
+  await mkdir(join(root, "workspace", "demo", ".git"), { recursive: true });
+  for (const target of [".git", ".git/config", ".pi", ".pi-box"]) {
+    await assert.rejects(
+      () => deleteProjectPath("demo", target),
+      (e) => e.status === 403 && /受保护/.test(e.message),
+      `${target} 应被拒绝`,
+    );
+  }
+  await assert.rejects(() => renameProjectPath("demo", ".git", "g"), (e) => e.status === 403);
+  // 只比第一段：深层同名不算受保护
+  await mkdir(join(root, "workspace", "demo", "src", "nested"), { recursive: true });
+  await mkdir(join(root, "workspace", "demo", "src", "nested", ".git"), { recursive: true });
+  await deleteProjectPath("demo", "src/nested/.git");
+});
+
+test("删除符号链接只删链接，不动目标", async () => {
+  const { lstat: ls } = await import("node:fs/promises");
+  await symlink(join(root, "outside"), join(root, "workspace", "demo", "link-out"));
+  await deleteProjectPath("demo", "link-out");
+  await assert.rejects(() => ls(join(root, "workspace", "demo", "link-out")));
+  // 目标还在
+  assert.ok(await ls(join(root, "outside", "secret.txt")));
+});
+
+test("不能删除项目根", async () => {
+  await assert.rejects(() => deleteProjectPath("demo", ""), (e) => e.status === 400);
+  await assert.rejects(() => deleteProjectPath("demo", "/"), (e) => e.status === 400);
+});
+
+test("新建目录：重复报 409，上级不存在报 404，非法名报错", async () => {
+  assert.deepEqual(await createProjectDir("demo", "newdir"), { project: "demo", path: "newdir" });
+  await assert.rejects(() => createProjectDir("demo", "newdir"), (e) => e.status === 409);
+  await assert.rejects(() => createProjectDir("demo", "ghost/sub"), (e) => e.status === 404);
+  await assert.rejects(() => createProjectDir("demo", "newdir/sub/deep"), (e) => e.status === 404);
+  await assert.rejects(() => createProjectDir("demo", ""), (e) => e.status === 400);
+  await assert.rejects(() => createProjectDir("demo", "../escape"), (e) => e.status === 400);
+});
+
+test("重命名：文件与目录都在原目录内改名，目标已存在报 409", async () => {
+  await writeFile(join(root, "workspace", "demo", "r1.txt"), "1");
+  await writeFile(join(root, "workspace", "demo", "r2.txt"), "2");
+  const r = await renameProjectPath("demo", "r1.txt", "r9.txt");
+  assert.deepEqual(r, { project: "demo", path: "r9.txt", changed: true });
+  assert.equal((await readFilePreview("demo", "r9.txt")).content, "1");
+  await assert.rejects(() => renameProjectPath("demo", "r9.txt", "r2.txt"), (e) => e.status === 409);
+  // 同一个名字 → 幂等，不报错
+  assert.equal((await renameProjectPath("demo", "r9.txt", "r9.txt")).changed, false);
+  // 目录改名
+  await mkdir(join(root, "workspace", "demo", "d-old"), { recursive: true });
+  const d = await renameProjectPath("demo", "d-old", "d-new");
+  assert.equal(d.path, "d-new");
+  // 子目录里的文件改名，结果路径带父目录
+  const nested = await renameProjectPath("demo", "src/app.js", "app2.js");
+  assert.equal(nested.path, "src/app2.js");
+  // 名字里带斜杠 → 只取末段，不能跨目录
+  const slash = await renameProjectPath("demo", "src/app2.js", "sub/app3.js");
+  assert.equal(slash.path, "src/app3.js");
+  await assert.rejects(() => renameProjectPath("demo", "src/app3.js", ".."), (e) => e.status === 400);
+  await assert.rejects(() => renameProjectPath("demo", "nope.txt", "x.txt"), (e) => e.status === 404);
 });

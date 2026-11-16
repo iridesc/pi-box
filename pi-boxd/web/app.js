@@ -963,6 +963,10 @@ function ensureFileBrowser(project) {
     noticeError: false,
     treeDirty: true,
     previewDirty: true,
+    // 行内编辑：{ type: "mkdir", dir } | { type: "rename", path, dir, value }
+    edit: null,
+    // 上传进度：{ dir, index, total, name, percent }，只影响目标目录那一行
+    uploading: null,
   };
   loadFileDir("");
   return fileBrowser;
@@ -1042,11 +1046,10 @@ async function openFilePreview(fb, path) {
 function setFilesChrome(on) {
   const sessionsTitle = document.getElementById("sessions-title");
   const tasksTitle = document.getElementById("tasks-title");
-  const upload = document.getElementById("file-upload-btn");
   const download = document.getElementById("file-download-btn");
   const refresh = document.getElementById("file-refresh-btn");
   const tasksNavLabel = document.querySelector('[data-mobile-panel="tasks"] span');
-  if (!sessionsTitle || !tasksTitle || !upload) return;
+  if (!sessionsTitle || !tasksTitle) return;
   document.body.classList.toggle("mode-files", on);
   // 模式切换：重新进入时面板 DOM 已不属于文件浏览器，强制整块重画。
   if (on !== filesModeMounted) {
@@ -1059,22 +1062,19 @@ function setFilesChrome(on) {
   if (on) {
     if (sessionsTitle.textContent !== "文件") sessionsTitle.textContent = "文件";
     if (tasksTitle.textContent !== "文件预览") tasksTitle.textContent = "文件预览";
-    upload.hidden = false;
     const hasFile = Boolean(fileBrowser?.selected);
     download.hidden = !hasFile;
-    refresh.hidden = !hasFile;
+    // 预览刷新跟文件无关，始终可用（以前跟「选中文件」绑定，没选文件就刷不了目录）
+    refresh.hidden = false;
     if (tasksNavLabel && tasksNavLabel.textContent !== "预览") tasksNavLabel.textContent = "预览";
   } else {
     if (sessionsTitle.textContent !== "会话") sessionsTitle.textContent = "会话";
     if (!tasksTitle.querySelector("small")) tasksTitle.innerHTML = "任务图 <small>当前会话</small>";
-    upload.hidden = true;
     download.hidden = true;
     refresh.hidden = true;
     if (tasksNavLabel && tasksNavLabel.textContent !== "任务") tasksNavLabel.textContent = "任务";
   }
-  if (upload.hidden) return;
-  const dirLabel = fileBrowser?.currentDir ? fileBrowser.currentDir : "项目根目录";
-  upload.title = `上传文件到 ${dirLabel}`;
+  if (download.hidden && refresh.hidden) return;
   download.href = fileBrowser?.selected ? rawFileUrl(fileBrowser.project, fileBrowser.selected, true) : "#";
 }
 
@@ -1096,11 +1096,249 @@ function renderFileTree(fb) {
   const root = document.getElementById("session-list");
   root.innerHTML = "";
   if (fb.notice) root.appendChild(el("div", fb.noticeError ? "file-notice err" : "file-notice", fb.notice));
-  const current = el("div", "file-current-dir", `上传目录：${fb.currentDir || "（项目根目录）"}`);
-  root.appendChild(current);
+  root.appendChild(fileOpsRow(fb, "", "（项目根目录）", 0, { isRoot: true }));
   const tree = el("div", "file-tree");
   root.appendChild(tree);
   appendFileRows(tree, fb, "", 0);
+}
+
+/** 受保护目录：后端也会拒，这里不给按钮，少一次误点。 */
+const PROTECTED_FILE_HEADS = new Set([".git", ".pi", ".pi-box"]);
+function isProtectedPath(rel) {
+  return PROTECTED_FILE_HEADS.has(String(rel ?? "").split("/")[0]);
+}
+
+/** 拖拽的是外部文件（不是页面内元素拖动）。 */
+function isFileDrag(event) {
+  const types = event.dataTransfer?.types;
+  return Boolean(types) && [...types].includes("Files");
+}
+
+/** 一行的操作区：目录 ⬆ ＋ ✕，文件 ⬇ ✕。 */
+function fileRowOps(fb, item) {
+  const isDir = item.type === "dir";
+  const ops = el("span", "file-row-ops");
+  const mkBtn = (text, title, handler) => {
+    const btn = el("button", "file-op", text);
+    btn.type = "button";
+    btn.title = title;
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      handler();
+    };
+    return btn;
+  };
+  if (isDir) {
+    // 上传进度占位：上传到这一层时把 ⬆ 就地换成百分比
+    if (fb.uploading && fb.uploading.dir === item.path) {
+      const pct = el("span", "file-op-upload", `${fb.uploading.index}/${fb.uploading.total} ${fb.uploading.percent}%`);
+      pct.title = `正在上传 ${fb.uploading.name}`;
+      ops.appendChild(pct);
+    } else {
+      ops.appendChild(mkBtn("⬆", `上传文件到 ${item.name}`, () => pickFilesFor(fb, item.path)));
+    }
+    ops.appendChild(mkBtn("＋", `在 ${item.name} 里新建文件夹`, () => startMkdir(fb, item.path)));
+  } else {
+    const download = el("a", "file-op", "⬇");
+    download.href = rawFileUrl(fb.project, item.path, true);
+    download.title = `下载 ${item.name}`;
+    download.download = item.name;
+    download.onclick = (event) => event.stopPropagation();
+    ops.appendChild(download);
+  }
+  if (!isProtectedPath(item.path)) {
+    ops.appendChild(mkBtn("✕", `删除 ${item.name}`, () => deleteFileEntry(fb, item)));
+  }
+  return ops;
+}
+
+/** 顶部「项目根目录」那行：作为根层级的落点与入口。 */
+function fileOpsRow(fb, rel, label, depth, { isRoot = false } = {}) {
+  const row = el("div", isRoot ? "file-row file-row-root" : "file-row file-row-dir");
+  row.style.paddingLeft = `${4 + depth * 12}px`;
+  row.dataset.path = rel;
+  row.appendChild(el("span", "file-arrow", isRoot ? "⌂" : ""));
+  row.appendChild(el("span", "file-name", label));
+  const ops = el("span", "file-row-ops");
+  const mkBtn = (text, title, handler) => {
+    const btn = el("button", "file-op", text);
+    btn.type = "button";
+    btn.title = title;
+    btn.onclick = (event) => {
+      event.stopPropagation();
+      handler();
+    };
+    return btn;
+  };
+  if (fb.uploading && fb.uploading.dir === rel) {
+    const pct = el("span", "file-op-upload", `${fb.uploading.index}/${fb.uploading.total} ${fb.uploading.percent}%`);
+    pct.title = `正在上传 ${fb.uploading.name}`;
+    ops.appendChild(pct);
+  } else {
+    ops.appendChild(mkBtn("⬆", `上传文件到${isRoot ? "项目根目录" : label}`, () => pickFilesFor(fb, rel)));
+  }
+  ops.appendChild(mkBtn("＋", `在${isRoot ? "项目根目录" : label}里新建文件夹`, () => startMkdir(fb, rel)));
+  row.appendChild(ops);
+  attachDirDropTarget(row, fb, rel);
+  return row;
+}
+
+/** 目录行既是展开按钮，也是拖拽上传的落点。 */
+function attachDirDropTarget(row, fb, rel) {
+  row.addEventListener("dragover", (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    row.classList.add("file-row-drop");
+  });
+  row.addEventListener("dragleave", () => row.classList.remove("file-row-drop"));
+  row.addEventListener("drop", async (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    row.classList.remove("file-row-drop");
+    const files = [...(event.dataTransfer?.files ?? [])];
+    if (files.length > 0) await uploadFiles(files, rel);
+  });
+}
+
+/** 行内输入框（新建文件夹 / 重命名共用一个外观）。 */
+function inlineFileInput(fb, { value, placeholder, onCommit }) {
+  const input = el("input", "file-inline-input");
+  input.type = "text";
+  input.value = value ?? "";
+  input.placeholder = placeholder ?? "";
+  input.spellcheck = false;
+  let settled = false;
+  const finish = (commit) => {
+    if (settled) return;
+    settled = true;
+    const next = input.value.trim();
+    fb.edit = null;
+    if (commit && next) onCommit(next);
+    else {
+      fb.treeDirty = true;
+      renderFilePanels();
+    }
+  };
+  input.onkeydown = (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") finish(true);
+    else if (event.key === "Escape") finish(false);
+  };
+  input.onblur = () => finish(false);
+  input.onclick = (event) => event.stopPropagation();
+  return input;
+}
+
+function startMkdir(fb, dir) {
+  fb.edit = { type: "mkdir", dir };
+  fb.treeDirty = true;
+  if (dir) {
+    fb.expanded.add(dir);
+    loadFileDir(dir);
+  }
+  renderFilePanels();
+}
+
+async function submitMkdir(fb, dir, name) {
+  const target = dir ? `${dir}/${name}` : name;
+  try {
+    const response = await fetch("/api/files/mkdir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: fb.project, path: target }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (fileBrowser !== fb) return;
+    fb.notice = `已创建文件夹 ${target}`;
+    fb.noticeError = false;
+    if (dir) fb.expanded.add(dir);
+    await loadFileDir(dir, { force: true });
+  } catch (error) {
+    if (fileBrowser !== fb) return;
+    fb.notice = `新建文件夹失败：${error.message}`;
+    fb.noticeError = true;
+    fb.treeDirty = true;
+    renderFilePanels();
+  }
+}
+
+function startRename(fb, item) {
+  fb.edit = { type: "rename", path: item.path, dir: parentDirOf(item.path), value: item.name };
+  fb.treeDirty = true;
+  renderFilePanels();
+}
+
+async function submitRename(fb, item, name) {
+  if (name === item.name) {
+    fb.treeDirty = true;
+    renderFilePanels();
+    return;
+  }
+  try {
+    const response = await fetch("/api/files/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: fb.project, path: item.path, name }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (fileBrowser !== fb) return;
+    // 改名后原来的选中路径就没了，跟着换过去（目录则连同其下的选中项一起换）
+    if (fb.selected === item.path || (item.type === "dir" && fb.selected?.startsWith(`${item.path}/`))) {
+      fb.selected = fb.selected.replace(item.path, data.path);
+    }
+    if (fb.expanded.has(item.path)) {
+      const nextExpanded = new Set();
+      for (const dir of fb.expanded) nextExpanded.add(dir.replace(item.path, data.path));
+      fb.expanded = nextExpanded;
+    }
+    fb.notice = `已重命名为 ${name}`;
+    fb.noticeError = false;
+    await loadFileDir(parentDirOf(item.path), { force: true });
+    if (fb.selected) await openFilePreview(fb, fb.selected);
+  } catch (error) {
+    if (fileBrowser !== fb) return;
+    fb.notice = `重命名失败：${error.message}`;
+    fb.noticeError = true;
+    fb.treeDirty = true;
+    renderFilePanels();
+  }
+}
+
+async function deleteFileEntry(fb, item) {
+  const isDir = item.type === "dir";
+  const hint = isDir ? `删除目录「${item.name}」及其全部内容？此操作不可恢复。` : `删除文件「${item.name}」？`;
+  if (!confirm(hint)) return;
+  try {
+    const response = await fetch("/api/files/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: fb.project, path: item.path }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (fileBrowser !== fb) return;
+    fb.dirs.delete(item.path);
+    fb.expanded.delete(item.path);
+    if (fb.selected === item.path || (isDir && fb.selected?.startsWith(`${item.path}/`))) {
+      fb.selected = null;
+      fb.preview = null;
+      fb.previewError = null;
+      fb.previewDirty = true;
+    }
+    fb.notice = `已删除 ${item.path}`;
+    fb.noticeError = false;
+    await loadFileDir(parentDirOf(item.path), { force: true });
+  } catch (error) {
+    if (fileBrowser !== fb) return;
+    fb.notice = `删除失败：${error.message}`;
+    fb.noticeError = true;
+    fb.treeDirty = true;
+    renderFilePanels();
+  }
 }
 
 function appendFileRows(container, fb, rel, depth) {
@@ -1122,7 +1360,7 @@ function appendFileRows(container, fb, rel, depth) {
     container.appendChild(row);
     return;
   }
-  if (node.items.length === 0) {
+  if (node.items.length === 0 && !(fb.edit?.type === "mkdir" && fb.edit.dir === rel)) {
     const row = el("div", "file-empty", "（空目录）");
     row.style.paddingLeft = `${indent}px`;
     container.appendChild(row);
@@ -1133,34 +1371,79 @@ function appendFileRows(container, fb, rel, depth) {
     const open = isDir && fb.expanded.has(item.path);
     const row = el("div", isDir ? "file-row file-row-dir" : "file-row file-row-file");
     row.style.paddingLeft = `${indent}px`;
+    row.dataset.path = item.path;
     if (!isDir && fb.selected === item.path) row.classList.add("selected");
     if (isDir && fb.currentDir === item.path) row.classList.add("file-row-current");
     row.appendChild(el("span", "file-arrow", isDir ? (open ? "▼" : "▶") : ""));
     row.appendChild(el("span", "file-icon", fileIcon(item)));
-    const name = el("span", "file-name", item.name);
-    name.title = item.path;
-    row.appendChild(name);
-    if (!isDir) {
-      if (item.size !== null && item.size !== undefined) row.appendChild(el("span", "file-size", formatBytes(item.size)));
-      const download = el("a", "file-row-dl", "⬇");
-      download.href = rawFileUrl(fb.project, item.path, true);
-      download.title = `下载 ${item.path}`;
-      download.download = item.name;
-      download.onclick = (event) => event.stopPropagation();
-      row.appendChild(download);
+
+    const renaming = fb.edit?.type === "rename" && fb.edit.path === item.path;
+    if (renaming) {
+      const input = inlineFileInput(fb, {
+        value: fb.edit.value,
+        placeholder: "新名字",
+        onCommit: (name) => submitRename(fb, item, name),
+      });
+      row.appendChild(input);
+      queueMicrotask(() => {
+        input.focus();
+        // 只选中主文件名，扩展名留给用户手动改
+        const dot = input.value.lastIndexOf(".");
+        if (!isDir && dot > 0) input.setSelectionRange(0, dot);
+        else input.select();
+      });
+    } else {
+      const name = el("span", "file-name", item.name);
+      name.title = `${item.path}（双击重命名）`;
+      if (!isProtectedPath(item.path)) {
+        name.ondblclick = (event) => {
+          event.stopPropagation();
+          startRename(fb, item);
+        };
+      }
+      row.appendChild(name);
+      if (!isDir && item.size !== null && item.size !== undefined) row.appendChild(el("span", "file-size", formatBytes(item.size)));
     }
-    row.onclick = () => {
+    row.appendChild(fileRowOps(fb, item));
+    row.onclick = (event) => {
+      if (event.target.closest("button, a, input")) return;
       if (isDir) toggleFileDir(fb, item.path);
       else openFilePreview(fb, item.path);
     };
     container.appendChild(row);
-    if (isDir && open) appendFileRows(container, fb, item.path, depth + 1);
+    if (isDir) attachDirDropTarget(row, fb, item.path);
+    if (isDir && open) {
+      appendFileRows(container, fb, item.path, depth + 1);
+      if (fb.edit?.type === "mkdir" && fb.edit.dir === item.path) {
+        container.appendChild(mkdirInputRow(fb, item.path, depth + 1));
+      }
+    }
+  }
+  if (fb.edit?.type === "mkdir" && fb.edit.dir === rel) {
+    container.appendChild(mkdirInputRow(fb, rel, depth));
   }
   if (node.truncated) {
     const row = el("div", "file-loading", "目录条目过多，仅显示前一部分");
     row.style.paddingLeft = `${indent + 12}px`;
     container.appendChild(row);
   }
+}
+
+/** 「在这里新建文件夹」的输入行。 */
+function mkdirInputRow(fb, dir, depth) {
+  const row = el("div", "file-row file-row-mkdir");
+  row.style.paddingLeft = `${4 + depth * 12}px`;
+  row.appendChild(el("span", "file-arrow", ""));
+  row.appendChild(el("span", "file-icon", "📁"));
+  const input = inlineFileInput(fb, {
+    value: "",
+    placeholder: "新文件夹名，回车创建",
+    onCommit: (name) => submitMkdir(fb, dir, name),
+  });
+  row.appendChild(input);
+  queueMicrotask(() => input.focus());
+  row.onclick = (event) => event.stopPropagation();
+  return row;
 }
 
 function renderFilePreview(fb) {
@@ -1320,40 +1603,76 @@ function renderTextPreview(body, preview) {
   body.appendChild(wrap);
 }
 
-async function uploadFiles(files) {
+/** 文件选择器：选完直接传到指定目录。 */
+let pendingUploadDir = null;
+function pickFilesFor(fb, dir) {
+  const input = document.getElementById("file-upload-input");
+  if (!input) return;
+  pendingUploadDir = { fb, dir };
+  input.value = "";
+  input.click();
+}
+
+/** XHR 才能拿上传进度（fetch 的 body 流不支持 progress）。 */
+function uploadOne(fb, file, dir, { overwrite = false, onProgress } = {}) {
+  return new Promise((resolve) => {
+    const params = new URLSearchParams({ project: fb.project, dir, name: file.name });
+    if (overwrite) params.set("overwrite", "1");
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/files/upload?${params.toString()}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(Math.floor((event.loaded / event.total) * 100));
+    };
+    xhr.onload = () => {
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText || "{}");
+      } catch {
+        data = {};
+      }
+      resolve({ status: xhr.status, ok: xhr.status >= 200 && xhr.status < 300, data });
+    };
+    xhr.onerror = () => resolve({ status: 0, ok: false, data: { error: "网络错误" } });
+    xhr.onabort = () => resolve({ status: 0, ok: false, data: { error: "已取消" } });
+    xhr.send(file);
+  });
+}
+
+async function uploadFiles(files, dirOverride = null) {
   const fb = fileBrowser;
   if (!fb || files.length === 0) return;
-  const dir = fb.currentDir;
+  const dir = dirOverride ?? fb.currentDir ?? "";
   const failures = [];
   let done = 0;
-  for (const file of files) {
-    fb.notice = `正在上传 ${file.name}（${done + 1}/${files.length}）…`;
-    fb.noticeError = false;
-    fb.treeDirty = true;
-    renderFilePanels();
-    const params = { project: fb.project, dir, name: file.name };
-    const send = (extra = {}) => fetch(`/api/files/upload?${new URLSearchParams({ ...params, ...extra }).toString()}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: file,
-    });
-    let response = await send().catch((error) => ({ ok: false, status: 0, json: async () => ({ error: error.message }) }));
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const paint = (percent) => {
+      fb.uploading = { dir, index: done + 1, total: files.length, name: file.name, percent };
+      paintUploadProgress(fb, dir, percent);
+    };
+    paint(0);
+    let response = await uploadOne(fb, file, dir, { onProgress: paint });
     if (response.status === 409) {
+      fb.uploading = null;
+      renderFilePanels();
       if (!confirm(`${file.name} 已存在，覆盖？`)) {
         failures.push(`${file.name}：已跳过`);
         continue;
       }
-      response = await send({ overwrite: "1" });
+      fb.uploading = { dir, index: done + 1, total: files.length, name: file.name, percent: 0 };
+      paintUploadProgress(fb, dir, 0);
+      response = await uploadOne(fb, file, dir, { overwrite: true, onProgress: paint });
     }
     if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      failures.push(`${file.name}：${data.error || `HTTP ${response.status}`}`);
+      failures.push(`${file.name}：${response.data.error || `HTTP ${response.status}`}`);
       continue;
     }
     done += 1;
   }
   // 上传过程中用户可能切到别的项目，旧 fb 不能再动新状态。
   if (fileBrowser !== fb) return;
+  fb.uploading = null;
   fb.expanded.add(dir);
   const notice = failures.length
     ? `已上传 ${done} 个，失败 ${failures.length} 个：${failures.join("；")}`
@@ -1371,6 +1690,49 @@ async function uploadFiles(files) {
       }
     }, 4000);
   }
+}
+
+/**
+ * 只改那一行的进度，不整树重绘：上传时 onprogress 会触发得很频繁。
+ * 行被重绘掉（找不到节点）就退回整树画一次。
+ */
+function paintUploadProgress(fb, dir, percent) {
+  const rows = document.querySelectorAll("#session-list .file-row");
+  let row = null;
+  for (const candidate of rows) {
+    if (candidate.dataset.path === dir && (candidate.classList.contains("file-row-dir") || candidate.classList.contains("file-row-root"))) {
+      row = candidate;
+      break;
+    }
+  }
+  if (!row) {
+    fb.treeDirty = true;
+    renderFilePanels();
+    return;
+  }
+  const state = fb.uploading;
+  if (!state) return;
+  let label = row.querySelector(".file-op-upload");
+  if (!label) {
+    label = el("span", "file-op-upload");
+    const ops = row.querySelector(".file-row-ops");
+    if (!ops) return;
+    const upBtn = ops.querySelector(".file-op");
+    if (upBtn) upBtn.replaceWith(label);
+    else ops.prepend(label);
+  }
+  const text = `${state.index}/${state.total} ${percent}%`;
+  if (label.textContent !== text) label.textContent = text;
+  label.title = `正在上传 ${state.name}`;
+  let bar = row.querySelector(".file-progress");
+  if (!bar) {
+    bar = el("i", "file-progress");
+    bar.appendChild(el("i", "file-progress-fill"));
+    row.appendChild(bar);
+  }
+  const fill = bar.firstChild;
+  if (fill) fill.style.width = `${percent}%`;
+  row.classList.add("file-row-uploading");
 }
 
 function sessionSourceLabel(conversation) {
@@ -3166,22 +3528,36 @@ for (const button of document.querySelectorAll("[data-mobile-panel]")) {
 }
 setMobilePanel(activeMobilePanel);
 
-// 文件浏览：上传 / 预览刷新
-const fileUploadBtn = document.getElementById("file-upload-btn");
+// 文件浏览：行内 ⬆ 选文件 → 传到那一层；选择器只有一个，靠 pendingUploadDir 记目标
 const fileUploadInput = document.getElementById("file-upload-input");
-if (fileUploadBtn && fileUploadInput) {
-  fileUploadBtn.onclick = () => fileUploadInput.click();
+if (fileUploadInput) {
   fileUploadInput.onchange = async () => {
+    const target = pendingUploadDir;
     const files = [...fileUploadInput.files];
     fileUploadInput.value = "";
-    if (files.length > 0) await uploadFiles(files);
+    pendingUploadDir = null;
+    if (!target || files.length === 0) return;
+    if (fileBrowser !== target.fb) return;
+    await uploadFiles(files, target.dir);
   };
+}
+
+// 文件模式的兜底：拖到空白处不要让浏览器直接打开文件
+const sessionListEl = document.getElementById("session-list");
+if (sessionListEl) {
+  const swallow = (event) => {
+    if (!document.body.classList.contains("mode-files")) return;
+    if (isFileDrag(event)) event.preventDefault();
+  };
+  sessionListEl.addEventListener("dragover", swallow);
+  sessionListEl.addEventListener("drop", swallow);
 }
 const fileRefreshBtn = document.getElementById("file-refresh-btn");
 if (fileRefreshBtn) {
   fileRefreshBtn.onclick = () => {
-    if (!fileBrowser?.selected) return;
-    openFilePreview(fileBrowser, fileBrowser.selected);
+    if (!fileBrowser) return;
+    if (fileBrowser.selected) openFilePreview(fileBrowser, fileBrowser.selected);
+    else loadFileDir(fileBrowser.currentDir ?? "", { force: true });
   };
 }
 

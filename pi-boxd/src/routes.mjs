@@ -16,7 +16,7 @@ import { deleteSchedule, listSchedules, loadScheduleStore, triggerSchedule, upse
 import { readLogTail, scheduleLogDir, scheduleLogRoot } from "./schedule-log.mjs";
 import { harness as runtimeHarness, context as runtimeContext, mcpBridge as runtimeMcpBridge, getMaintenance, isMaintenance, restartRuntime } from "./runtime.mjs";
 import { cleanupStatus, pruneAllLogs, saveCleanupConfig } from "./cleanup.mjs";
-import { listDirectory, readFilePreview, resolveProjectPath, sendProjectFile, uploadProjectFile } from "./files.mjs";
+import { createProjectDir, deleteProjectPath, listDirectory, readFilePreview, renameProjectPath, resolveProjectPath, sendProjectFile, uploadProjectFile } from "./files.mjs";
 import {
   createGroup as createReportGroup,
   deleteGroup as deleteReportGroup,
@@ -584,6 +584,42 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
             overwrite: params.get("overwrite") === "1",
           });
           sendJson(res, 200, { ok: true, ...data });
+        } catch (error) {
+          sendFileError(res, error);
+        }
+      },
+    },
+    // 文件删除（文件 / 目录递归）
+    "/api/files/delete": {
+      method: "POST",
+      async handler(req, res) {
+        try {
+          const { project, path } = await readBody(req);
+          sendJson(res, 200, { ok: true, ...(await deleteProjectPath(project, path)) });
+        } catch (error) {
+          sendFileError(res, error);
+        }
+      },
+    },
+    // 新建目录（不支持递归创建，上级必须已存在）
+    "/api/files/mkdir": {
+      method: "POST",
+      async handler(req, res) {
+        try {
+          const { project, path } = await readBody(req);
+          sendJson(res, 200, { ok: true, ...(await createProjectDir(project, path)) });
+        } catch (error) {
+          sendFileError(res, error);
+        }
+      },
+    },
+    // 重命名（同目录内改名，不跨目录移动）
+    "/api/files/rename": {
+      method: "POST",
+      async handler(req, res) {
+        try {
+          const { project, path, name } = await readBody(req);
+          sendJson(res, 200, { ok: true, ...(await renameProjectPath(project, path, name)) });
         } catch (error) {
           sendFileError(res, error);
         }

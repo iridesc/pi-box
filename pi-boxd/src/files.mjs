@@ -4,7 +4,7 @@
 // - 预览只读前 1MB，二进制按 NUL 字节 / 非法 UTF-8 判定；
 // - 原文件默认下载，只有图片 / 音频 / 视频 / PDF 允许 inline（HTML/SVG 不给渲染机会）。
 import { createReadStream, createWriteStream } from "node:fs";
-import { open, readdir, realpath, rename, stat, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
@@ -73,6 +73,65 @@ export async function resolveProjectPath(project, relInput) {
     throw fileError(400, "路径越界：符号链接指向项目外部");
   }
   return { project, root: rootReal, rel, abs: real, info: await stat(real) };
+}
+
+// ── 写操作：删除 / 新建目录 / 重命名 ────────────────────────────────────
+
+/**
+ * 删除或改名会让项目本身或平台配置失效，直接拒绝。
+ * 只比第一段：`.git` 下面任何东西都不动，`src/.git` 这类反而允许（不是真 .git）。
+ */
+const PROTECTED_HEADS = new Set([".git", ".pi", ".pi-box"]);
+
+function assertMutable(rel) {
+  if (!rel) throw fileError(400, "不能操作项目根目录");
+  const head = rel.split("/")[0];
+  if (PROTECTED_HEADS.has(head)) throw fileError(403, `${head} 是受保护目录，不允许修改`);
+}
+
+export async function deleteProjectPath(project, relInput) {
+  const root = await projectRoot(project);
+  const rel = normalizeRelPath(relInput);
+  assertMutable(rel);
+  const abs = join(root, ...rel.split("/"));
+  // 用 lstat：符号链接只删链接本身，不能顺着 realpath 把目标删掉。
+  const info = await lstat(abs).catch(() => null);
+  if (!info) throw fileError(404, `路径不存在：${rel}`);
+  if (info.isSymbolicLink()) await unlink(abs);
+  else await rm(abs, { recursive: info.isDirectory(), force: false });
+  return { project, path: rel };
+}
+
+export async function createProjectDir(project, relInput) {
+  const root = await projectRoot(project);
+  const rel = normalizeRelPath(relInput);
+  if (!rel) throw fileError(400, "目录名不能为空");
+  assertMutable(rel);
+  const abs = join(root, ...rel.split("/"));
+  const parentInfo = await stat(dirname(abs)).catch(() => null);
+  if (!parentInfo?.isDirectory()) throw fileError(404, "上级目录不存在");
+  const existing = await lstat(abs).catch(() => null);
+  if (existing) throw fileError(409, `已存在同名文件或目录：${rel.split("/").pop()}`);
+  await mkdir(abs);
+  return { project, path: rel };
+}
+
+export async function renameProjectPath(project, relInput, newName) {
+  const root = await projectRoot(project);
+  const rel = normalizeRelPath(relInput);
+  assertMutable(rel);
+  // sanitizeFileName 会砍掉路径部分并拒绝 . / .. / 控制字符，改名不能跨目录。
+  const name = sanitizeFileName(newName);
+  const abs = join(root, ...rel.split("/"));
+  const info = await lstat(abs).catch(() => null);
+  if (!info) throw fileError(404, `路径不存在：${rel}`);
+  const parentRel = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+  const dest = parentRel ? join(root, ...parentRel.split("/"), name) : join(root, name);
+  if (dest === abs) return { project, path: rel, changed: false };
+  const existing = await lstat(dest).catch(() => null);
+  if (existing) throw fileError(409, `已存在同名文件或目录：${name}`);
+  await rename(abs, dest);
+  return { project, path: parentRel ? `${parentRel}/${name}` : name, changed: true };
 }
 
 // ── 目录列表 ────────────────────────────────────────────────────────────

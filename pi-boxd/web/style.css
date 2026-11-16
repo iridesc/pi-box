@@ -876,9 +876,41 @@ body.mode-files #new-conversation { display: none; }
 .file-icon { flex: 0 0 auto; font-size: 12px; }
 .file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .file-size { flex: 0 0 auto; color: #6e7681; font-size: 10px; }
-.file-row-dl { flex: 0 0 auto; color: #8b949e; text-decoration: none; opacity: 0; }
-.file-row:hover .file-row-dl, .file-row.selected .file-row-dl { opacity: 1; }
-.file-row-dl:hover { color: #58a6ff; }
+/* 行尾操作区：⬆ 上传到此 / ＋ 新建文件夹 / ⬇ 下载 / ✕ 删除。
+   平时淡显（浅色但可读），hover 或行被选中时提亮，避免小图标把行塞满后显得吵。 */
+.file-row-ops { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; margin-left: auto; padding-left: 6px; }
+.file-op {
+  appearance: none; border: 0; background: none; padding: 0 2px; cursor: pointer;
+  color: #6e7681; font-size: 11px; line-height: 16px; text-decoration: none;
+  transition: color .12s, opacity .12s;
+}
+.file-row:hover .file-op, .file-row.selected .file-op, .file-row.file-row-current .file-op { color: #8b949e; }
+.file-op:hover { color: #58a6ff; }
+.file-op-delete:hover, .file-op[title^="删除"]:hover { color: #f85149; }
+.file-op-upload { color: #58a6ff; font-size: 10px; font-variant-numeric: tabular-nums; }
+
+/* 拖拽落点高亮 */
+.file-row.file-row-drop {
+  background: rgba(88, 166, 255, .18);
+  outline: 1px dashed #58a6ff; outline-offset: -1px; border-radius: 4px;
+}
+
+/* 行内输入（新建文件夹 / 重命名） */
+.file-inline-input {
+  flex: 1; min-width: 0; height: 18px; padding: 0 4px;
+  border: 1px solid #58a6ff; border-radius: 3px; background: #0d1117; color: #e6edf3;
+  font: inherit; font-size: 12px; outline: none;
+}
+.file-row-mkdir .file-name { flex: 1; }
+.file-row-root .file-icon { color: #6e7681; }
+
+/* 上传进度：行底部 2px 进度条，不撑高布局 */
+.file-row-uploading { position: relative; }
+.file-progress {
+  position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px;
+  background: rgba(88, 166, 255, .18); border-radius: 1px; overflow: hidden; pointer-events: none;
+}
+.file-progress-fill { display: block; height: 100%; width: 0; background: #58a6ff; transition: width .15s linear; }
 .file-loading, .file-empty { padding: 4px 6px; color: #6e7681; font-size: 11px; }
 .file-error { padding: 4px 8px; color: #f85149; font-size: 11px; white-space: normal; }
 .file-notice {
