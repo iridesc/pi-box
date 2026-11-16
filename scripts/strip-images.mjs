@@ -6,11 +6,17 @@
 // 已经能兜住新会话，但已经堆起来的字节还得从库里清掉，否则库、WAL、备份一起虚胖。
 //
 // 用法（**必须先停掉 pi-boxd**，否则它内存里的上下文视图和库会脱钩）：
-//   node scripts/strip-images.mjs --db /home/agent/.pi-boxd/session.sqlite --keep-mb 2            # 预演，只统计
-//   node scripts/strip-images.mjs --db ... --keep-mb 2 --apply                                    # 真改 + VACUUM
-//   node scripts/strip-images.mjs --db ... --keep-mb 2 --apply --conversation 70833               # 只处理一个会话
+//   node scripts/strip-images.mjs --db /home/agent/.pi-boxd/session.sqlite --dedupe         # 只删重复副本（预演）
+//   node scripts/strip-images.mjs --db ... --dedupe --apply                                 # 真删重复副本 + VACUUM
+//   node scripts/strip-images.mjs --db ... --keep-mb 2                                      # 按体积裁（预演）
+//   node scripts/strip-images.mjs --db ... --keep-mb 2 --apply                              # 按体积裁 + VACUUM
+//   node scripts/strip-images.mjs --db ... --dedupe --keep-mb 16 --apply                    # 两者一起
+//   node scripts/strip-images.mjs --db ... --dedupe --apply --conversation 70833            # 只处理一个会话
 //
-// 每个会话保留「最近 keepMb 的图片」，更老的换占位文本；占位文本里带原文件路径，模型需要时重新 read。
+// 两种策略可以单用也可以合并：
+//   --dedupe     同一个文件读过多次时，只留最新那份图，旧副本换成占位；不同文件全部保留。
+//   --keep-mb N  每个会话只保留最近 N MB 的图片（默认 2），更老的换占位。
+// 占位文本里带原文件路径，模型需要时重新 read。
 // 改之前自动备份 session.sqlite（含 -wal / -shm 一起拷），改不回来可以整库还原。
 
 import { copyFile, stat } from "node:fs/promises";
@@ -42,7 +48,7 @@ async function loadModule() {
 }
 
 function parseArgs(argv) {
-  const options = { db: undefined, keepMb: 2, apply: false, conversation: undefined, vacuum: true };
+  const options = { db: undefined, keepMb: undefined, dedupe: false, apply: false, conversation: undefined, vacuum: true };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     const next = () => {
@@ -52,6 +58,7 @@ function parseArgs(argv) {
     };
     if (arg === "--db") options.db = next();
     else if (arg === "--keep-mb") options.keepMb = Number(next());
+    else if (arg === "--dedupe") options.dedupe = true;
     else if (arg === "--conversation") options.conversation = Number(next());
     else if (arg === "--apply") options.apply = true;
     else if (arg === "--no-vacuum") options.vacuum = false;
@@ -65,7 +72,8 @@ function usage() {
   return [
     "用法：node scripts/strip-images.mjs --db <session.sqlite> [选项]",
     "",
-    "  --keep-mb N        每个会话保留最近 N MB 的图片（默认 2）",
+    "  --dedupe           同一文件读多次时只留最新那份图（不同文件全部保留）",
+    "  --keep-mb N        每个会话保留最近 N MB 的图片（默认 2；与 --dedupe 同用时按去重后再裁）",
     "  --conversation ID  只处理这一个会话",
     "  --apply            真的写库（默认只预演、只统计）",
     "  --no-vacuum        写完不 VACUUM",
@@ -132,7 +140,9 @@ async function main() {
     return;
   }
   const dbPath = resolve(options.db);
-  if (!(options.keepMb >= 0)) throw new Error("--keep-mb 必须是非负数");
+  // 只做去重时不动体积预算（keepBytes = Infinity），避免顺手把不同文件也裁掉。
+  const keepMb = options.keepMb === undefined ? (options.dedupe ? Number.POSITIVE_INFINITY : 2) : options.keepMb;
+  if (!(keepMb >= 0)) throw new Error("--keep-mb 必须是非负数");
 
   const { stripImagesFromRecords } = await loadModule();
   const sizeBefore = await fileSize(dbPath);
@@ -147,7 +157,10 @@ async function main() {
   const perConversation = [];
 
   for (const [conversationId, records] of conversations) {
-    const result = stripImagesFromRecords(records, { keepBytes: Math.round(options.keepMb * MIB) });
+    const result = stripImagesFromRecords(records, {
+      keepBytes: keepMb === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : Math.round(keepMb * MIB),
+      dedupeByPath: options.dedupe,
+    });
     if (result.dropped === 0) continue;
     totalDropped += result.dropped;
     totalBytes += result.droppedBytes;
@@ -159,7 +172,10 @@ async function main() {
   }
 
   console.log(`库：${dbPath}（${(sizeBefore / MIB).toFixed(1)} MB）`);
-  console.log(`会话：${conversations.size} 个，待剥离图片 ${totalDropped} 张，共 ${(totalBytes / MIB).toFixed(1)} MB`);
+  console.log(
+    `会话：${conversations.size} 个，待剥离图片 ${totalDropped} 张，共 ${(totalBytes / MIB).toFixed(1)} MB` +
+      `（策略：${options.dedupe ? "同文件去重" : ""}${options.dedupe && keepMb !== Number.POSITIVE_INFINITY ? " + " : ""}${keepMb === Number.POSITIVE_INFINITY ? "" : `保留最近 ${keepMb}MB`}）`,
+  );
   for (const item of perConversation.sort((a, b) => b.bytes - a.bytes).slice(0, 15)) {
     console.log(`  #${item.conversationId}: ${item.dropped} 张，${(item.bytes / MIB).toFixed(1)} MB`);
   }

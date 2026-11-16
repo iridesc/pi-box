@@ -1,7 +1,7 @@
 // 图片预算单测：请求级裁剪（boundImages）与存储级剥离（stripImagesFromRecords）。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { boundImages, imagePlaceholder, stripImagesFromRecords, toolCallPaths } from "../src/image-budget.mjs";
+import { boundImages, createImageBudgetExtension, imagePlaceholder, stripImagesFromRecords, toolCallPaths } from "../src/image-budget.mjs";
 
 const MIB = 1024 * 1024;
 
@@ -26,8 +26,13 @@ function imageResult(callId, mib, { path } = {}) {
 const images = (messages) =>
   messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []).filter((block) => block.type === "image"));
 
+/** 两种占位：被预算裁掉的（[图片已移除…）与重复副本省掉的（[同一文件 …）。 */
 const placeholders = (messages) =>
-  messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []).filter((block) => block.type === "text" && block.text.startsWith("[图片已移除")));
+  messages.flatMap((message) =>
+    (Array.isArray(message.content) ? message.content : []).filter(
+      (block) => block.type === "text" && (block.text.startsWith("[图片已移除") || block.text.startsWith("[同一文件")),
+    ),
+  );
 
 test("低于阈值时原样返回，且保持同一个数组引用", () => {
   const messages = imageResult("c1", 1);
@@ -106,4 +111,50 @@ test("stripImagesFromRecords 也处理 edits 里的消息，且没有图片时�
 
 test("占位文本明确说明这一轮看不到图", () => {
   assert.match(imagePlaceholder(), /这一轮看不到它的任何像素/);
+});
+
+test("同一文件读多次：只保留最新那份图，旧副本换成「更新副本在后面」的占位", () => {
+  const path = "items/x/参考图/屏幕截图 231948.png";
+  const messages = [...imageResult("c1", 2, { path }), ...imageResult("c2", 2, { path })];
+  const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
+  assert.equal(result.deduped, 1);
+  assert.equal(images(result.messages).length, 1); // 只剩最新那份
+  const texts = placeholders(result.messages).map((block) => block.text);
+  assert.match(texts[0], /这条旧副本已省略/);
+  assert.match(texts[0], /不要因此重复 read/);
+  assert.match(texts[0], /231948\.png/);
+});
+
+test("去重先于字节预算：重复副本不会挤掉不同文件", () => {
+  // 同一个文件读 6 次（每次 4MB），再加 2 个不同文件（各 4MB）。
+  const same = Array.from({ length: 6 }, (_, i) => imageResult(`s${i}`, 4, { path: "a.png" }));
+  const distinct = [imageResult("d1", 4, { path: "b.png" }), imageResult("d2", 4, { path: "c.png" })];
+  const messages = [...same, ...distinct].flat();
+  const result = boundImages(messages, { triggerBytes: 20 * MIB, targetBytes: 16 * MIB });
+  assert.equal(result.deduped, 5);
+  // 去重后剩 a/b/c 三张共 12MB，未超 trigger → 一张都不按预算裁。
+  assert.equal(images(result.messages).length, 3);
+});
+
+test("图片提示词段落挂在扩展上，且讲清了两种占位", () => {
+  const extension = createImageBudgetExtension();
+  assert.deepEqual(extension.sections.map((item) => item.key), ["images"]);
+  const text = extension.sections[0].render({}, {});
+  assert.match(text, /不需要为了"确认看清了没有"再读一次/);
+  assert.match(text, /图片已移除以缩小请求体/);
+  assert.match(text, /这条旧副本已省略/);
+});
+
+test("存储去重：dedupeByPath 只删旧副本，不同文件全部保留", () => {
+  const path = "items/x/a.png";
+  const records = [
+    { id: 1, record: { model: imageResult("c1", 2, { path }) } },
+    { id: 2, record: { model: imageResult("c2", 2, { path }) } },
+    { id: 3, record: { model: imageResult("c3", 2, { path: "items/x/b.png" }) } },
+  ];
+  const result = stripImagesFromRecords(records, { keepBytes: Infinity, dedupeByPath: true });
+  assert.equal(result.dropped, 1); // 只删 id=1 那份旧副本
+  assert.equal(images(result.records[0].record.model).length, 0);
+  assert.equal(images(result.records[1].record.model).length, 1);
+  assert.equal(images(result.records[2].record.model).length, 1);
 });
