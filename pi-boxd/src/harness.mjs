@@ -4,7 +4,8 @@ import { basename, join } from "node:path";
 import { createRegistry, defineExtension, Harness, configure, LiveDoc } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createCodingTools } from "@earendil-works/pi-durable/tools";
+import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
@@ -36,12 +37,19 @@ import {
 import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, setConversationMeta, setPiBoxExtensionGetter } from "./extension.mjs";
 import { ReportExtension } from "./report-tools.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
+import { createImageBudgetExtension, IMAGE_BUDGET_DEFAULTS } from "./image-budget.mjs";
 import { SkillsExtension } from "./skills-extension.mjs";
 import { ToolGuardExtension } from "./tool-guard-extension.mjs";
 import { listSchedules } from "./schedules.mjs";
 
 const context = BACKGROUND_CONTEXT;
 export { context };
+
+/** 环境变量里的 MB 数（PI_BOX_IMAGE_TRIGGER_MB / PI_BOX_IMAGE_TARGET_MB）；无效或未设时用默认值。 */
+function envMegabytes(name, fallback) {
+  const value = Number(process.env[name] ?? "");
+  return Number.isFinite(value) && value > 0 ? Math.round(value * 1024 * 1024) : fallback;
+}
 
 /** 装好 pi-box 扩展的 Harness + 全局对象。返回时 PiBoxExtension 已注册。 */
 export async function createHarness() {
@@ -50,7 +58,16 @@ export async function createHarness() {
   const storage = await openNodeSqliteStorage(join(DATA_DIR, "session.sqlite"));
 
   const registry = createRegistry();
-  registry.install(CodingTools);
+  // 装图片处理器：`read` 读图时按模型尺寸上限（inputLimits.images.resize）缩放重编码，
+  // 而不是把 2MB 原图原样塞进上下文。没有处理器时上游只做「≤2000px 且 ≤4.5MB 就放行」。
+  registry.install(createCodingTools({ images: await createNodePhotonImages() }));
+  // 图片预算：历史图片每轮都要重发，超字节阈值就从最老的开始换成占位文本（只影响这一次请求）。
+  registry.install(
+    createImageBudgetExtension({
+      triggerBytes: envMegabytes("PI_BOX_IMAGE_TRIGGER_MB", IMAGE_BUDGET_DEFAULTS.triggerBytes),
+      targetBytes: envMegabytes("PI_BOX_IMAGE_TARGET_MB", IMAGE_BUDGET_DEFAULTS.targetBytes),
+    }),
+  );
 
   // 先建一个占位扩展，工具里通过 getter 拿到它（解决循环引用）
   let piBoxExt = defineExtension({ name: "pi-box", tools: [], tasks: PiBoxTasks });

@@ -10,3 +10,6 @@ workspace/
 
 # Node.js 依赖（所有子项目）
 node_modules/
+
+# macOS
+.DS_Store
