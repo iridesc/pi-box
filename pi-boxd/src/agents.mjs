@@ -99,13 +99,18 @@ function findMcpTool(name) {
  *  这样「整组勾 A + 单选 B 的一个工具」可以同时表达。 */
 function resolveMcpTools(mcpNames, mcpToolNames) {
   const servers = Array.isArray(mcpNames) ? [...new Set(mcpNames)] : [];
+  // 运行时宽松：MCP 可能只是临时掉线，不能因此让整个 agent 配置失效。
+  // 严格校验在保存路径的 validateAgentConfig 里（人操作时 fail fast）。
   const missing = servers.filter((name) => !mcpToolsByServer.has(name));
-  if (missing.length > 0) throw new Error(`MCP 未连接或不存在：${missing.join(", ")}`);
+  if (missing.length > 0) {
+    console.error(`[tools] MCP 未连接，已跳过其工具：${missing.join(", ")}`);
+  }
+  const available = servers.filter((name) => mcpToolsByServer.has(name));
   const narrowed = Array.isArray(mcpToolNames) && mcpToolNames.length > 0
     ? new Set(mcpToolNames.map(String))
     : null;
   const out = [];
-  for (const server of servers) {
+  for (const server of available) {
     const all = mcpToolsByServer.get(server) ?? [];
     if (narrowed === null) {
       out.push(...all);

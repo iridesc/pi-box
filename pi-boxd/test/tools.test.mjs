@@ -94,8 +94,8 @@ test("mcpTools 收窄：某 server 一个都没列出 → 该 server 全部给�
   assert.deepEqual(got, ["mcp__hub__list", "mcp__hub__send", "mcp__web__scan"]);
 });
 
-test("mcps 里有未连接的 server → 报错", () => {
-  assert.throws(() => resolveAgentTools([], ["nope"]), /MCP 未连接或不存在：nope/);
+test("mcps 里有未连接的 server → 运行时降级（跳过该 server，不阻断配置）", () => {
+  assert.deepEqual(names(resolveAgentTools(["read"], ["hub", "nope"])), ["mcp__hub__list", "mcp__hub__send", "read"]);
 });
 
 test("codemode / tool_search 按需注入（有 codemode 类 / deferred 类 MCP 工具时）", () => {
