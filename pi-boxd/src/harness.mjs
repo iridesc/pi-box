@@ -38,6 +38,7 @@ import { AnchorTask, ConversationMeta, makeSubagentTool, PiBoxTasks, Subagents, 
 import { ReportExtension } from "./report-tools.mjs";
 import { McpDurableBridge } from "./mcp-bridge.mjs";
 import { boundImages, createImageBudgetExtension, imageBudgetLimits, sumInlineImages } from "./image-budget.mjs";
+import { createImageSliceExtension } from "./image-slices.mjs";
 import { calculateContextTokens, estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { SkillsExtension } from "./skills-extension.mjs";
 import { ToolGuardExtension } from "./tool-guard-extension.mjs";
@@ -62,6 +63,9 @@ export async function createHarness() {
   // 装图片处理器：`read` 读图时按模型尺寸上限（inputLimits.images.resize）缩放重编码，
   // 而不是把 2MB 原图原样塞进上下文。没有处理器时上游只做「≤2000px 且 ≤4.5MB 就放行」。
   registry.install(createCodingTools({ images: await createNodePhotonImages() }));
+  // 长图切片：整页截图这类又长又窄的图按方框缩小会糊到读不出字，改装成 read 的包装——
+  // 长图按原始分辨率切成若干片返回（片高 1600、重叠 120、最多 12 片）。
+  registry.install(createImageSliceExtension());
   // 图片预算：历史图片每轮都要重发，超字节阈值就从最老的开始换成占位文本（只影响这一次请求）。
   registry.install(
     createImageBudgetExtension(imageBudgetLimits()),
