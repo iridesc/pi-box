@@ -398,6 +398,11 @@ export async function loadEnabledAgentDef(projectName, agentName) {
   return (await listMetaAgents()).find((agent) => agent.name === agentName) ?? null;
 }
 
+/** 助理在「配置文件根本不存在」时的默认工具集。
+ *  注意与「字段缺失」区分：字段缺失是显式行为（人删掉了，就是没有），
+ *  文件不存在是从未配置过 —— 新建项目不该一上来就是个哑巴助理。 */
+const DEFAULT_ASSISTANT_TOOLS = ["read", "write", "edit", "bash"];
+
 /** 读助理定义。元项目读 <META_DIR>/assistant.md；业务项目读 .pi/assistant.md。 */
 export async function loadAssistant(projectName) {
   const p = projectName === META_PROJECT
@@ -417,7 +422,18 @@ export async function loadAssistant(projectName) {
       instructions: def.instructions,
     };
   } catch {
-    return { model: null, tools: null, mcps: null, mcpTools: null, skills: null, agents: [], reports: null, icon: null, instructions: "" };
+    // 文件不存在（而非字段缺失）：给默认内置工具，保证助理至少能读写文件。
+    return {
+      model: null,
+      tools: [...DEFAULT_ASSISTANT_TOOLS],
+      mcps: null,
+      mcpTools: null,
+      skills: null,
+      agents: [],
+      reports: null,
+      icon: null,
+      instructions: "",
+    };
   }
 }
 

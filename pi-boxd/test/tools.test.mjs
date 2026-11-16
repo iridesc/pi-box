@@ -24,6 +24,7 @@ const {
   mcpCatalog,
   parseAgentDef,
   serializeAgentDef,
+  loadAssistant,
 } = await import("../src/agents.mjs");
 
 test.after(async () => {
@@ -198,4 +199,18 @@ test("mcpCatalog: 按 server 分组，label 去掉前缀", () => {
   const catalog = mcpCatalog();
   const hub = catalog.find((entry) => entry.server === "hub");
   assert.deepEqual(hub.tools.map((t) => t.label), ["send", "list"]);
+});
+// ── 助理文件不存在 vs 字段缺失 ──
+test("loadAssistant: 文件不存在 → 默认内置 4 个（新项目不该是哑巴）", async () => {
+  const asst = await loadAssistant("no-such-project");
+  assert.deepEqual(asst.tools, ["read", "write", "edit", "bash"]);
+});
+
+test("loadAssistant: 文件存在但没写 tools → 零工具（显式）", async () => {
+  const { writeFile } = await import("node:fs/promises");
+  const dir = join(root, "workspace", "hasfile", ".pi");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "assistant.md"), "---\n---\n\n助理\n", "utf-8");
+  const asst = await loadAssistant("hasfile");
+  assert.equal(asst.tools, null);
 });
