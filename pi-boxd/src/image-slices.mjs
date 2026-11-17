@@ -19,6 +19,9 @@ import { createReadTool } from "@earendil-works/pi-durable/tools";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
 
 /** 切片策略。片高对齐模型原生上限（2000）的 80%，重叠保证跨界文字在两片里都完整。 */
+/** 切片说明文字的前缀。占位替换、文图绑定都靠它认出「这条消息是一组切片」。 */
+export const SLICE_NOTICE_PREFIX = "这是一张长图（";
+
 export const SLICE_POLICY = Object.freeze({
   sliceHeight: 1600,
   overlap: 120,
@@ -125,6 +128,11 @@ export function planSlices(width, height, policy = SLICE_POLICY) {
   return { needed: true, slices, capped: false, count };
 }
 
+/** 片数超上限时的说明。退化路径和 prepareImageBlocks 共用同一段文案。 */
+export function sliceCappedNote(width, height, count) {
+  return `这张图 ${width}×${height} 需要切成 ${count} 片才清晰，超过上限 ${SLICE_POLICY.maxSlices} 片，已按整图缩小返回：文字大概率读不清。要看细节请先用 bash 裁出关心的区域（如 ImageMagick 的 convert -crop）再 read，或转成文本。`;
+}
+
 let photon;
 
 /** 懒加载 photon（WASM）。取不到就返回 undefined，调用方退化成上游的整图缩放。 */
@@ -206,10 +214,68 @@ async function imageModelOf(api, context) {
 function sliceNotice(path, width, height, slices, policy) {
   const range = slices.map((slice, index) => `${index + 1}:y=${slice.y}-${slice.y + slice.height}`).join(", ");
   return [
-    `这是一张长图（${width}×${height}），已按原始分辨率切成 ${slices.length} 片自上而下返回：片高 ${policy.sliceHeight}px，`,
+    `${SLICE_NOTICE_PREFIX}${width}×${height}），已按原始分辨率切成 ${slices.length} 片自上而下返回：片高 ${policy.sliceHeight}px，`,
     `相邻重叠 ${policy.overlap}px（跨界的文字会在两片里都出现，不要重复引用）。各片在原始图中的纵向范围：${range}。`,
     `原文件 ${path}。整图缩成一张会糊到读不出字，所以不要再为了"看全"去缩小整图；只需要局部时，用 bash 裁出区域再 read。`,
   ].join("");
+}
+
+/**
+ * 所有视觉输入的**唯一**入口：给一份图片字节，返回「进上下文时该长什么样」。
+ *
+ * 返回 undefined 表示不归它管（不是图片、不需要切片、没有 photon），调用方按普通图处理。
+ * 需要切片但片数超上限时返回 `{ capped: true, note }`，调用方退化成整图并把 note 交给模型。
+ *
+ * 现在只有 read 工具在调；将来用户在输入框贴图 / 上传附件，也必须调这一个函数，
+ * 而不是自己再写一套缩放——否则两条路径切出来的字节不同，内容哈希对不上，去重就失效了。
+ */
+export async function prepareImageBlocks({ bytes, mimeType, limits, path }) {
+  const dimensions = imageHeaderSize(bytes, mimeType);
+  if (dimensions === undefined) return undefined;
+  const plan = planSlices(dimensions.width, dimensions.height);
+  if (!plan.needed) return undefined;
+  if (plan.capped) {
+    return {
+      capped: true,
+      count: plan.count,
+      width: dimensions.width,
+      height: dimensions.height,
+      note: sliceCappedNote(dimensions.width, dimensions.height, plan.count),
+    };
+  }
+
+  const loaded = await loadPhoton();
+  if (loaded === undefined) return undefined; // 没有 photon 就交给上游
+
+  const { mod } = loaded;
+  const image = mod.PhotonImage.new_from_byteslice(bytes);
+  const outputs = [];
+  const notes = [];
+  try {
+    for (const slice of plan.slices) {
+      const cropped = mod.crop(image, 0, slice.y, dimensions.width, slice.y + slice.height);
+      try {
+        const encoded = encodeSlice(mod, cropped, mimeType, limits);
+        if (encoded === undefined) return undefined; // 编码失败：退回上游，别给半张图
+        outputs.push({ type: "image", data: encoded.data, mimeType: encoded.mimeType });
+        if (encoded.mimeType !== mimeType) {
+          notes.push(`第 ${plan.slices.indexOf(slice) + 1} 片转为 ${encoded.mimeType}`);
+        }
+      } finally {
+        cropped.free();
+      }
+    }
+  } finally {
+    image.free();
+  }
+  return {
+    blocks: [...outputs, { type: "text", text: sliceNotice(path, dimensions.width, dimensions.height, plan.slices, SLICE_POLICY) }],
+    mimeType,
+    width: dimensions.width,
+    height: dimensions.height,
+    slices: outputs.length,
+    notes,
+  };
 }
 
 /**
@@ -238,46 +304,26 @@ async function sliceRead(path, api, context, fallback) {
     if (plan.capped) {
       // 太长：不硬塞 12 片以上，退化成整图，但要让模型知道「这是退化结果」。
       const degraded = await fallback();
-      const note = `这张图 ${dimensions.width}×${dimensions.height} 需要切成 ${plan.count} 片才清晰，超过上限 ${SLICE_POLICY.maxSlices} 片，已按整图缩小返回：文字大概率读不清。要看细节请先用 bash 裁出关心的区域（如 ImageMagick 的 convert -crop）再 read，或转成文本。`;
       return {
         output: degraded.output,
-        diagnostics: [...(degraded.diagnostics ?? []), { severity: "warning", code: "image_slices", message: note }],
+        diagnostics: [
+          ...(degraded.diagnostics ?? []),
+          { severity: "warning", code: "image_slices", message: sliceCappedNote(dimensions.width, dimensions.height, plan.count) },
+        ],
       };
     }
 
-    const loaded = await loadPhoton();
-    if (loaded === undefined) return undefined; // 没有 photon 就交给上游
-
     bytes = getOrThrow(await info.read(0, size, context));
-    const { mod } = loaded;
-    const image = mod.PhotonImage.new_from_byteslice(bytes);
-    const outputs = [];
-    const notes = [];
-    try {
-      for (const slice of plan.slices) {
-        const cropped = mod.crop(image, 0, slice.y, dimensions.width, slice.y + slice.height);
-        try {
-          const encoded = encodeSlice(mod, cropped, mimeType, model.limits);
-          if (encoded === undefined) return undefined; // 编码失败：退回上游，别给半张图
-          outputs.push({ type: "image", data: encoded.data, mimeType: encoded.mimeType });
-          if (encoded.mimeType !== mimeType) {
-            notes.push(`第 ${plan.slices.indexOf(slice) + 1} 片转为 ${encoded.mimeType}`);
-          }
-        } finally {
-          cropped.free();
-        }
-      }
-    } finally {
-      image.free();
-    }
+    const prepared = await prepareImageBlocks({ bytes, mimeType, limits: model.limits, path });
+    if (prepared === undefined) return undefined; // 没有 photon / 编码失败：交给上游
     return {
-      output: [...outputs, { type: "text", text: sliceNotice(path, dimensions.width, dimensions.height, plan.slices, SLICE_POLICY) }],
+      output: prepared.blocks,
       diagnostics: [
         {
           severity: "info",
           code: "image_slices",
-          message: `Read image file [${mimeType}] as ${outputs.length} slices of ${dimensions.width}×${SLICE_POLICY.sliceHeight} (overlap ${SLICE_POLICY.overlap}px).${
-            notes.length > 0 ? ` ${notes.join("; ")}.` : ""
+          message: `Read image file [${mimeType}] as ${prepared.slices} slices of ${dimensions.width}×${SLICE_POLICY.sliceHeight} (overlap ${SLICE_POLICY.overlap}px).${
+            prepared.notes.length > 0 ? ` ${prepared.notes.join("; ")}.` : ""
           }`,
         },
       ],
