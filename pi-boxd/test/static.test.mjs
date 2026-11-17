@@ -130,3 +130,21 @@ test("agent 目录改为按需 API，不再随快照推送", async () => {
   const routesSrc = await fs.readFile("src/routes.mjs", "utf8");
   assert.ok(routesSrc.includes('"/api/agents/catalog"'), "应保留按需 catalog 接口");
 });
+
+// /reports 是登录后的主应用页面（app.js 里的全屏阅读视图），不是公开报告页。
+// 曾经它被 report-pages 抢走、返回 public.html，而 public.html 只认 /r/<slug>，
+// 结果「点报告组的打开箭头」永远白屏。
+test("/reports 与子路径都返回主应用 index.html，不是公开页 public.html", async () => {
+  const { server, base } = await startServer();
+  try {
+    for (const path of ["/reports", "/reports/", "/reports/anything"]) {
+      const res = await fetch(`${base}${path}`);
+      assert.equal(res.status, 200, path);
+      const body = await res.text();
+      assert.match(body, /多 Agent 平台/, `${path} 应返回主应用壳`);
+      assert.doesNotMatch(body, /<div class="brand">/, `${path} 不能返回公开页`);
+    }
+  } finally {
+    server.close();
+  }
+});

@@ -7,7 +7,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 
 const root = await mkdtemp(join(tmpdir(), "pibox-reports-"));
@@ -338,4 +339,31 @@ test("报告内容的响应头：html 必须带 sandbox 且禁用同源与联网
   assert.match(md["Content-Type"], /^text\/plain/);
   assert.match(md["Content-Security-Policy"], /connect-src 'none'/);
   assert.equal(md["X-Content-Type-Options"], "nosniff");
+});
+
+// 报告页面路由：/r/* 由本模块接管（返回自包含的 public.html），/reports 必须放行。
+test("installReportPages 只接管 /r/*，把 /reports 交回主应用", async () => {
+  const { createServer } = await import("node:http");
+  const { installReportPages } = await import("../src/report-pages.mjs");
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("inner");
+  });
+  installReportPages(server, { webDir: join(dirname(fileURLToPath(import.meta.url)), "..", "web") });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const inner = await fetch(`${base}/reports?project=demo&group=g`);
+    assert.equal(await inner.text(), "inner", "/reports 必须落到内层（主应用）");
+    assert.equal(seen.at(-1), "/reports?project=demo&group=g");
+
+    // /r/<slug> 仍然由本模块处理：无效 slug 直接 404，不会落到内层。
+    const pub = await fetch(`${base}/r/not-a-valid-slug`);
+    assert.equal(pub.status, 404);
+    assert.equal(seen.length, 1, "/r/* 不该透传给内层");
+  } finally {
+    server.close();
+  }
 });

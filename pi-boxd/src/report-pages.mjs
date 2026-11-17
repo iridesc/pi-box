@@ -65,7 +65,7 @@ function notFound(res) {
 /** 公开报告页发的是 public.html：完全自包含，不引用任何站点静态资源。
  *  用 SPA 壳（index.html）会白屏——/app.js、/style.css 都在 Basic Auth 内侧，
  *  外部访客拿到 HTML 200 但脚本 401，页面永远渲染不出来。 */
-async function sendIndex(res, webDir, method) {
+async function sendPublicPage(res, webDir, method) {
   let body;
   try {
     body = await readFile(join(webDir, "public.html"));
@@ -122,7 +122,7 @@ async function handlePublic(req, res, pathname, webDir) {
 
   const { project, group, meta } = resolved;
 
-  if (action === "page") return sendIndex(res, webDir, req.method);
+  if (action === "page") return sendPublicPage(res, webDir, req.method);
 
   // 公开页的完整报告列表（阅读页的 FAB 面板用）
   if (action === "list") {
@@ -174,9 +174,12 @@ export function installReportPages(server, { webDir }) {
 
   server.on("request", async (req, res) => {
     const pathname = pathnameOf(req.url);
-    const isPage = pathname === "/reports" || pathname.startsWith("/reports/");
     const isPublic = pathname === "/r" || pathname.startsWith("/r/");
-    if (!isPage && !isPublic) {
+    // 注意：/reports 不在这里处理。它属于登录后的主应用页面（app.js 里有独立的
+    // 全屏阅读视图，支持 internal 与 public 两种模式，UI 是同一套）。
+    // 这里如果抢了 /reports，返回的是公开页 public.html，而它只认 /r/<slug> 路径，
+    // 结果就是「点报告组的打开箭头一片空白」。交给静态服务返回 index.html。
+    if (!isPublic) {
       for (const handler of handlers) handler.call(server, req, res);
       return;
     }
@@ -186,8 +189,6 @@ export function installReportPages(server, { webDir }) {
       return;
     }
     try {
-      // 内侧阅读页：/reports?project=&group=&stamp=（由前端按 query 渲染）
-      if (isPage) return await sendIndex(res, webDir, req.method);
       return await handlePublic(req, res, pathname, webDir);
     } catch (error) {
       console.error("[reports] 页面路由失败:", error?.message ?? error);

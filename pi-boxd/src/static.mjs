@@ -48,9 +48,15 @@ const STATIC_FILES = {
   "/vendor/hljs.css": "vendor/hljs/github-dark.min.css",
 };
 
+/** 单页应用的入口：这些都返回 index.html，由 app.js 按 location 自己渲染。 */
+const SPA_ENTRY_PATHS = new Set(["/reports", "/reports/"]);
+
 /** 解析请求路径对应的静态文件绝对路径；不是静态资源则返回 null。 */
 function resolveStaticFile(webDir, pathname) {
   if (STATIC_FILES[pathname]) return join(webDir, STATIC_FILES[pathname]);
+  // 报告阅读页（/reports?project=&group=&stamp=）是主应用里的一个视图，
+  // 不是公开页：拿到 index.html 后由 app.js 的 parseReportRoute 接管。
+  if (SPA_ENTRY_PATHS.has(pathname) || pathname.startsWith("/reports/")) return join(webDir, "index.html");
   if (!pathname.startsWith("/vendor/")) return null;
   const relative = decodeURIComponent(pathname.slice("/vendor/".length));
   // 目录穿越防护：不允许 .. 与绝对路径。
