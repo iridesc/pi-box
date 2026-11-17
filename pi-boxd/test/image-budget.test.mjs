@@ -5,13 +5,18 @@ import { boundImages, createImageBudgetExtension, imagePlaceholder, stripImagesF
 
 const MIB = 1024 * 1024;
 
-/** 造一个 toolResult 消息，带一张 `mib` 大小的内联图。 */
-function imageResult(callId, mib, { path } = {}) {
+/** 造一个 toolResult 消息，带一张 `mib` 大小的内联图。
+ *  `fill` 决定像素内容：默认按 path（没有就按 callId）走，保证「不同文件」内容真不一样，
+ *  否则按 sha256 去重时会被当成同一张图——那正是这套新语义要区分的东西。 */
+function imageResult(callId, mib, { path, fill } = {}) {
+  const seed = fill ?? path ?? callId ?? "a";
+  const size = mib * MIB;
+  const data = seed.repeat(Math.ceil(size / seed.length)).slice(0, size);
   const message = {
     role: "toolResult",
     toolCallId: callId,
     toolName: "read",
-    content: [{ type: "text", text: "Read image file [image/png]." }, { type: "image", data: "a".repeat(mib * MIB), mimeType: "image/png" }],
+    content: [{ type: "text", text: "Read image file [image/png]." }, { type: "image", data, mimeType: "image/png" }],
     isError: false,
   };
   if (path !== undefined) {
@@ -26,11 +31,11 @@ function imageResult(callId, mib, { path } = {}) {
 const images = (messages) =>
   messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []).filter((block) => block.type === "image"));
 
-/** 两种占位：被预算裁掉的（[图片已移除…）与重复副本省掉的（[同一文件 …）。 */
+/** 两种占位：被预算裁掉的（[图片已移除…）与重复副本省掉的（[同一张图 …）。 */
 const placeholders = (messages) =>
   messages.flatMap((message) =>
     (Array.isArray(message.content) ? message.content : []).filter(
-      (block) => block.type === "text" && (block.text.startsWith("[图片已移除") || block.text.startsWith("[同一文件")),
+      (block) => block.type === "text" && (block.text.startsWith("[图片已移除") || block.text.startsWith("[同一张图")),
     ),
   );
 
@@ -113,7 +118,7 @@ test("占位文本明确说明这一轮看不到图", () => {
   assert.match(imagePlaceholder(), /这一轮看不到它的任何像素/);
 });
 
-test("同一文件读多次：只保留最新那份图，旧副本换成「更新副本在后面」的占位", () => {
+test("同一文件读多次（内容没变）：只保留最新那份图，旧副本换成「更新副本在后面」的占位", () => {
   const path = "items/x/参考图/屏幕截图 231948.png";
   const messages = [...imageResult("c1", 2, { path }), ...imageResult("c2", 2, { path })];
   const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
@@ -123,6 +128,48 @@ test("同一文件读多次：只保留最新那份图，旧副本换成「更�
   assert.match(texts[0], /这条旧副本已省略/);
   assert.match(texts[0], /不要因此重复 read/);
   assert.match(texts[0], /231948\.png/);
+});
+
+test("同一文件被改过（路径相同、内容不同）：两张都保留，不能当成重复副本", () => {
+  const path = "items/x/改过的图.png";
+  const messages = [
+    ...imageResult("c1", 2, { path, fill: "old" }),
+    ...imageResult("c2", 2, { path, fill: "new" }),
+  ];
+  const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
+  assert.equal(result.deduped, 0);
+  assert.equal(images(result.messages).length, 2); // 旧版本和新版本都在
+});
+
+test("内容相同但文件名不同：合并成一份，只留最新的位置", () => {
+  const messages = [
+    ...imageResult("c1", 2, { path: "a.png", fill: "same" }),
+    ...imageResult("c2", 2, { path: "b.png", fill: "same" }),
+  ];
+  const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
+  assert.equal(result.deduped, 1);
+  assert.equal(images(result.messages).length, 1);
+});
+
+test("用户直接贴进来的图（没有工具调用、没有路径）也能按内容去重", () => {
+  const userImage = () => ({
+    role: "user",
+    content: [
+      { type: "text", text: "看看这张图" },
+      { type: "image", data: "pasted".repeat(Math.ceil((1 * MIB) / 6)).slice(0, 1 * MIB), mimeType: "image/png" },
+    ],
+  });
+  const messages = [userImage(), { role: "assistant", content: [{ type: "text", text: "看到了" }] }, userImage()];
+  const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
+  assert.equal(result.deduped, 1);
+  assert.equal(images(result.messages).length, 1);
+});
+
+test("长度不同的图不做 hash 计算（长度预分桶）", () => {
+  const messages = [...imageResult("c1", 1, { fill: "a" }), ...imageResult("c2", 3, { fill: "b" })];
+  const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
+  assert.equal(result.deduped, 0);
+  assert.equal(images(result.messages).length, 2);
 });
 
 test("去重先于字节预算：重复副本不会挤掉不同文件", () => {
@@ -143,18 +190,31 @@ test("图片提示词段落挂在扩展上，且讲清了两种占位", () => {
   assert.match(text, /不需要为了"确认看清了没有"再读一次/);
   assert.match(text, /图片已移除以缩小请求体/);
   assert.match(text, /这条旧副本已省略/);
+  assert.match(text, /判定看的是像素内容而不是文件名/);
 });
 
-test("存储去重：dedupeByPath 只删旧副本，不同文件全部保留", () => {
+test("存储去重：dedupeByHash 只删内容相同的旧副本，不同内容全部保留", () => {
   const path = "items/x/a.png";
   const records = [
     { id: 1, record: { model: imageResult("c1", 2, { path }) } },
     { id: 2, record: { model: imageResult("c2", 2, { path }) } },
     { id: 3, record: { model: imageResult("c3", 2, { path: "items/x/b.png" }) } },
   ];
-  const result = stripImagesFromRecords(records, { keepBytes: Infinity, dedupeByPath: true });
-  assert.equal(result.dropped, 1); // 只删 id=1 那份旧副本
+  const result = stripImagesFromRecords(records, { keepBytes: Infinity, dedupeByHash: true });
+  assert.equal(result.dropped, 1); // 只删 id=1 那份同内容旧副本
   assert.equal(images(result.records[0].record.model).length, 0);
   assert.equal(images(result.records[1].record.model).length, 1);
   assert.equal(images(result.records[2].record.model).length, 1);
+});
+
+test("存储去重：同路径但内容变过（文件被改）时，旧版本保留", () => {
+  const path = "items/x/改过的图.png";
+  const records = [
+    { id: 1, record: { model: imageResult("c1", 2, { path, fill: "old" }) } },
+    { id: 2, record: { model: imageResult("c2", 2, { path, fill: "new" }) } },
+  ];
+  const result = stripImagesFromRecords(records, { keepBytes: Infinity, dedupeByHash: true });
+  assert.equal(result.dropped, 0);
+  assert.equal(images(result.records[0].record.model).length, 1);
+  assert.equal(images(result.records[1].record.model).length, 1);
 });

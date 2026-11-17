@@ -8,16 +8,21 @@
 //
 // 这里做三件事：
 //   1. boundImages()：请求级裁剪，分两步——
-//      a. 去重：同一文件读过多次时，只保留**最新**那份图，旧副本换成占位（模型仍可以重读，
-//         只是不会再往上下文里堆副本）；只认路径，不认字节，所以很便宜。
+//      a. 去重：**内容相同**的图只保留最新那份，旧副本换成占位（模型仍可以重读，
+//         只是不会再往上下文里堆副本）。去重键是当前字节的 sha256，不是文件路径：
+//         同一个文件被改过之后，旧版本和新版本是两张不同的图，都要留着让模型对比；
+//         反过来，用户反复粘贴同一张图、或者把同一张图存成两个文件名，字节相同就是同一张。
+//         代价用「长度预分桶」压掉：base64 长度唯一确定字节数，长度只出现一次的图不可能重复，
+//         连 hash 都不用算。
 //      b. 字节预算：去重后仍超 triggerBytes 时，从最老的不同文件开始换成占位，降到 targetBytes。
 //         只影响这一次请求（不写库），trigger 与 target 之间的间隙就是迟滞，避免每轮都改前缀。
 //   2. stripImagesFromRecords()：存储级剥离（离线）。既能按字节保留最近 keepBytes，也能只做
-//      同路径去重（dedupeByPath），把历史里重复的 base64 副本删掉。
+//      内容去重（dedupeByHash，同一套 sha256 判定），把历史里重复的 base64 副本删掉。
 //   3. 一段固定的提示词（IMAGE_PROMPT_SECTION）：告诉模型图片是随工具结果附上的、别重复读。
 //
 // 占位文本里带上原始路径：图不在上下文里，但模型知道去哪儿重新 read（那时已是缩放后的小图）。
 
+import { createHash } from "node:crypto";
 import { defineExtension, hook, section, GenerationTask } from "@earendil-works/pi-durable";
 
 const MIB = 1024 * 1024;
@@ -55,11 +60,22 @@ export function imagePlaceholder(path) {
   return `[图片已移除以缩小请求体，这一轮看不到它的任何像素，不要凭记忆描述其内容。${where}]`;
 }
 
-/** 同一文件的重复读取：旧副本省略，后面的更新副本还在，所以不是「看不到」。 */
+/** 同一张图的重复出现：旧副本省略，后面的那份还在，所以不是「看不到」。 */
 export function duplicateImagePlaceholder(path) {
-  return path
-    ? `[同一文件 ${path} 的更新读取在本次上下文里（在后面），这条旧副本已省略；不要因此重复 read。]`
-    : "[同一文件的更新读取在本次上下文里（在后面），这条旧副本已省略；不要因此重复 read。]";
+  const which = path ? `同一张图（${path}）` : "同一张图";
+  return `[${which}的更新一份在本次上下文里（在后面），这条旧副本已省略；不要因此重复 read。]`;
+}
+
+/**
+ * 一张图的身份 = 当前字节的 sha256 前 16 位。
+ *
+ * 为什么不复用文件路径或落盘时的文件名哈希：文件可以被原地改掉，路径不变而内容已经换了。
+ * 每次组装请求都对着**实际要发出去的字节**算，才能保证「内容变了就是新图」。
+ */
+export function imageDigest(block) {
+  const data = block?.data ?? block?.source?.data;
+  if (typeof data !== "string" || data.length === 0) return undefined;
+  return createHash("sha256").update(data).digest("hex").slice(0, 16);
 }
 
 function isMessageArray(value) {
@@ -168,19 +184,27 @@ export function boundImages(messages, limits = {}) {
   const paths = toolCallPaths([messages]);
   const entries = []; // 按发送顺序
   mapImages(messages, (block, message) => {
-    entries.push({ path: paths.get(message.toolCallId), bytes: imageByteLength(block) });
+    entries.push({ block, path: paths.get(message.toolCallId), bytes: imageByteLength(block) });
     return undefined;
   });
   if (entries.length === 0) return { messages, dropped: 0, droppedBytes: 0, deduped: 0 };
 
-  // 1) 去重：同一路径只保留最新的一份；旧副本一律省略（占位文案说明「更新副本在后面」）。
-  const newestByPath = new Map();
+  // 1) 去重：内容相同（sha256 相同）才只保留最新的一份；旧副本一律省略（占位文案说明「更新副本在后面」）。
+  //    先按 base64 长度分桶：长度唯一确定字节数，只出现一次的长度不可能有重复，省掉 hash 计算。
+  const lengthCount = new Map();
+  for (const entry of entries) {
+    if (entry.bytes > 0) lengthCount.set(entry.bytes, (lengthCount.get(entry.bytes) ?? 0) + 1);
+  }
+  const newestByHash = new Map();
   entries.forEach((entry, index) => {
-    if (entry.path !== undefined) newestByPath.set(entry.path, index);
+    if (entry.bytes <= 0) return;
+    if ((lengthCount.get(entry.bytes) ?? 0) < 2) return; // 长度独一份，不可能重复
+    entry.hash = imageDigest(entry.block);
+    if (entry.hash !== undefined) newestByHash.set(entry.hash, index);
   });
   const dropped = new Map(); // index -> "duplicate" | "budget"
   entries.forEach((entry, index) => {
-    if (entry.path !== undefined && newestByPath.get(entry.path) !== index) dropped.set(index, "duplicate");
+    if (entry.hash !== undefined && newestByHash.get(entry.hash) !== index) dropped.set(index, "duplicate");
   });
 
   // 2) 字节预算：按发送顺序累加（去重后的）图片，一旦越过 trigger 就把最老的一路裁到 target。
@@ -224,7 +248,7 @@ export function boundImages(messages, limits = {}) {
  * `model`（消息数组）与 `edits[].messages`。逆序保留最近 keepBytes 的图片，更老的换成占位文本。
  * 只有真的改了才返回新的 record 对象。
  */
-export function stripImagesFromRecords(records, { keepBytes = 2 * MIB, dedupeByPath = false } = {}) {
+export function stripImagesFromRecords(records, { keepBytes = 2 * MIB, dedupeByHash = false } = {}) {
   const lists = [];
   for (const { record } of records) {
     if (Array.isArray(record?.model)) lists.push(record.model);
@@ -240,7 +264,7 @@ export function stripImagesFromRecords(records, { keepBytes = 2 * MIB, dedupeByP
       if (!Array.isArray(message?.content)) return;
       message.content.forEach((block, blockIndex) => {
         if (!isImageBlock(block)) return;
-        found.push({ message, blockIndex, bytes: imageByteLength(block), path: paths.get(message.toolCallId) });
+        found.push({ message, blockIndex, block, bytes: imageByteLength(block), path: paths.get(message.toolCallId) });
       });
     });
   };
@@ -248,14 +272,18 @@ export function stripImagesFromRecords(records, { keepBytes = 2 * MIB, dedupeByP
     collect(records[index].record?.model);
     for (const edit of records[index].record?.edits ?? []) collect(edit?.messages);
   }
-  // 2) 从最新往回保留：先按路径去重（同一文件只留最新一份），再按 keepBytes 卡体积。
+  // 2) 从最新往回保留：先按内容去重（同一张图只留最新一份），再按 keepBytes 卡体积。
+  //    按内容而不是按路径——文件被改过时路径不变、内容已换，旧版本必须保留。
   const keep = new Set();
-  const seenPaths = new Set();
+  const seenHashes = new Set();
   let kept = 0;
   for (const item of found) {
-    if (item.path !== undefined) {
-      if (dedupeByPath && seenPaths.has(item.path)) continue;
-      seenPaths.add(item.path);
+    if (dedupeByHash && item.bytes > 0) {
+      const hash = imageDigest(item.block);
+      if (hash !== undefined) {
+        if (seenHashes.has(hash)) continue;
+        seenHashes.add(hash);
+      }
     }
     if (kept + item.bytes > keepBytes) continue;
     kept += item.bytes;
@@ -322,7 +350,8 @@ export const IMAGE_PROMPT_SECTION = [
   "历史里可能见到两种占位：",
   "- `[图片已移除以缩小请求体…]`：这张图被请求体积预算裁掉了，这一轮确实看不到，不要凭记忆描述；",
   "  需要再看就 read 一次（会按模型尺寸上限缩小）。",
-  "- `[同一文件 … 的更新副本在后面，这条旧副本已省略]`：后面同一文件有更新的副本，直接用那份。",
+  "- `[同一张图（…）的更新一份在本次上下文里，这条旧副本已省略]`：同样的像素在后面还有一份，直接用那份。",
+  "  判定看的是像素内容而不是文件名：同一个文件被改过之后会出现两份不同的图，那不是重复。",
   "",
   "长图（整页截图这类又长又窄的图）会被自动切成多片返回，片间有重叠：按顺序读这些片即可，",
   "不要为了\"看全\"再去缩小整图；只需要局部细节时，用 bash 裁出区域再 read 更省。",

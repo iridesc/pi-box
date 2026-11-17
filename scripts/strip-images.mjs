@@ -14,7 +14,7 @@
 //   node scripts/strip-images.mjs --db ... --dedupe --apply --conversation 70833            # 只处理一个会话
 //
 // 两种策略可以单用也可以合并：
-//   --dedupe     同一个文件读过多次时，只留最新那份图，旧副本换成占位；不同文件全部保留。
+//   --dedupe     内容相同的图只留最新那份，旧副本换成占位（按 sha256 判定，与文件名/路径无关）。
 //   --keep-mb N  每个会话只保留最近 N MB 的图片（默认 2），更老的换占位。
 // 占位文本里带原文件路径，模型需要时重新 read。
 // 改之前自动备份 session.sqlite（含 -wal / -shm 一起拷），改不回来可以整库还原。
@@ -72,7 +72,7 @@ function usage() {
   return [
     "用法：node scripts/strip-images.mjs --db <session.sqlite> [选项]",
     "",
-    "  --dedupe           同一文件读多次时只留最新那份图（不同文件全部保留）",
+    "  --dedupe           内容相同的图只留最新那份（按 sha256 判定；文件改过就算不同）",
     "  --keep-mb N        每个会话保留最近 N MB 的图片（默认 2；与 --dedupe 同用时按去重后再裁）",
     "  --conversation ID  只处理这一个会话",
     "  --apply            真的写库（默认只预演、只统计）",
@@ -159,7 +159,7 @@ async function main() {
   for (const [conversationId, records] of conversations) {
     const result = stripImagesFromRecords(records, {
       keepBytes: keepMb === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : Math.round(keepMb * MIB),
-      dedupeByPath: options.dedupe,
+      dedupeByHash: options.dedupe,
     });
     if (result.dropped === 0) continue;
     totalDropped += result.dropped;
@@ -174,7 +174,7 @@ async function main() {
   console.log(`库：${dbPath}（${(sizeBefore / MIB).toFixed(1)} MB）`);
   console.log(
     `会话：${conversations.size} 个，待剥离图片 ${totalDropped} 张，共 ${(totalBytes / MIB).toFixed(1)} MB` +
-      `（策略：${options.dedupe ? "同文件去重" : ""}${options.dedupe && keepMb !== Number.POSITIVE_INFINITY ? " + " : ""}${keepMb === Number.POSITIVE_INFINITY ? "" : `保留最近 ${keepMb}MB`}）`,
+      `（策略：${options.dedupe ? "同内容去重" : ""}${options.dedupe && keepMb !== Number.POSITIVE_INFINITY ? " + " : ""}${keepMb === Number.POSITIVE_INFINITY ? "" : `保留最近 ${keepMb}MB`}）`,
   );
   for (const item of perConversation.sort((a, b) => b.bytes - a.bytes).slice(0, 15)) {
     console.log(`  #${item.conversationId}: ${item.dropped} 张，${(item.bytes / MIB).toFixed(1)} MB`);
