@@ -92,7 +92,7 @@ test("最新一组比 target 还大时也留着，只把超限报出来", () => 
 });
 
 test("原子淘汰：一条消息里的多张图要么全在、要么整组消失", () => {
-  // 组 A：一条 toolResult 里 3 张图（模拟长图切片）；组 B：另一条消息 1 张图。
+  // 组 A：一条 toolResult 里 3 张图（模拟大图切块）；组 B：另一条消息 1 张图。
   const groupA = [
     {
       role: "toolResult",
@@ -102,7 +102,7 @@ test("原子淘汰：一条消息里的多张图要么全在、要么整组消�
         { type: "image", data: "a".repeat(3 * MIB), mimeType: "image/png" },
         { type: "image", data: "b".repeat(3 * MIB), mimeType: "image/png" },
         { type: "image", data: "c".repeat(3 * MIB), mimeType: "image/png" },
-        { type: "text", text: "这是一张长图（1280×9533），已按原始分辨率切成 3 片自上而下返回：片高 1600px，相邻重叠 120px" },
+        { type: "text", text: "这是一张大图（1280×9533），已切成 1 列 × 7 行共 7 块返回：每块长边 ≤ 1568px，相邻块重叠 15%" },
       ],
       isError: false,
     },
@@ -119,7 +119,7 @@ test("原子淘汰：一条消息里的多张图要么全在、要么整组消�
   assert.ok(texts.some((text) => /整体移除/.test(text)), "切片说明应换成整组移除占位");
   assert.ok(texts.some((text) => /原图 1280×9533/.test(text)), "占位里要带上原图尺寸");
   assert.ok(!texts.some((text) => /），，/.test(text)), "占位文案不能拼错");
-  assert.ok(!texts.some((text) => /已按原始分辨率切成 3 片/.test(text)), "旧的切片说明不能留着");
+  assert.ok(!texts.some((text) => /已切成 1 列 × 7 行/.test(text)), "旧的切块说明不能留着");
 });
 
 test("组里还有活着的图时，切片说明保持原样", () => {
@@ -130,7 +130,7 @@ test("组里还有活着的图时，切片说明保持原样", () => {
       toolName: "read",
       content: [
         { type: "image", data: "x".repeat(2 * MIB), mimeType: "image/png" },
-        { type: "text", text: "这是一张长图（1280×9533），已按原始分辨率切成 1 片自上而下返回：片高 1600px" },
+        { type: "text", text: "这是一张大图（1280×9533），已切成 1 列 × 7 行共 7 块返回：每块长边 ≤ 1568px，相邻块重叠 15%" },
       ],
       isError: false,
     },
@@ -138,10 +138,10 @@ test("组里还有活着的图时，切片说明保持原样", () => {
   const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
   assert.equal(result.dropped, 0);
   const texts = result.messages[0].content.filter((block) => block.type === "text").map((block) => block.text);
-  assert.ok(texts.some((text) => /已按原始分辨率切成 1 片/.test(text)));
+  assert.ok(texts.some((text) => /已切成 1 列 × 7 行/.test(text)));
 });
 
-test("组内不去重：长图里的空白片（内容相同）也要整组保留", () => {
+test("组内不去重：大图里的空白块（内容相同）也要整组保留", () => {
   // 7 片里有 3 片是完全空白的（内容一模一样），不能被合并成一片，
   // 否则 sliceNotice 里「第 3/4/5 片」的片号就和实际对不上了。
   const blank = "0".repeat(MIB);
@@ -150,7 +150,7 @@ test("组内不去重：长图里的空白片（内容相同）也要整组保�
     { type: "image", data: blank, mimeType: "image/png" },
     { type: "image", data: blank, mimeType: "image/png" },
     { type: "image", data: blank, mimeType: "image/png" },
-    { type: "text", text: "这是一张长图（1280×9533），已按原始分辨率切成 4 片自上而下返回" },
+    { type: "text", text: "这是一张大图（1280×9533），已切成 1 列 × 4 行共 4 块返回：每块长边 ≤ 1568px，相邻块重叠 15%" },
   ];
   const messages = [{ role: "toolResult", toolCallId: "long", toolName: "read", content, isError: false }];
   const result = boundImages(messages, { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
@@ -158,7 +158,7 @@ test("组内不去重：长图里的空白片（内容相同）也要整组保�
   assert.equal(images(result.messages).length, 4);
 });
 
-test("同一张长图读两次：8 片 hash 全同，整组旧副本被丢掉", () => {
+test("同一张大图读两次：8 块 hash 全同，整组旧副本被丢掉", () => {
   const slices = (prefix) =>
     Array.from({ length: 8 }, (_, i) => ({ type: "image", data: `${prefix}${i}`.repeat(MIB / 2), mimeType: "image/png" }));
   const shot = () => [
@@ -168,7 +168,7 @@ test("同一张长图读两次：8 片 hash 全同，整组旧副本被丢掉", 
     role: "toolResult",
     toolCallId: id,
     toolName: "read",
-    content: [...shot(), { type: "text", text: "这是一张长图（1280×9533），已按原始分辨率切成 8 片自上而下返回" }],
+    content: [...shot(), { type: "text", text: "这是一张大图（1280×9533），已切成 1 列 × 8 行共 8 块返回：每块长边 ≤ 1568px，相邻块重叠 15%" }],
     isError: false,
   });
   const result = boundImages([message("first"), message("second")], { triggerBytes: 100 * MIB, targetBytes: 90 * MIB });
@@ -222,7 +222,7 @@ test("存储级按组裁剪：切片被整组剥离，不拆散；且不保底�
           content: [
             { type: "image", data: String(id % 10).repeat(MIB / 2), mimeType: "image/png" },
             { type: "image", data: String((id + 5) % 10).repeat(MIB / 2), mimeType: "image/png" },
-            { type: "text", text: "这是一张长图（1280×9533），已按原始分辨率切成 2 片" },
+            { type: "text", text: "这是一张大图（1280×9533），已切成 1 列 × 2 行共 2 块返回：每块长边 ≤ 1568px，相邻块重叠 15%" },
           ],
           isError: false,
         },

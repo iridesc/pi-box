@@ -5604,6 +5604,40 @@ async function renderDrawerSystem(panel) {
     notifyHint.textContent = "浏览器已拒绝本站通知权限，需要到站点设置里手动允许后才能开启。";
   }
   sec4.appendChild(notifyHint);
+
+  // 大图切块：像素阈值（每块送进上下文的像素数）。调小更清晰但块数变多。
+  const tileRow = el("div", "form-row");
+  tileRow.appendChild(el("label", "", "图片切块"));
+  const tileInput = document.createElement("input");
+  tileInput.type = "number";
+  tileInput.min = "0.2";
+  tileInput.max = "16";
+  tileInput.step = "0.1";
+  const tilePixels = Number(prefs.imageTiles?.targetPixels ?? 2458624);
+  tileInput.value = String(Math.round((tilePixels / 1e6) * 10) / 10);
+  tileInput.title = "每块送进上下文的像素数（百万像素）。2.4 ≈ 1568×1568，正好是服务端长边上限；调小更清晰但块数变多。";
+  const tileHint = el("div", "muted", "");
+  const renderTileHint = () => {
+    const pixels = Number(prefs.imageTiles?.targetPixels ?? 2458624);
+    tileHint.textContent = `每块 ${(pixels / 1e6).toFixed(1)}M 像素（长边约 ${Math.round(Math.sqrt(pixels))}px），相邻块重叠 ${Math.round((prefs.imageTiles?.overlapRatio ?? 0.15) * 100)}%，最多 ${prefs.imageTiles?.maxSlices ?? 20} 块。下次读图生效。`;
+  };
+  renderTileHint();
+  tileInput.onchange = async () => {
+    const value = Number(tileInput.value) * 1e6;
+    if (!Number.isFinite(value) || value <= 0) {
+      tileInput.value = String(Math.round((tilePixels / 1e6) * 10) / 10);
+      return;
+    }
+    const saved = await savePrefsPatch({
+      imageTiles: { ...prefs.imageTiles, targetPixels: Math.round(value) },
+    });
+    prefs.imageTiles = saved.imageTiles;
+    tileInput.value = String(Math.round((saved.imageTiles.targetPixels / 1e6) * 10) / 10);
+    renderTileHint();
+  };
+  tileRow.appendChild(tileInput);
+  sec4.appendChild(tileRow);
+  sec4.appendChild(tileHint);
   panel.appendChild(sec4);
 
   // 品牌：浏览器标签页标题 + 图标（品牌名 h1 不可修改）

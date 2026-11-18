@@ -67,12 +67,12 @@ export function duplicateImagePlaceholder(path) {
   return `[${which}的更新一份在本次上下文里（在后面），这条旧副本已省略；不要因此重复 read。]`;
 }
 
-/** 一整组长图切片被移除时，原来那段「已切成 N 片」的说明换成这句。 */
+/** 一整组大图切片被移除时，原来那段「已切成 N 块」的说明换成这句。 */
 export function slicedImagesPlaceholder(original) {
-  const head = String(original ?? "").split("已按原始分辨率切成")[0] ?? "";
+  const head = String(original ?? "").split("已切成")[0] ?? "";
   const size = head.startsWith(SLICE_NOTICE_PREFIX) ? head.slice(SLICE_NOTICE_PREFIX.length).replace(/[），,)\s]+$/, "") : "";
   const where = size ? `原图 ${size}，` : "";
-  return `[${where}这一轮看不到它的任何像素：切出来的所有分片已整体移除以缩小请求体，不要凭记忆描述其内容。需要时重新 read 一次整图（先裁区域再读更省）]`;
+  return `[${where}这一轮看不到它的任何像素：切出来的所有块已整体移除以缩小请求体，不要凭记忆描述其内容。需要时重新 read 一次整图（先裁区域再读更省）]`;
 }
 
 /**
@@ -183,14 +183,14 @@ export function sumInlineImages(messages) {
 /**
  * 请求级裁剪：**按组**淘汰，不拆散一条消息里的多张图。
  *
- * 为什么必须按组：一张长图会被切成 N 片放在同一个 toolResult 里，末尾还跟一段
- * `这是一张长图（…）已切成 N 片…纵向范围 1..N` 的说明。如果按单个 image block 淘汰，
+ * 为什么必须按组：一张大图会被切成 N 块放在同一个 toolResult 里，末尾还跟一段
+ * `这是一张大图（…）已切成 N 列 × M 行…` 的说明。如果按单个 image block 淘汰，
  * 会出现「说明说有 7 片、实际只剩 4-7 片」——比单纯少几张图更容易让模型错位。
  * 所以分组键取「同一条 message」，一次 read = 一条 message = 一组；丢就整组丢，
  * 连带把那段切片说明也换成占位。
  *
  * 保底：最新一组无论多大都保留。一组切片本身就可能十几 MB，如果按「降到 target 为止」
- * 硬丢，刚读完的长图会当场被自己裁光，等于白读。代价是请求体可能逼近网关上限，
+ * 硬丢，刚读完的大图会当场被自己裁光，等于白读。代价是请求体可能逼近网关上限，
  * 所以超限时通过 `overLimitBytes` 把这件事报出去，由调用方打日志/提示。
  *
  * 迟滞：cut 由「按组累加、只在超 trigger 时前进」决定，所以同一份历史得到同一个 cut；
@@ -232,7 +232,7 @@ export function boundImages(messages, limits = {}) {
   });
   const dropped = new Map(); // entryIndex -> "duplicate" | "budget"
   // 只在**跨组**之间去重：同一条消息里的多张图是「一次输入」，哪怕内容相同也整组留着。
-  // 否则长图里连续的空白片会被合并成一片，切片说明里的「第几片」全对不上。
+  // 否则大图里连续的空白块会被合并成一块，切块说明里的「第几块」全对不上。
   for (const occurrences of byHash.values()) {
     if (occurrences.length < 2) continue;
     const newest = occurrences[occurrences.length - 1].message;
@@ -354,7 +354,7 @@ export function stripImagesFromRecords(records, { keepBytes = 2 * MIB, dedupeByH
   }
   // 2) 从最新往回保留：先按内容去重（同一张图只留最新一份），再按 keepBytes 卡体积。
   //    按内容而不是按路径——文件被改过时路径不变、内容已换，旧版本必须保留。
-  //    体积裁剪按**组**（同一条消息）走，理由同 boundImages：别把一张长图的切片拆散。
+  //    体积裁剪按**组**（同一条消息）走，理由同 boundImages：别把一张大图的切块拆散。
   const seenHashes = new Set();
   for (const item of found) {
     if (!dedupeByHash || item.bytes <= 0) continue;
@@ -451,7 +451,7 @@ export const IMAGE_PROMPT_SECTION = [
   "- `[同一张图（…）的更新一份在本次上下文里，这条旧副本已省略]`：同样的像素在后面还有一份，直接用那份。",
   "  判定看的是像素内容而不是文件名：同一个文件被改过之后会出现两份不同的图，那不是重复。",
   "",
-  "长图（整页截图这类又长又窄的图）会被自动切成多片返回，片间有重叠：按顺序读这些片即可，",
+  "大图（整页截图、超长图这类）会被自动切成网格状的多块返回，块间有 15% 重叠：按「先行后列」的顺序读这些块即可，",
   "不要为了\"看全\"再去缩小整图；只需要局部细节时，用 bash 裁出区域再 read 更省。",
 ].join("\n");
 
@@ -471,7 +471,7 @@ export function createImageBudgetExtension(options = {}) {
             console.error(
               `[image-budget] 保底保留的最新图片组本身就有 ${(result.overLimitBytes / MIB).toFixed(1)}MB，` +
                 `已超过目标 ${Math.round(limits.targetBytes / MIB)}MB；继续读图可能触发网关体积限制，` +
-                `建议先裁区域或用 bash 把长图转成文本。`,
+                `建议先裁区域或用 bash 把大图转成文本。`,
             );
           }
           if (result.dropped === 0) return undefined;

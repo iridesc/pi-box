@@ -1,4 +1,4 @@
-// 长图切片：切分计划、文件头尺寸识别，以及 read 包装后的真实行为。
+// 大图切片：切分计划、文件头尺寸识别，以及 read 包装后的真实行为。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -10,7 +10,17 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { initSync, PhotonImage } from "@silvia-odwyer/photon/photon_rs.js";
-import { createImageSliceExtension, DEFAULT_IMAGE_LIMITS, detectImageMime, imageHeaderSize, planSlices, prepareImageBlocks, SLICE_POLICY } from "../src/image-slices.mjs";
+import {
+  createImageSliceExtension,
+  DEFAULT_IMAGE_LIMITS,
+  detectImageMime,
+  imageHeaderSize,
+  planTiles,
+  prepareImageBlocks,
+  SLICE_POLICY,
+  targetEdgeOf,
+  tileOutputSize,
+} from "../src/image-slices.mjs";
 
 const require = createRequire(import.meta.url);
 initSync({ module: await readFile(require.resolve("@silvia-odwyer/photon/photon_rs_bg.wasm")) });
@@ -61,26 +71,54 @@ function wrappedRead() {
   return extension.wraps[0].wrap(readTool);
 }
 
-
-test("切分计划：1280×9533 切成 7 片，相邻重叠 120px", () => {
-  const plan = planSlices(1280, 9533);
-  assert.equal(plan.needed, true);
-  assert.equal(plan.slices.length, 7);
-  assert.deepEqual(plan.slices[0], { y: 0, height: 1600 });
-  assert.deepEqual(plan.slices[1], { y: 1600 - SLICE_POLICY.overlap, height: 1600 });
-  // 最后一片贴底，保证覆盖到图片末尾
-  const last = plan.slices.at(-1);
-  assert.equal(last.y + last.height, 9533);
+test("目标边长：像素阈值的平方根，并受模型上限约束", () => {
+  assert.equal(targetEdgeOf(LIMITS, SLICE_POLICY), Math.round(Math.sqrt(SLICE_POLICY.targetPixels)));
+  // 模型上限更小时听模型的
+  assert.equal(targetEdgeOf({ maxWidth: 800, maxHeight: 800, maxBytes: 1 }, SLICE_POLICY), 800);
 });
 
-test("切分计划：正常图片不切，超长图片标记 capped", () => {
-  assert.equal(planSlices(800, 400).needed, false);
-  assert.equal(planSlices(1280, 2000).needed, false); // 比例 1.56、长边 2000
-  const capped = planSlices(1280, 20000);
-  assert.equal(capped.needed, true);
-  assert.equal(capped.capped, true);
-  assert.equal(capped.slices.length, 0);
-  assert.ok(capped.count > SLICE_POLICY.maxSlices);
+test("切分计划：宽大图要横竖都切，且每块不缩放", () => {
+  const plan = planTiles(3916, 7008, LIMITS, SLICE_POLICY);
+  assert.equal(plan.needed, true);
+  assert.equal(plan.cols, 3);
+  assert.equal(plan.rows, 6);
+  assert.equal(plan.tiles.length, plan.cols * plan.rows);
+  // 块边长 = 目标边长 → 不缩放，无损
+  assert.equal(plan.blockSize, targetEdgeOf(LIMITS, SLICE_POLICY));
+  // 相邻块起点步长 = 块边长 × (1 − 重叠率)
+  assert.equal(plan.step, Math.round(plan.blockSize * (1 - SLICE_POLICY.overlapRatio)));
+  // 每块都不超过目标边长
+  for (const tile of plan.tiles) {
+    assert.ok(Math.max(tile.width, tile.height) <= plan.blockSize + 1);
+  }
+  // 覆盖整张图，没有漏掉的边
+  const last = plan.tiles.at(-1);
+  assert.equal(last.x + last.width, 3916);
+  assert.equal(last.y + last.height, 7008);
+});
+
+test("切分计划：真长图只竖切，块数不增反减", () => {
+  const plan = planTiles(1280, 9533, LIMITS, SLICE_POLICY);
+  assert.equal(plan.needed, true);
+  assert.equal(plan.cols, 1, "宽 1280 < 块边长，不该横切");
+  assert.ok(plan.rows >= 5 && plan.rows <= 8);
+  assert.ok(plan.tiles.length <= SLICE_POLICY.maxSlices);
+});
+
+test("切分计划：普通图不切", () => {
+  assert.equal(planTiles(800, 400, LIMITS, SLICE_POLICY).needed, false);
+  assert.equal(planTiles(1280, 2000, LIMITS, SLICE_POLICY).needed, false); // 比例 1.56、长边 2000
+});
+
+test("切分计划：块数超上限就放大块，不砍内容", () => {
+  const plan = planTiles(8000, 8000, LIMITS, SLICE_POLICY);
+  assert.equal(plan.needed, true);
+  assert.ok(plan.tiles.length <= SLICE_POLICY.maxSlices, `块数 ${plan.tiles.length} 应不超过上限`);
+  assert.ok(plan.blockSize > targetEdgeOf(LIMITS, SLICE_POLICY), "块数超限说明块被放大了");
+  // 放大块 = 拿分辨率换块数：输出尺寸仍然不超过目标边长
+  const size = tileOutputSize(plan.tiles[0], LIMITS, SLICE_POLICY);
+  assert.ok(Math.max(size.width, size.height) <= targetEdgeOf(LIMITS, SLICE_POLICY));
+  assert.ok(size.scale < 1);
 });
 
 test("文件头尺寸识别：PNG / JPEG", () => {
@@ -95,7 +133,7 @@ test("文件头尺寸识别：PNG / JPEG", () => {
   assert.equal(detectImageMime(Buffer.from("not an image")), undefined);
 });
 
-test("read 长图时返回多片，并说明重叠与纵向范围", async () => {
+test("read 大图时返回多块，并说明网格、重叠与阅读顺序", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-slices-"));
   await writeFile(join(dir, "tall.png"), makeImage(300, 5200));
   const read = wrappedRead();
@@ -103,16 +141,16 @@ test("read 长图时返回多片，并说明重叠与纵向范围", async () => 
 
   const images = result.output.filter((block) => block.type === "image");
   const text = result.output.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-  const plan = planSlices(300, 5200);
-  assert.equal(images.length, plan.slices.length);
+  const plan = planTiles(300, 5200, LIMITS, SLICE_POLICY);
+  assert.equal(images.length, plan.tiles.length);
   assert.ok(images.length >= 3);
-  // 每片都按模型上限以内
   for (const image of images) assert.ok(image.data.length <= LIMITS.maxBytes);
-  assert.match(text, /切成 \d+ 片/);
-  assert.match(text, /相邻重叠 120px/);
+  assert.match(text, /已切成 \d+ 列 × \d+ 行/);
+  assert.match(text, /重叠 15%/);
+  assert.match(text, /从左到右、从上到下/);
   assert.match(text, /原文件 tall\.png/);
   assert.equal(result.isError, undefined);
-  assert.match(result.diagnostics.map((item) => item.message).join(" "), /as \d+ slices/);
+  assert.match(result.diagnostics.map((item) => item.message).join(" "), /as \d+x\d+=\d+ tiles/);
 });
 
 test("普通图片与非图片文件原样交给上游 read（不切片）", async () => {
@@ -149,7 +187,7 @@ test("纯文本模型不做切片（上游会换成占位符）", async () => {
 // 就会原样进上下文。
 test("prepareImageBlocks：超尺寸的普通图会被缩放，不切片", async () => {
   const limits = { maxWidth: 800, maxHeight: 800, maxBytes: 4 * 1024 * 1024 };
-  const bytes = makeImage(2400, 1200); // 宽高比 2，不触发长图切片
+  const bytes = makeImage(2400, 1200); // 宽高比 2，不触发切片
   const prepared = await prepareImageBlocks({ bytes, mimeType: "image/png", limits, path: "shot.png" });
   assert.ok(prepared, "超尺寸时应该返回处理结果");
   assert.equal(prepared.capped, undefined, "普通图不该走 capped 分支");

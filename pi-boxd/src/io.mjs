@@ -134,6 +134,9 @@ export const DEFAULT_PREFS = {
   // agent 回复完成后是否弹浏览器通知（"off" | "hidden" | "always"）。
   // "hidden"：只在页面切到后台时提醒；"always"：不管在不在前台都提醒。
   browserNotify: "hidden",
+  // 大图切块策略：targetPixels = 每块送进上下文的像素数（√它就是块的长边上限），
+  // overlapRatio = 相邻块重叠比例，maxSlices = 块数上限（超了拿分辨率换块数）。
+  imageTiles: { targetPixels: 2_458_624, overlapRatio: 0.15, maxSlices: 20 },
 };
 export const APP_TITLE_MAX = 120;
 export const APP_ICON_EXTS = ["png", "jpg", "webp", "svg", "ico"];
@@ -160,6 +163,30 @@ function normalizeAppIcon(icon) {
   return { type: "default" };
 }
 
+/** 大图切块参数的取值范围。越界的一律夹回区间，不让手改的 prefs.json 写坏切片逻辑。 */
+const IMAGE_TILE_LIMITS = Object.freeze({
+  targetPixels: { min: 200_000, max: 16_000_000 },
+  overlapRatio: { min: 0, max: 0.5 },
+  maxSlices: { min: 1, max: 64 },
+});
+
+/** 切块参数：补齐默认值 + 夹范围 + 取整。 */
+function normalizeImageTiles(raw) {
+  const defaults = DEFAULT_PREFS.imageTiles;
+  const merged = { ...defaults, ...(raw && typeof raw === "object" ? raw : {}) };
+  const clamp = (value, key) => {
+    const range = IMAGE_TILE_LIMITS[key];
+    const number = Number(value);
+    if (!Number.isFinite(number)) return defaults[key];
+    return Math.min(range.max, Math.max(range.min, number));
+  };
+  return {
+    targetPixels: Math.round(clamp(merged.targetPixels, "targetPixels")),
+    overlapRatio: Math.round(clamp(merged.overlapRatio, "overlapRatio") * 1000) / 1000,
+    maxSlices: Math.round(clamp(merged.maxSlices, "maxSlices")),
+  };
+}
+
 /** 补齐默认值并做字段校验（写入与读取都走这里，保证 prefs.json 结构稳定） */
 function normalizePrefs(raw) {
   const merged = { ...DEFAULT_PREFS, ...(raw && typeof raw === "object" ? raw : {}) };
@@ -167,6 +194,7 @@ function normalizePrefs(raw) {
   merged.appTitle = title ? title.slice(0, APP_TITLE_MAX) : DEFAULT_PREFS.appTitle;
   merged.appIcon = normalizeAppIcon(merged.appIcon);
   if (!["off", "hidden", "always"].includes(merged.browserNotify)) merged.browserNotify = DEFAULT_PREFS.browserNotify;
+  merged.imageTiles = normalizeImageTiles(merged.imageTiles);
   return merged;
 }
 

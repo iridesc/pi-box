@@ -213,13 +213,6 @@ export async function buildAttachmentContent({ root, text, attachments, prepare 
 
   for (const image of images) {
     const prepared = await prepare({ bytes: image.bytes, mimeType: image.mimeType, path: image.path });
-    if (prepared?.capped) {
-      // 长到超切片上限：退化成整图，把 note 交给模型说明为什么糊。
-      blocks.push({ type: "image", data: Buffer.from(image.bytes).toString("base64"), mimeType: image.mimeType });
-      blocks.push({ type: "text", text: prepared.note });
-      record({ ...image, inline: true, width: prepared.width, height: prepared.height, slices: 0 });
-      continue;
-    }
     if (prepared?.blocks) {
       blocks.push(...prepared.blocks);
       record({

@@ -1,34 +1,54 @@
-// 长图切片：read 一张「又长又窄」的图时，别按方框缩小（那样宽度只剩一两百像素，文字必然糊），
-// 而是按原始分辨率切成若干片，每片各自按模型尺寸上限缩放。模型拿到 N 张可读的图 + 一段说明。
+// 大图切片：read 一张「大」的图时，别按方框缩小（那样宽度只剩一两百像素，文字必然糊），
+// 而是拆成两步走：先按几何切成网格状的多块，再把每块缩放到「送达模型的分辨率上限」。
 //
 // 为什么需要：上游的图片处理器只会在 maxWidth×maxHeight 的方框里等比缩放。
-// 一张 1280×9533 的整页截图进 2000×2000 的方框后变成 269×2000（宽度只剩 21%），
+// 一张 1280×9533 的整页截图进 2000×2000 的方框后变成 268×2000（宽度只剩 21%），
 // 正文从 16px 掉到 3px，视觉模型读不出来——实测有会话因此转去切片、跑 OCR，又白烧一轮。
 // Claude Code / Codex 也有同一个毛病（1568 长边、2048 方框），这不是我们独有的。
 //
-// 触发：高宽比 > 2.5 或长边 > 3000；片高 1600、相邻重叠 120px；最多 12 片。
-// 超过 12 片不硬塞：退化成上游的整图缩放，并明确告诉模型「已退化，读不清就先裁区域」。
+// 算法（两步刻意解耦）：
+//   第一步 · 切分：只看几何。把图切成「边长接近正方形」的网格块，相邻块重叠 15%，
+//     横向纵向都切。宽大图必须横切——只纵向切的话每块仍然超宽，只能靠缩放压扁，
+//     实测一张 3916×7008 的图按满宽切成 5 条，每条都被压到 51%（见 docs/CHANGELOG）。
+//   第二步 · 缩放：每块缩到「长边 ≤ 目标边长」。目标边长 = √像素阈值，
+//     默认 2.4M 像素（≈1568²），与 Anthropic 协议的服务端长边上限一致——
+//     送过去正好不被服务端再缩一次，交付即最终，不做二次重采样。
+//
+// 两步分开是故意的：**块数只取决于图的大小和块数上限，清晰度只取决于像素阈值**。
+// 想更清晰就调小阈值（代价是块数变多），想省 token 就调大（代价是字变小）。
+//
+// 触发：高宽比 > 2.5 或长边 > 3000。块数上限默认 20；超了就放大块（拿分辨率换块数），
+// 而不是砍掉图的边缘——少给内容比给糊的内容更糟。
 //
 // 实现方式：用 wrapTool 包住 read，在它之前用 photon（WASM）解码、裁剪、重编码。
-// 非长图、非图片、模型不支持视觉，一律原样交给上游 read，行为不变。
+// 非大图、非图片、模型不支持视觉，一律原样交给上游 read，行为不变。
 
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { defineExtension, wrapTool } from "@earendil-works/pi-durable";
 import { createReadTool } from "@earendil-works/pi-durable/tools";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
+import { loadPrefs, DEFAULT_PREFS } from "./io.mjs";
 
-/** 切片策略。片高对齐模型原生上限（2000）的 80%，重叠保证跨界文字在两片里都完整。 */
-/** 切片说明文字的前缀。占位替换、文图绑定都靠它认出「这条消息是一组切片」。 */
-export const SLICE_NOTICE_PREFIX = "这是一张长图（";
-
+/**
+ * 切片策略。默认值来自 prefs（prefs.json 是配置的唯一真相），设置里改的就是这三个值。
+ * targetPixels 是「每块送进上下文的像素数」，可在系统设置里调。
+ */
 export const SLICE_POLICY = Object.freeze({
-  sliceHeight: 1600,
-  overlap: 120,
-  maxSlices: 12,
+  /** 每块的目标像素数（面积）。2_458_624 = 1568²，正好是服务端长边上限。 */
+  targetPixels: DEFAULT_PREFS.imageTiles.targetPixels,
+  /** 相邻块的重叠比例（按块边长算）。15% 足以让跨界的文字在两块里都完整。 */
+  overlapRatio: DEFAULT_PREFS.imageTiles.overlapRatio,
+  /** 块数上限。超了就放大块来压块数，不砍内容。 */
+  maxSlices: DEFAULT_PREFS.imageTiles.maxSlices,
+  /** 高宽比超过它算「长条图」（整页截图这类），一律要切。 */
   minAspect: 2.5,
+  /** 长边超过它也算「大图」，一样要切（宽大图必须横切，见文件头注释）。 */
   maxEdge: 3000,
 });
+
+/** 切片说明文字的前缀。占位替换、文图绑定都靠它认出「这条消息是一组切片」。 */
+export const SLICE_NOTICE_PREFIX = "这是一张大图（";
 
 const HEADER_BYTES = 64 * 1024;
 const JPEG_QUALITIES = [80, 70, 55, 40];
@@ -96,7 +116,7 @@ export function imageHeaderSize(bytes, mimeType) {
       }
       if (chunk === "VP8L" && bytes.length >= 25) {
         const bits = view.getUint32(21, true);
-        return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+        return { width: (bits & 0x3fff) + 1, height: (bits >> 14 & 0x3fff) + 1 };
       }
       return undefined;
     }
@@ -107,31 +127,106 @@ export function imageHeaderSize(bytes, mimeType) {
 }
 
 /**
- * 切不切、怎么切（纯函数，便于单测）。`needed` 为 false 表示按普通图片处理。
- * 需要切但片数超过上限时返回 `capped: true` 且 `slices` 为空——调用方应退化成整图并提示模型。
+ * 当前生效的策略：默认值 + 系统设置里改过的部分（prefs.imageTiles）。
+ *
+ * prefs 读出来时已经被 normalizeImageTiles 夹过范围、补过默认值，这里不再重复夹。
  */
-export function planSlices(width, height, policy = SLICE_POLICY) {
-  if (!(width > 0) || !(height > 0)) return { needed: false, slices: [], capped: false };
-  const aspect = height / width;
-  if (aspect <= policy.minAspect && Math.max(width, height) <= policy.maxEdge) {
-    return { needed: false, slices: [], capped: false };
-  }
-  const step = policy.sliceHeight - policy.overlap;
-  const count = Math.max(1, Math.ceil((height - policy.overlap) / step));
-  if (count <= 1) return { needed: false, slices: [], capped: false };
-  if (count > policy.maxSlices) return { needed: true, slices: [], capped: true, count };
-  const slices = [];
-  for (let index = 0; index < count; index++) {
-    const y = Math.min(index * step, Math.max(0, height - policy.sliceHeight));
-    const sliceHeight = Math.min(policy.sliceHeight, height - y);
-    slices.push({ y, height: sliceHeight });
-  }
-  return { needed: true, slices, capped: false, count };
+export async function currentTilePolicy() {
+  const tiles = (await loadPrefs()).imageTiles ?? {};
+  return {
+    ...SLICE_POLICY,
+    targetPixels: tiles.targetPixels ?? SLICE_POLICY.targetPixels,
+    overlapRatio: tiles.overlapRatio ?? SLICE_POLICY.overlapRatio,
+    maxSlices: tiles.maxSlices ?? SLICE_POLICY.maxSlices,
+  };
 }
 
-/** 片数超上限时的说明。退化路径和 prepareImageBlocks 共用同一段文案。 */
-export function sliceCappedNote(width, height, count) {
-  return `这张图 ${width}×${height} 需要切成 ${count} 片才清晰，超过上限 ${SLICE_POLICY.maxSlices} 片，已按整图缩小返回：文字大概率读不清。要看细节请先用 bash 裁出关心的区域（如 ImageMagick 的 convert -crop）再 read，或转成文本。`;
+/** 目标边长：像素阈值的平方根，再受模型自己的尺寸上限约束。 */
+export function targetEdgeOf(limits = DEFAULT_LIMITS, policy = SLICE_POLICY) {
+  const edge = Math.sqrt(policy.targetPixels);
+  return Math.max(1, Math.min(Math.round(edge), limits.maxWidth ?? Infinity, limits.maxHeight ?? Infinity));
+}
+
+/**
+ * 编码时真正生效的尺寸上限：模型的 inputLimits 与「目标边长」取小的那个。
+ *
+ * 为什么要再压一道：服务端（Anthropic 协议）会把长边缩到 1568，我们提前缩到同一尺寸，
+ * 交付即最终，不做二次重采样；也比 2000 的默认上限省字节。
+ */
+export function effectiveLimits(limits = DEFAULT_LIMITS, policy = SLICE_POLICY) {
+  const edge = targetEdgeOf(limits, policy);
+  return {
+    maxWidth: Math.min(limits.maxWidth ?? edge, edge),
+    maxHeight: Math.min(limits.maxHeight ?? edge, edge),
+    maxBytes: limits.maxBytes,
+  };
+}
+
+/**
+ * 一个方向上要切几块：块边长 block、起点步长 step，覆盖 total 像素。
+ *
+ * 末块可能比整块小（贴边裁剪），但两个方向都不会超过 block —— 所以每块的缩放比一致，
+ * 图上各处的清晰度相同。宁可多切一条窄边，也不要为了凑整块把某一行压糊。
+ */
+function axisCount(total, block, step) {
+  if (total <= block) return 1;
+  return Math.ceil((total - block) / step) + 1;
+}
+
+/**
+ * 切分计划（纯函数，便于单测）。
+ *
+ * 几何规则：块边长 block（源像素），相邻块起点步长 = block × (1 − overlapRatio)，
+ * 所以重叠正好是 overlapRatio。横向纵向都切，末行末列贴原图边缘裁剪。
+ *
+ * block 的取法：先取「目标边长」（= 不缩放、原样交付），块数超上限就放大 block
+ * （拿分辨率换块数），绝不砍掉原图的边缘。
+ */
+export function planTiles(width, height, limits = DEFAULT_LIMITS, policy = SLICE_POLICY) {
+  if (!(width > 0) || !(height > 0)) return { needed: false, tiles: [] };
+  const aspect = Math.max(width, height) / Math.min(width, height);
+  if (aspect <= policy.minAspect && Math.max(width, height) <= policy.maxEdge) {
+    return { needed: false, tiles: [] };
+  }
+  const targetEdge = targetEdgeOf(limits, policy);
+  const step0 = (block) => Math.max(1, Math.round(block * (1 - policy.overlapRatio)));
+  let block = Math.min(targetEdge, Math.max(width, height));
+  let cols = 1;
+  let rows = 1;
+  let step = step0(block);
+  // 块数超上限就放大块（拿分辨率换块数），绝不砍掉原图的边缘。
+  // 每次放大 12%：块数大致随块面积反比下降，12% 一步最多两三轮就收敛，不会空转。
+  for (let guard = 0; guard < 64; guard++) {
+    cols = axisCount(width, block, step);
+    rows = axisCount(height, block, step);
+    if (cols * rows <= policy.maxSlices) break;
+    block = Math.ceil(block * 1.12);
+    step = step0(block);
+  }
+  const tiles = [];
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const x = Math.min(width, col * step);
+      const y = Math.min(height, row * step);
+      const x2 = Math.min(width, col === cols - 1 ? width : x + block);
+      const y2 = Math.min(height, row === rows - 1 ? height : y + block);
+      if (x2 <= x || y2 <= y) continue;
+      tiles.push({ x, y, width: x2 - x, height: y2 - y, row, col });
+    }
+  }
+  if (tiles.length <= 1) return { needed: false, tiles: [] };
+  return { needed: true, tiles, cols, rows, blockSize: block, step, targetEdge };
+}
+
+/** 一块缩放后的尺寸：长边不超过目标边长，且不放大。 */
+export function tileOutputSize(tile, limits = DEFAULT_LIMITS, policy = SLICE_POLICY) {
+  const edge = targetEdgeOf(limits, policy);
+  const scale = Math.min(1, edge / Math.max(tile.width, tile.height));
+  return {
+    width: Math.max(1, Math.round(tile.width * scale)),
+    height: Math.max(1, Math.round(tile.height * scale)),
+    scale,
+  };
 }
 
 let photon;
@@ -146,7 +241,7 @@ async function loadPhoton() {
     mod.initSync({ module: wasm });
     photon = { mod };
   } catch (error) {
-    console.error(`[image-slices] 无法加载 photon（${error instanceof Error ? error.message : error}），长图退回整图缩放`);
+    console.error(`[image-slices] 无法加载 photon（${error instanceof Error ? error.message : error}），大图退回整图缩放`);
     photon = null;
   }
   return photon ?? undefined;
@@ -212,42 +307,61 @@ async function imageModelOf(api, context) {
   };
 }
 
-function sliceNotice(path, width, height, slices, policy) {
-  const range = slices.map((slice, index) => `${index + 1}:y=${slice.y}-${slice.y + slice.height}`).join(", ");
-  return [
-    `${SLICE_NOTICE_PREFIX}${width}×${height}），已按原始分辨率切成 ${slices.length} 片自上而下返回：片高 ${policy.sliceHeight}px，`,
-    `相邻重叠 ${policy.overlap}px（跨界的文字会在两片里都出现，不要重复引用）。各片在原始图中的纵向范围：${range}。`,
+/** 切片说明。写法有两条硬要求：① 老实说清分辨率，别再宣称「原始分辨率」；② 说清阅读顺序。 */
+function tileNotice(path, width, height, plan, limits, policy) {
+  const out = plan.tiles.map((tile) => tileOutputSize(tile, limits, policy));
+  const maxOut = Math.max(...out.map((size) => Math.max(size.width, size.height)));
+  const minScale = Math.min(...out.map((size) => size.scale));
+  const overlapPercent = Math.round(policy.overlapRatio * 100);
+  const lines = [
+    `${SLICE_NOTICE_PREFIX}${width}×${height}），已切成 ${plan.cols} 列 × ${plan.rows} 行共 ${plan.tiles.length} 块返回：`,
+    `每块长边 ≤ ${plan.targetEdge}px，相邻块重叠 ${overlapPercent}%（块起点步长 ${plan.step}px：第 r 行第 c 列的块起点为 x=c×${plan.step}, y=r×${plan.step}，末行末列贴原图边缘裁剪）。`,
+    `块的顺序：从左到右、从上到下（先行后列）。`,
+    `每块实际输出最长边 ${maxOut}px，相对原图的缩放比 ${minScale.toFixed(2)}${minScale >= 0.999 ? "（未损失分辨率）" : "（小字可能偏糊）"}。`,
+  ];
+  if (minScale < 0.999) {
+    lines.push(
+      `为把块数控制在 ${policy.maxSlices} 以内，块边长被放大到 ${plan.blockSize}px，清晰度低于原图；看小字请用 bash 裁出区域再 read。`,
+    );
+  }
+  lines.push(
     `原文件 ${path}。整图缩成一张会糊到读不出字，所以不要再为了"看全"去缩小整图；只需要局部时，用 bash 裁出区域再 read。`,
-  ].join("");
+  );
+  return lines.join("");
 }
 
 /**
  * 所有视觉输入的**唯一**入口：给一份图片字节，返回「进上下文时该长什么样」。
  *
  * 返回 undefined 表示不归它管（不是图片、不需要切片、没有 photon），调用方按普通图处理。
- * 需要切片但片数超上限时返回 `{ capped: true, note }`，调用方退化成整图并把 note 交给模型。
  *
  * 现在只有 read 工具在调；将来用户在输入框贴图 / 上传附件，也必须调这一个函数，
  * 而不是自己再写一套缩放——否则两条路径切出来的字节不同，内容哈希对不上，去重就失效了。
  */
-export async function prepareImageBlocks({ bytes, mimeType, limits, path }) {
+export async function prepareImageBlocks({ bytes, mimeType, limits = DEFAULT_LIMITS, path, policy }) {
+  const activePolicy = policy ?? (await currentTilePolicy());
   const dimensions = imageHeaderSize(bytes, mimeType);
   if (dimensions === undefined) return undefined;
-  const plan = planSlices(dimensions.width, dimensions.height);
+  const plan = planTiles(dimensions.width, dimensions.height, limits, activePolicy);
+  const encodeLimits = effectiveLimits(limits, activePolicy);
   if (!plan.needed) {
     // 普通比例的大图不切，但可能在尺寸或体积上超限。模型只对 read 工具返回的图做
     // inputLimits 缩放，用户消息里直接内联的 image block 原样发给上游 —— 不在这里缩，
     // 一张 4000×3000 的手机照片就会整个塞进去。
     const withinSize = base64Length(bytes.byteLength) <= limits.maxBytes;
-    if (dimensions.width <= limits.maxWidth && dimensions.height <= limits.maxHeight && withinSize) {
+    if (
+      dimensions.width <= encodeLimits.maxWidth &&
+      dimensions.height <= encodeLimits.maxHeight &&
+      withinSize
+    ) {
       return undefined; // 已经在限内，调用方原样内联即可
     }
     const loaded = await loadPhoton();
     if (loaded === undefined) return undefined;
     const image = loaded.mod.PhotonImage.new_from_byteslice(bytes);
     try {
-      // 复用切片的编码策略：同一套缩放算法才能保证字节稳定，内容哈希才不会飘。
-      const encoded = encodeSlice(loaded.mod, image, mimeType, limits);
+      // 复用切块的编码策略：同一套缩放算法才能保证字节稳定，内容哈希才不会飘。
+      const encoded = encodeSlice(loaded.mod, image, mimeType, encodeLimits);
       if (encoded === undefined) return undefined;
       return {
         blocks: [{ type: "image", data: encoded.data, mimeType: encoded.mimeType }],
@@ -261,15 +375,6 @@ export async function prepareImageBlocks({ bytes, mimeType, limits, path }) {
       image.free();
     }
   }
-  if (plan.capped) {
-    return {
-      capped: true,
-      count: plan.count,
-      width: dimensions.width,
-      height: dimensions.height,
-      note: sliceCappedNote(dimensions.width, dimensions.height, plan.count),
-    };
-  }
 
   const loaded = await loadPhoton();
   if (loaded === undefined) return undefined; // 没有 photon 就交给上游
@@ -279,14 +384,14 @@ export async function prepareImageBlocks({ bytes, mimeType, limits, path }) {
   const outputs = [];
   const notes = [];
   try {
-    for (const slice of plan.slices) {
-      const cropped = mod.crop(image, 0, slice.y, dimensions.width, slice.y + slice.height);
+    for (const [index, tile] of plan.tiles.entries()) {
+      const cropped = mod.crop(image, tile.x, tile.y, tile.x + tile.width, tile.y + tile.height);
       try {
-        const encoded = encodeSlice(mod, cropped, mimeType, limits);
+        const encoded = encodeSlice(mod, cropped, mimeType, encodeLimits);
         if (encoded === undefined) return undefined; // 编码失败：退回上游，别给半张图
         outputs.push({ type: "image", data: encoded.data, mimeType: encoded.mimeType });
         if (encoded.mimeType !== mimeType) {
-          notes.push(`第 ${plan.slices.indexOf(slice) + 1} 片转为 ${encoded.mimeType}`);
+          notes.push(`第 ${index + 1} 块转为 ${encoded.mimeType}`);
         }
       } finally {
         cropped.free();
@@ -296,7 +401,10 @@ export async function prepareImageBlocks({ bytes, mimeType, limits, path }) {
     image.free();
   }
   return {
-    blocks: [...outputs, { type: "text", text: sliceNotice(path, dimensions.width, dimensions.height, plan.slices, SLICE_POLICY) }],
+    blocks: [
+      ...outputs,
+      { type: "text", text: tileNotice(path, dimensions.width, dimensions.height, plan, limits, activePolicy) },
+    ],
     mimeType,
     width: dimensions.width,
     height: dimensions.height,
@@ -306,7 +414,7 @@ export async function prepareImageBlocks({ bytes, mimeType, limits, path }) {
 }
 
 /**
- * 长图走自己的管线；返回 undefined 表示「不归我管」，调用方原样交给上游 read。
+ * 大图走自己的管线；返回 undefined 表示「不归我管」，调用方原样交给上游 read。
  */
 async function sliceRead(path, api, context, fallback) {
   const env = api.env;
@@ -323,25 +431,14 @@ async function sliceRead(path, api, context, fallback) {
     if (mimeType === undefined) return undefined;
     const dimensions = imageHeaderSize(head, mimeType);
     if (dimensions === undefined) return undefined;
-    const plan = planSlices(dimensions.width, dimensions.height);
-    if (!plan.needed) return undefined;
-
+    const policy = await currentTilePolicy();
     const model = await imageModelOf(api, context);
     if (!model.vision) return undefined; // 纯文本模型：上游会换成占位符，没必要解码
-    if (plan.capped) {
-      // 太长：不硬塞 12 片以上，退化成整图，但要让模型知道「这是退化结果」。
-      const degraded = await fallback();
-      return {
-        output: degraded.output,
-        diagnostics: [
-          ...(degraded.diagnostics ?? []),
-          { severity: "warning", code: "image_slices", message: sliceCappedNote(dimensions.width, dimensions.height, plan.count) },
-        ],
-      };
-    }
+    const plan = planTiles(dimensions.width, dimensions.height, model.limits, policy);
+    if (!plan.needed) return undefined;
 
     bytes = getOrThrow(await info.read(0, size, context));
-    const prepared = await prepareImageBlocks({ bytes, mimeType, limits: model.limits, path });
+    const prepared = await prepareImageBlocks({ bytes, mimeType, limits: model.limits, path, policy });
     if (prepared === undefined) return undefined; // 没有 photon / 编码失败：交给上游
     return {
       output: prepared.blocks,
@@ -349,7 +446,7 @@ async function sliceRead(path, api, context, fallback) {
         {
           severity: "info",
           code: "image_slices",
-          message: `Read image file [${mimeType}] as ${prepared.slices} slices of ${dimensions.width}×${SLICE_POLICY.sliceHeight} (overlap ${SLICE_POLICY.overlap}px).${
+          message: `Read image file [${mimeType}] as ${plan.cols}x${plan.rows}=${plan.tiles.length} tiles of ~${plan.blockSize}px (overlap ${Math.round(policy.overlapRatio * 100)}%, target edge ${plan.targetEdge}px).${
             prepared.notes.length > 0 ? ` ${prepared.notes.join("; ")}.` : ""
           }`,
         },
@@ -360,7 +457,7 @@ async function sliceRead(path, api, context, fallback) {
   }
 }
 
-/** 包住 read：长图切片，其它情况原样委托。 */
+/** 包住 read：大图切片，其它情况原样委托。 */
 export function createImageSliceExtension() {
   const readTool = createReadTool();
   return defineExtension({
@@ -383,4 +480,3 @@ export function createImageSliceExtension() {
     ],
   });
 }
-
