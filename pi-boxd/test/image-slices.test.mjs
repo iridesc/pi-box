@@ -10,7 +10,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { initSync, PhotonImage } from "@silvia-odwyer/photon/photon_rs.js";
-import { createImageSliceExtension, detectImageMime, imageHeaderSize, planSlices, SLICE_POLICY } from "../src/image-slices.mjs";
+import { createImageSliceExtension, DEFAULT_IMAGE_LIMITS, detectImageMime, imageHeaderSize, planSlices, prepareImageBlocks, SLICE_POLICY } from "../src/image-slices.mjs";
 
 const require = createRequire(import.meta.url);
 initSync({ module: await readFile(require.resolve("@silvia-odwyer/photon/photon_rs_bg.wasm")) });
@@ -142,4 +142,43 @@ test("纯文本模型不做切片（上游会换成占位符）", async () => {
   const images = result.output.filter((block) => block.type === "image");
   assert.equal(images.length, 1); // 上游行为：一张图 + 「模型不支持图片」提示
   assert.match(result.diagnostics.map((item) => item.message).join(" "), /does not support images/);
+});
+
+// 用户消息里的图不会被 read 的 inputLimits 自动缩放，所以 prepareImageBlocks 必须
+// 自己处理「不切片但超尺寸/超体积」的普通图。漏掉这一条，一张 4000×3000 的手机照片
+// 就会原样进上下文。
+test("prepareImageBlocks：超尺寸的普通图会被缩放，不切片", async () => {
+  const limits = { maxWidth: 800, maxHeight: 800, maxBytes: 4 * 1024 * 1024 };
+  const bytes = makeImage(2400, 1200); // 宽高比 2，不触发长图切片
+  const prepared = await prepareImageBlocks({ bytes, mimeType: "image/png", limits, path: "shot.png" });
+  assert.ok(prepared, "超尺寸时应该返回处理结果");
+  assert.equal(prepared.capped, undefined, "普通图不该走 capped 分支");
+  assert.equal(prepared.blocks.length, 1);
+  assert.equal(prepared.blocks[0].type, "image");
+  assert.ok(prepared.width <= limits.maxWidth, `宽应缩到 ${limits.maxWidth} 以内，实际 ${prepared.width}`);
+  assert.ok(prepared.height <= limits.maxHeight, `高应缩到 ${limits.maxHeight} 以内，实际 ${prepared.height}`);
+  assert.equal(prepared.slices, 1);
+  // 比例保持不变
+  assert.ok(Math.abs(prepared.width / prepared.height - 2) < 0.05);
+});
+
+test("prepareImageBlocks：已经在限内的普通图原样交给调用方（返回 undefined）", async () => {
+  const limits = { maxWidth: 800, maxHeight: 800, maxBytes: 4 * 1024 * 1024 };
+  const bytes = makeImage(300, 200);
+  assert.equal(await prepareImageBlocks({ bytes, mimeType: "image/png", limits, path: "small.png" }), undefined);
+});
+
+test("prepareImageBlocks：尺寸够小但字节超限也要压", async () => {
+  // 800×800 的条纹图 PNG 是 14.8KB，把上限压到 8KB 就走 maxBytes 分支而不是尺寸分支。
+  const limits = { maxWidth: 2000, maxHeight: 2000, maxBytes: 8 * 1024 };
+  const bytes = makeImage(800, 800);
+  assert.ok(bytes.byteLength > limits.maxBytes, "前提：原图必须确实超过上限");
+  const prepared = await prepareImageBlocks({ bytes, mimeType: "image/png", limits, path: "noisy.png" });
+  assert.ok(prepared, "字节超限时应该压缩");
+  const total = prepared.blocks.reduce((sum, block) => sum + (block.data?.length ?? 0), 0);
+  assert.ok(total <= limits.maxBytes, `base64 总长 ${total} 应不超过 ${limits.maxBytes}`);
+});
+
+test("DEFAULT_IMAGE_LIMITS 与 read 工具的默认上限一致", () => {
+  assert.deepEqual(DEFAULT_IMAGE_LIMITS, { maxWidth: 2000, maxHeight: 2000, maxBytes: 4.5 * 1024 * 1024 });
 });

@@ -10,6 +10,21 @@
 
 ## 2026-11
 
+### 输入框支持图片与文件
+
+- **输入框从单行 `<input>` 换成 `<textarea>`**：`Enter` 发送、`Shift+Enter` 换行、自动增高（上限 200px）。中文输入法组合中的 Enter 不会误发。
+- **三种添加方式**：粘贴（`Ctrl+V`）、拖拽（整个输入区可落）、点 📎 选择文件。一条消息最多 10 个附件。
+- **图片进上下文，文件只给路径**：
+  - 图片读回来经 `prepareImageBlocks()` 缩放/切片后内联成 `image` block，模型无需再 `read` 就能看到。
+  - 其他文件只在文本里列「附件：<路径>（大小）」，模型自己决定 `read` 还是 `bash`。
+- **附件落在 `<会话工作目录>/.pi-box/uploads/`**：文件名由后端生成（时间戳 + 随机 + 原名），前端不能指定路径。该目录在 `PROTECTED_HEADS` 里，删不掉，也不在文件树里显示。
+- **会话记录里能看到附件**：图片显示缩略图（点击原图），其他显示文件名 + 大小。元信息存在 `entry.data.attachments`（`kind = app.user-attachments`），库里只存路径不存 base64。
+- **可以只发附件不写字**：纯附件消息不再被前端的空内容检查拦掉。
+
+相关参数：`PI_BOX_ATTACHMENT_MAX_BYTES`（默认 200MB）、`PI_BOX_ATTACHMENT_MAX_COUNT`（默认 10）、`PI_BOX_ATTACHMENT_MAX_IMAGES`（默认 6）。
+
+相关端点：`POST /api/attachments/upload`、`GET /api/attachments/preview`、`POST /api/attachments/delete`。
+
 ### 报告阅读页修复
 
 - **点报告组的「打开箭头」不再白屏**。`/reports?project=&group=&stamp=` 之前被报告页面路由抢走了，返回的是公开页 `public.html`，而它只认 `/r/<slug>` 这种路径，于是拿到页面却渲染不出东西。现在 `/reports` 交回主应用（app.js 里有独立的阅读视图），公开页只管 `/r/*`。

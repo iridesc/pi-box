@@ -32,7 +32,8 @@ export const SLICE_POLICY = Object.freeze({
 
 const HEADER_BYTES = 64 * 1024;
 const JPEG_QUALITIES = [80, 70, 55, 40];
-const DEFAULT_LIMITS = { maxWidth: 2000, maxHeight: 2000, maxBytes: 4.5 * 1024 * 1024 };
+export const DEFAULT_IMAGE_LIMITS = { maxWidth: 2000, maxHeight: 2000, maxBytes: 4.5 * 1024 * 1024 };
+const DEFAULT_LIMITS = DEFAULT_IMAGE_LIMITS;
 
 /** 把 Uint8Array 当 DataView 用（环境可能给 Buffer，也可能给纯 Uint8Array）。 */
 function viewOf(bytes) {
@@ -233,7 +234,33 @@ export async function prepareImageBlocks({ bytes, mimeType, limits, path }) {
   const dimensions = imageHeaderSize(bytes, mimeType);
   if (dimensions === undefined) return undefined;
   const plan = planSlices(dimensions.width, dimensions.height);
-  if (!plan.needed) return undefined;
+  if (!plan.needed) {
+    // 普通比例的大图不切，但可能在尺寸或体积上超限。模型只对 read 工具返回的图做
+    // inputLimits 缩放，用户消息里直接内联的 image block 原样发给上游 —— 不在这里缩，
+    // 一张 4000×3000 的手机照片就会整个塞进去。
+    const withinSize = base64Length(bytes.byteLength) <= limits.maxBytes;
+    if (dimensions.width <= limits.maxWidth && dimensions.height <= limits.maxHeight && withinSize) {
+      return undefined; // 已经在限内，调用方原样内联即可
+    }
+    const loaded = await loadPhoton();
+    if (loaded === undefined) return undefined;
+    const image = loaded.mod.PhotonImage.new_from_byteslice(bytes);
+    try {
+      // 复用切片的编码策略：同一套缩放算法才能保证字节稳定，内容哈希才不会飘。
+      const encoded = encodeSlice(loaded.mod, image, mimeType, limits);
+      if (encoded === undefined) return undefined;
+      return {
+        blocks: [{ type: "image", data: encoded.data, mimeType: encoded.mimeType }],
+        mimeType: encoded.mimeType,
+        width: encoded.width,
+        height: encoded.height,
+        slices: 1,
+        notes: encoded.mimeType === mimeType ? [] : [`转为 ${encoded.mimeType}`],
+      };
+    } finally {
+      image.free();
+    }
+  }
   if (plan.capped) {
     return {
       capped: true,

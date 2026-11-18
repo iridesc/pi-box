@@ -68,7 +68,7 @@ server.listen(PORT)
 
 ## 4. 后端模块表
 
-`src/` 下 23 个模块。一句话职责，细节读文件头注释。
+`src/` 下 28 个模块。一句话职责，细节读文件头注释。
 
 | 模块 | 职责 |
 |---|---|
@@ -92,9 +92,14 @@ server.listen(PORT)
 | `schedule-log.mjs` | 定时任务运行日志：落盘、保留清理、并发锁、幂等标记 |
 | `exec.mjs` | 命令执行：spawn + 流式输出 + 超时杀整个进程组 |
 | `files.mjs` | 项目文件浏览：列目录、文本预览、原文件流（Range）、上传 |
+| `attachments.mjs` | 会话附件：落盘 `.pi-box/uploads/`、路径校验、组装成消息内容 |
+| `image-slices.mjs` | 视觉输入的唯一入口 `prepareImageBlocks`：长图切片 + 超尺寸缩放 |
+| `image-budget.mjs` | 上下文图片预算：按消息「组」原子淘汰，跨组按内容哈希去重 |
 | `cleanup.mjs` | 数据清理：日志（在线安全）与数据库（需短暂中断） |
 | `io.mjs` | 配置读写 + HTTP body 工具 |
 | `mcp-bridge.mjs` | MCP server 连接与工具注入 |
+| `tool-guard-extension.mjs` | 工具白名单守卫：会话没启用的工具直接拒绝 |
+| `sse.mjs` | `/api/events` 心跳（15s 注释行），防代理层超时假死 |
 
 ## 5. 前端结构
 
@@ -186,6 +191,26 @@ Agent 的 frontmatter 写 `reports: [组名]` 才能发布到该组。没绑定�
 
 - 组名从绑定推导，**不要写进提示词**。提示词里记路由信息必然过期。
 - 发布到不存在的组**报错，不自动建组**。自动建组会让 agent 随手造出垃圾组。
+
+### 为什么图片内联，文件只给路径
+
+模型要「看」图，就必须有 image block 进上下文。用户消息里的 image block **不会**像
+`read` 工具那样被 `inputLimits` 自动缩放（缩放只在 `read` 里发生），所以必须在
+`prepareImageBlocks()` 里自己缩 —— 这是**唯一**的视觉输入入口，两条路径共用一套编码，
+否则同一张图切出来的字节不同，内容哈希对不上，`image-budget` 的去重就失效。
+
+其他文件不给内容只给路径：把 200MB 的 pdf base64 进上下文纯粹烧钱，让模型自己
+`read` / `bash` 更灵活，也更容易在需要时只取一部分。
+
+### 为什么附件目录是 `.pi-box/uploads/`
+
+- 在会话的工作目录内，模型 `read` / `bash` 直接够得着，不需要路径映射；
+- `.pi-box` 已在 `files.mjs` 的 `PROTECTED_HEADS` 里，删不掉（附件是会话证据）；
+- 不在文件树里显示，不污染用户的项目目录。
+
+文件名由后端生成（时间戳 + 随机 + 原名），前端只能给原始文件名，拿不到任意路径的
+写权限。`attachmentAbsolute()` 再挡一层：只认 `.pi-box/uploads/` 前缀，且任何一段
+是 `..` 就拒绝。
 
 ### 为什么定时任务支持「命令 + LLM」组合
 

@@ -17,6 +17,8 @@ import { readLogTail, scheduleLogDir, scheduleLogRoot } from "./schedule-log.mjs
 import { harness as runtimeHarness, context as runtimeContext, mcpBridge as runtimeMcpBridge, getMaintenance, isMaintenance, restartRuntime } from "./runtime.mjs";
 import { cleanupStatus, pruneAllLogs, saveCleanupConfig } from "./cleanup.mjs";
 import { createProjectDir, deleteProjectPath, listDirectory, readFilePreview, renameProjectPath, resolveProjectPath, sendProjectFile, uploadProjectFile } from "./files.mjs";
+import { buildAttachmentContent, deleteAttachment, readAttachment, saveAttachment } from "./attachments.mjs";
+import { DEFAULT_IMAGE_LIMITS, detectImageMime, prepareImageBlocks } from "./image-slices.mjs";
 import {
   createGroup as createReportGroup,
   deleteGroup as deleteReportGroup,
@@ -140,7 +142,10 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
         const view = await conversation.viewState(context);
         const entries = view.value.entries.map((entry) => ({
           id: String(entry.id),
+          // 附件缩略图要用它去后端定位 cwd，缺了整个预览链接就是空参数。
+          conversationId: String(id),
           kind: entry.kind,
+          data: entry.data ?? null,
           model: entry.model ?? null,
         }));
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -196,19 +201,129 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
     "/api/send": {
       method: "POST",
       async handler(req, res) {
-        const { conversationId, content, whenBusy } = await readBody(req);
+        // 附件走单独的上传端点先落盘，这里只带路径：请求体不用塞 base64，图片那份
+        // 从磁盘读，行为与 read 工具完全一致（同一个 prepareImageBlocks）。
+        const { conversationId, content, whenBusy, attachments } = await readBody(req);
         const conversation = conversationId ? await harness.conversation(String(conversationId), context) : undefined;
         if (!conversation) {
           res.writeHead(404, { "Content-Type": "application/json" });
           return res.end(JSON.stringify({ error: "会话不存在" }));
         }
+        const text = String(content ?? "");
+        let payload = text;
+        let entry;
+        if (Array.isArray(attachments) && attachments.length > 0) {
+          const conversationDoc = await harness.snapshot(AgentDoc, conversation.id, context).catch(() => undefined);
+          const cwd = conversationDoc?.cwd;
+          if (!cwd) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "这个会话没有工作目录，无法接收附件" }));
+          }
+          try {
+            const built = await buildAttachmentContent({
+              root: cwd,
+              text,
+              attachments,
+              // 用户消息里的图不会像 read 工具那样被自动缩放，所以在这里按保守上限先缩一遍。
+              prepare: (input) => prepareImageBlocks({ ...input, limits: DEFAULT_IMAGE_LIMITS }),
+            });
+            payload = built.content;
+            // entry.data 只记路径与尺寸，前端靠它渲染缩略图；base64 不落库。
+            entry = { kind: "app.user-attachments", data: { attachments: built.attachments } };
+          } catch (error) {
+            res.writeHead(error.status ?? 500, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: error.message }));
+          }
+        }
+        if (!text.trim() && !entry) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "内容为空" }));
+        }
         const submission = await conversation.submit(
-          { type: "input", content: String(content ?? ""), whenBusy: whenBusy === "steer" ? "steer" : "followUp" },
+          {
+            type: "input",
+            content: payload,
+            whenBusy: whenBusy === "steer" ? "steer" : "followUp",
+            ...(entry === undefined ? {} : { entry }),
+          },
           context,
         );
         submission.wait(context).catch(() => {});
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, submissionId: String(submission.id) }));
+      },
+    },
+    // 附件上传：请求体就是文件裸流（同 /api/files/upload 的口径）。
+    // 落盘到 <项目>/.pi-box/uploads/，文件名由后端生成，前端不能指定路径。
+    "/api/attachments/upload": {
+      method: "POST",
+      async handler(req, res) {
+        const params = queryOf(req);
+        try {
+          // 调用方给 conversationId 而不是项目名：工作目录由会话自己决定，
+          // 元项目（没有项目名）也能收附件。
+          const conversationId = params.get("conversationId");
+          const conversation = conversationId ? await harness.conversation(conversationId, context) : undefined;
+          if (!conversation) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "会话不存在" }));
+          }
+          const doc = await harness.snapshot(AgentDoc, conversation.id, context).catch(() => undefined);
+          if (!doc?.cwd) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "这个会话没有工作目录" }));
+          }
+          const saved = await saveAttachment(req, { root: doc.cwd, name: params.get("name") });
+          sendJson(res, 200, { ok: true, ...saved });
+        } catch (error) {
+          res.writeHead(error.status ?? 500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    // 附件预览：会话记录里的缩略图走这里。按 conversationId 找 cwd，
+    // 而不是项目名 —— 元项目没有项目名，但它照样能贴图。
+    "/api/attachments/preview": {
+      method: "GET",
+      async handler(req, res) {
+        const params = queryOf(req);
+        try {
+          const conversation = params.get("conversationId")
+            ? await harness.conversation(params.get("conversationId"), context)
+            : undefined;
+          const doc = conversation ? await harness.snapshot(AgentDoc, conversation.id, context).catch(() => undefined) : undefined;
+          if (!doc?.cwd) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "会话不存在" }));
+          }
+          const { bytes } = await readAttachment(doc.cwd, params.get("path"));
+          const mime = detectImageMime(bytes) ?? "application/octet-stream";
+          res.writeHead(200, { "Content-Type": mime, "Cache-Control": "private, max-age=3600" });
+          res.end(bytes);
+        } catch (error) {
+          res.writeHead(error.status ?? 500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
+      },
+    },
+    // 删除附件（发送失败或用户移除 chip 时调用）。
+    "/api/attachments/delete": {
+      method: "POST",
+      async handler(req, res) {
+        const { conversationId, path } = await readBody(req);
+        try {
+          const conversation = conversationId ? await harness.conversation(String(conversationId), context) : undefined;
+          const doc = conversation ? await harness.snapshot(AgentDoc, conversation.id, context).catch(() => undefined) : undefined;
+          if (!doc?.cwd) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: "会话不存在" }));
+          }
+          await deleteAttachment(doc.cwd, path);
+          sendJson(res, 200, { ok: true });
+        } catch (error) {
+          res.writeHead(error.status ?? 500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error.message }));
+        }
       },
     },
     // 终止会话：中止当前运行（跨后台边界，撤回排队中的输入）。

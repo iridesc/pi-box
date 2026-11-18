@@ -96,6 +96,9 @@ let expandedReportGroups = new Set();
 let scheduleRunsCache = {}; // project -> 最近运行记录
 const conversationDetailCache = new Map(); // conversation id -> 按需加载的完整 entries
 // 每个会话独立的输入框节点与草稿：SSE 全局刷新时复用节点，避免清空输入、打断输入法。
+// 一条消息最多几个附件。后端也有一份（attachments.mjs），这里是提前拦住，别等服务器报错。
+const ATTACH_MAX_COUNT = 10;
+
 const composerCache = new Map(); // conversation id -> { form, input, btn }
 const draftCache = new Map(); // conversation id -> 未发送的输入文本
 let viewScrollState = { top: 0, atBottom: true }; // 当前视图的滚动位置
@@ -3051,6 +3054,12 @@ function openProjectDeleteDialog(project) {
   input.focus();
 }
 
+/** 附件 chip 上的扩展名标签（没有扩展名就给个通用图标）。 */
+function fileExtLabel(name) {
+  const match = /\.([A-Za-z0-9]{1,6})$/.exec(String(name ?? ""));
+  return match ? match[1].toUpperCase() : "FILE";
+}
+
 function messageText(msg) {
   if (!msg) return "";
   if (msg.errorMessage) return `❌ ${msg.errorMessage}`;
@@ -3068,9 +3077,13 @@ function messageText(msg) {
         if (p.type === "thinking") return `[thinking] ${p.thinking ?? ""}`.slice(0, 500);
         if (p.type === "toolCall") return `🛠 ${p.name}(${JSON.stringify(p.arguments ?? {})})`;
         if (p.type === "toolResult") return `[result] ${JSON.stringify(p.content ?? p).slice(0, 500)}`;
+        // 图片不在正文里出占位字样：附件缩略图由 renderAttachmentList 单独画，
+        // 否则只贴一张图的消息会显示成「[image]」。
+        if (p.type === "image") return "";
         return `[${p.type}]`;
       })
-      .join("\n");
+      .join("\n")
+      .trim();
   }
   return String(c);
 }
@@ -3195,6 +3208,8 @@ function messageRoleLabel(msg, entry) {
     return thinking ? "思考与阶段回复" : "阶段回复";
   }
   if (msg.role === "user" && String(entry.kind).startsWith("pibox.")) return "子 Agent 回传";
+  // 带附件的用户消息用自定义 kind，界面上别把内部标识露出来
+  if (msg.role === "user" && String(entry.kind).startsWith("app.")) return "你";
   return entry.kind;
 }
 
@@ -3216,7 +3231,14 @@ function conversationTurns(entries) {
     const userMessages = messages.filter((msg) => msg.role === "user");
     const synthetic = userMessages.length > 0 && userMessages.every((msg) => /^\[子 agent .+ 回复\]/.test(messageText(msg).trim()));
     if (userMessages.length > 0 && !synthetic) {
-      current = { users: userMessages, items: [], entryId: String(entry.id) };
+      // 附件元信息只存在 entry.data 里（库里不存 base64），渲染缩略图靠它。
+      current = {
+        users: userMessages,
+        items: [],
+        entryId: String(entry.id),
+        conversationId: String(entry.conversationId ?? ""),
+        attachments: Array.isArray(entry.data?.attachments) ? entry.data.attachments : [],
+      };
       turns.push(current);
     }
     if (!current) {
@@ -3239,7 +3261,7 @@ function conversationTurns(entries) {
  * sig : 内容指纹（消息条数 + 每条消息长度 + stopReason）。
  */
 function turnIdentity(turn) {
-  let sig = `${turn.users.length}/${turn.items.length}`;
+  let sig = `${turn.users.length}/${turn.items.length}/${turn.attachments?.length ?? 0}`;
   for (const msg of turn.users) sig += `|u${messageText(msg).length}`;
   for (const { entry, msg } of turn.items) {
     sig += `|${entry.id}:${msg.role}:${messageText(msg).length}:${msg.stopReason ?? ""}`;
@@ -3247,12 +3269,49 @@ function turnIdentity(turn) {
   return { key: turn.entryId ?? "", count: turn.items.length, sig };
 }
 
+/** 会话记录里的附件：图片显示缩略图（点击放大），其他显示文件名 + 大小。 */
+function renderAttachmentList(attachments, conversationId) {
+  const box = el("div", "msg-attach-list");
+  for (const item of attachments) {
+    if (!item?.path) continue;
+    const href = `/api/attachments/preview?conversationId=${encodeURIComponent(conversationId)}&path=${encodeURIComponent(item.path)}`;
+    if (item.inline && item.mimeType) {
+      const link = el("a", "msg-attach-image");
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.title = `${item.name}（${formatBytes(item.size)}）`;
+      const img = document.createElement("img");
+      img.src = href;
+      img.alt = item.name ?? "图片";
+      img.loading = "lazy";
+      link.appendChild(img);
+      box.appendChild(link);
+      continue;
+    }
+    const link = el("a", "msg-attach-file");
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.title = item.path;
+    link.append(el("span", "msg-attach-ext", fileExtLabel(item.name)), el("span", "msg-attach-name", item.name ?? ""), el("span", "msg-attach-size", formatBytes(item.size)));
+    box.appendChild(link);
+  }
+  return box;
+}
+
 function renderConversationTurn(turn) {
   const fragment = document.createDocumentFragment();
+  let attachmentsDrawn = false;
   for (const msg of turn.users) {
     const wrap = el("div", "conversation-user-wrap");
     const bubble = el("div", "conversation-user");
     bubble.appendChild(markdownBlock(messageText(msg)));
+    // 附件挂在第一条用户消息下面（一个 entry 只有一份 data）
+    if (!attachmentsDrawn && turn.attachments?.length > 0) {
+      bubble.appendChild(renderAttachmentList(turn.attachments, turn.conversationId));
+      attachmentsDrawn = true;
+    }
     wrap.appendChild(bubble);
     const timestamp = formatMessageTime(msg.timestamp);
     if (timestamp) wrap.appendChild(el("div", "conversation-message-time conversation-message-time-user", timestamp));
@@ -3499,49 +3558,236 @@ function getComposer(convKey, conv) {
   if (!composer) {
     const form = document.createElement("form");
     form.className = "view-input";
-    const input = document.createElement("input");
+
+    // 附件区：贴在输入框上方，一条消息的附件都在这儿，发送后清空。
+    const attachBar = el("div", "attach-bar");
+    attachBar.hidden = true;
+
+    const row = el("div", "view-input-row");
+    // 用 textarea 而不是 input：要能 Shift+Enter 换行，贴长文本也看得见。
+    const input = document.createElement("textarea");
+    input.rows = 1;
     input.autocomplete = "off";
+    const attachBtn = el("button", "view-attach", "📎");
+    attachBtn.type = "button";
+    attachBtn.title = "添加图片或文件（也可以直接粘贴、拖进来）";
+    const filePicker = document.createElement("input");
+    filePicker.type = "file";
+    filePicker.multiple = true;
+    filePicker.hidden = true;
     const sendBtn = el("button", "", "发送");
     sendBtn.type = "submit";
     const steerBtn = el("button", "view-steer", "引导");
     steerBtn.type = "button";
     steerBtn.hidden = true;
-    form.appendChild(input);
-    form.appendChild(sendBtn);
-    form.appendChild(steerBtn);
+    row.append(attachBtn, input, sendBtn, steerBtn);
+    form.append(attachBar, row, filePicker);
+
+    /** 这条消息还没发出去的附件：{path,name,size,isImage,mimeType,previewUrl} */
+    let pending = [];
+
+    const autoGrow = () => {
+      input.style.height = "auto";
+      input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+    };
 
     const updateButtons = () => {
       const busy = conversationBusy(composer.conv);
-      const hasContent = input.value.trim().length > 0;
+      const hasContent = input.value.trim().length > 0 || pending.length > 0;
       steerBtn.hidden = !(busy && hasContent);
+      sendBtn.disabled = !hasContent || !state.hasKey;
       sendBtn.title = busy && hasContent ? "发送：当前回答结束后处理" : "发送";
       steerBtn.title = "引导：立即插话，让 Agent 据此调整当前回复";
+      steerBtn.disabled = !hasContent;
+    };
+
+    const renderAttachBar = () => {
+      attachBar.innerHTML = "";
+      attachBar.hidden = pending.length === 0;
+      for (const item of pending) {
+        const chip = el("div", `attach-chip${item.uploading ? " uploading" : ""}`);
+        if (item.isImage && item.previewUrl) {
+          const thumb = el("img", "attach-thumb");
+          thumb.src = item.previewUrl;
+          thumb.alt = item.name;
+          chip.appendChild(thumb);
+        } else {
+          chip.appendChild(el("span", "attach-ext", fileExtLabel(item.name)));
+        }
+        chip.appendChild(el("span", "attach-name", item.name));
+        chip.appendChild(el("span", "attach-size", item.uploading ? `${item.progress ?? 0}%` : formatBytes(item.size)));
+        const del = el("button", "attach-del", "×");
+        del.type = "button";
+        del.title = "移除";
+        del.onclick = () => {
+          if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+          pending = pending.filter((other) => other !== item);
+          // 已经从磁盘落盘的要删掉，否则 uploads 里会留孤儿
+          if (item.path) {
+            fetch("/api/attachments/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ conversationId: convKey, path: item.path }),
+            }).catch(() => {});
+          }
+          renderAttachBar();
+          updateButtons();
+        };
+        chip.appendChild(del);
+        attachBar.appendChild(chip);
+      }
+    };
+
+    /** 上传一个附件：XHR 才有 progress（fetch 拿不到）。 */
+    const uploadAttachment = (file) => new Promise((resolve, reject) => {
+      const item = { name: file.name || "attachment", size: file.size, uploading: true, progress: 0 };
+      pending.push(item);
+      renderAttachBar();
+      updateButtons();
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/attachments/upload?conversationId=${encodeURIComponent(convKey)}&name=${encodeURIComponent(file.name || "attachment")}`);
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        item.progress = Math.round((event.loaded / event.total) * 100);
+        renderAttachBar();
+      };
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch { data = {}; }
+        if (xhr.status !== 200) {
+          pending = pending.filter((other) => other !== item);
+          renderAttachBar();
+          updateButtons();
+          reject(new Error(data.error || `上传失败（${xhr.status}）`));
+          return;
+        }
+        Object.assign(item, { uploading: false, path: data.path, size: data.size, isImage: data.isImage, mimeType: data.mimeType });
+        // 图片给个本地预览：用 blob url，不走服务器（发送前文件还没被引用）
+        if (data.isImage) item.previewUrl = URL.createObjectURL(file);
+        renderAttachBar();
+        updateButtons();
+        resolve(item);
+      };
+      xhr.onerror = () => {
+        pending = pending.filter((other) => other !== item);
+        renderAttachBar();
+        updateButtons();
+        reject(new Error("上传失败：网络错误"));
+      };
+      xhr.send(file);
+    });
+
+    const addFiles = async (files) => {
+      const list = Array.from(files ?? []);
+      if (list.length === 0) return;
+      const room = ATTACH_MAX_COUNT - pending.length;
+      if (room <= 0) {
+        alert(`一次最多 ${ATTACH_MAX_COUNT} 个附件`);
+        return;
+      }
+      if (list.length > room) alert(`一次最多 ${ATTACH_MAX_COUNT} 个附件，多余的已忽略`);
+      for (const file of list.slice(0, room)) {
+        try {
+          await uploadAttachment(file);
+        } catch (error) {
+          alert(error.message);
+        }
+      }
     };
 
     input.addEventListener("input", () => {
       draftCache.set(convKey, input.value);
+      autoGrow();
       updateButtons();
     });
 
+    // Enter 发送 / Shift+Enter 换行（输入法组合中不拦，否则中文选词会误发）
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey) return;
+      if (event.isComposing) return;
+      event.preventDefault();
+      form.requestSubmit();
+    });
+
+    // 粘贴：图片走 clipboardData.files，纯文本仍然走默认粘贴
+    input.addEventListener("paste", (event) => {
+      const files = Array.from(event.clipboardData?.files ?? []);
+      if (files.length === 0) return;
+      event.preventDefault();
+      addFiles(files);
+    });
+
+    // 拖拽：整个输入区都能接
+    let dragDepth = 0;
+    form.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer?.types?.includes("Files")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      form.classList.add("view-input-drop");
+    });
+    form.addEventListener("dragenter", (event) => {
+      if (!event.dataTransfer?.types?.includes("Files")) return;
+      dragDepth += 1;
+      form.classList.add("view-input-drop");
+    });
+    form.addEventListener("dragleave", () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) form.classList.remove("view-input-drop");
+    });
+    form.addEventListener("drop", (event) => {
+      if (!event.dataTransfer?.files?.length) return;
+      event.preventDefault();
+      dragDepth = 0;
+      form.classList.remove("view-input-drop");
+      addFiles(event.dataTransfer.files);
+    });
+
+    attachBtn.onclick = () => filePicker.click();
+    filePicker.onchange = () => {
+      addFiles(filePicker.files);
+      filePicker.value = "";
+    };
+
+    const clearPending = () => {
+      for (const item of pending) if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      pending = [];
+      renderAttachBar();
+    };
+
     const send = async (whenBusy) => {
       const content = input.value.trim();
-      if (!content) return;
+      const attachments = pending.filter((item) => !item.uploading && item.path).map((item) => ({ path: item.path }));
+      if (!content && attachments.length === 0) return;
+      // 上传还没完就别发，否则附件会丢
+      if (pending.some((item) => item.uploading)) {
+        alert("附件还在上传，稍等一下");
+        return;
+      }
+      const sentCount = attachments.length;
+      const snapshotText = input.value;
       input.value = "";
+      autoGrow();
+      clearPending();
       draftCache.delete(convKey);
       updateButtons();
       try {
         const res = await fetch("/api/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversationId: convKey, content, whenBusy }),
+          body: JSON.stringify({ conversationId: convKey, content, whenBusy, attachments }),
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           throw new Error(data.error || "发送失败");
         }
       } catch (error) {
-        draftCache.set(convKey, content);
-        if (input.isConnected) input.value = content;
+        // 失败要把草稿还给用户，附件已经落盘（路径还在），所以重新挂回 chips
+        draftCache.set(convKey, snapshotText);
+        if (input.isConnected) { input.value = snapshotText; autoGrow(); }
+        if (sentCount > 0) {
+          pending = attachments.map((item) => ({ path: item.path, name: item.path.split("/").pop(), size: 0, isImage: false }));
+          renderAttachBar();
+        }
         updateButtons();
         alert(error.message);
       }
@@ -3550,7 +3796,7 @@ function getComposer(convKey, conv) {
     form.onsubmit = (ev) => { ev.preventDefault(); send("followUp"); };
     steerBtn.onclick = () => send("steer");
 
-    composer = { form, input, btn: sendBtn, steerBtn, updateButtons };
+    composer = { form, input, attachBar, btn: sendBtn, steerBtn, updateButtons, pending: () => pending };
     composerCache.set(convKey, composer);
   }
   composer.conv = conv;

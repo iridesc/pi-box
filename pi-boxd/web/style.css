@@ -176,13 +176,77 @@ section:last-child { border-right: none; }
 .view-body { flex: 1; overflow-y: auto; padding: 10px 14px; }
 .conversation-loading { flex: 1; display: flex; align-items: center; justify-content: center; color: #6e7681; }
 .view-input {
-  display: flex; gap: 6px; padding: 8px; border-top: 1px solid #21262d; background: #161b22;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  border-top: 1px solid #21262d; background: #161b22; position: relative;
 }
-.view-input input {
+.view-input.view-input-drop { background: #12243a; border-top-color: #1f6feb; }
+.view-input.view-input-drop::after {
+  content: "松手添加图片或文件"; position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; pointer-events: none;
+  color: #58a6ff; font-size: 12px; background: rgba(13, 17, 23, .72);
+}
+.view-input-row { display: flex; gap: 6px; align-items: flex-end; }
+.view-input textarea {
   flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
   color: #c9d1d9; padding: 6px 8px; font-family: inherit; font-size: 13px;
+  line-height: 1.5; resize: none; overflow-y: auto; max-height: 200px; min-height: 32px;
 }
-.view-input input:focus { outline: none; border-color: #58a6ff; }
+.view-input textarea:focus { outline: none; border-color: #58a6ff; }
+.view-attach {
+  background: #21262d !important; border: 1px solid #30363d !important; color: #8b949e !important;
+  padding: 6px 9px !important; font-size: 14px !important; line-height: 1; flex-shrink: 0;
+}
+.view-attach:hover:not(:disabled) { border-color: #58a6ff !important; color: #58a6ff !important; }
+
+/* 附件 chips：发送前挂在这里，发送后清空 */
+.attach-bar {
+  display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 2px;
+}
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 260px;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+  padding: 3px 6px 3px 3px; font-size: 11px; color: #c9d1d9;
+}
+.attach-chip.uploading { opacity: .7; }
+.attach-thumb {
+  width: 26px; height: 26px; object-fit: cover; border-radius: 4px; flex-shrink: 0;
+}
+.attach-ext {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 4px; flex-shrink: 0;
+  background: #1f6feb22; color: #58a6ff; font-size: 8px; font-weight: 600; letter-spacing: .3px;
+}
+.attach-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px;
+}
+.attach-size { color: #6e7681; flex-shrink: 0; }
+.attach-del {
+  background: none; border: none; color: #6e7681; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0 2px; flex-shrink: 0;
+}
+.attach-del:hover { color: #f85149; }
+
+/* 会话记录里的附件 */
+.msg-attach-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.msg-attach-image {
+  display: block; border: 1px solid #1f6feb55; border-radius: 6px; overflow: hidden;
+  line-height: 0; background: #0d1117;
+}
+.msg-attach-image img { display: block; max-width: 220px; max-height: 160px; object-fit: cover; }
+.msg-attach-image:hover { border-color: #58a6ff; }
+.msg-attach-file {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 240px;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+  padding: 4px 8px; font-size: 11px; color: #c9d1d9; text-decoration: none;
+}
+.msg-attach-file:hover { border-color: #58a6ff; color: #58a6ff; }
+.msg-attach-ext {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 20px; border-radius: 3px;
+  background: #1f6feb22; color: #58a6ff; font-size: 8px; font-weight: 600;
+}
+.msg-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-attach-size { color: #6e7681; flex-shrink: 0; }
 .view-input button {
   background: #238636; border: 1px solid #2ea043; color: #fff;
   border-radius: 4px; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 12px;
