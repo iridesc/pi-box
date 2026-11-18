@@ -10,6 +10,14 @@
 
 ## 2026-11
 
+### 修复：纯 LLM 定时任务被误判失败
+
+没有命令阶段的定时任务（`kind: "llm"`）在运行记录里**永远显示 failed**，即使 LLM 段正常跑完、消息也发出去了。
+
+原因：判定用 `command.exitCode === 0`，而纯 LLM 任务的 `cp.command` 是 `undefined` → `undefined !== 0` → 恒为失败。
+
+现在判定抽成纯函数 `schedule-outcome.mjs` 的 `scheduleOutcome()`：只在**真的跑过命令**时才比退出码，没有命令段就只看 LLM 段状态。
+
 ### 不再内置 msg-hub
 
 pi-box 现在**不依赖任何具体 MCP 服务**，只做 MCP 客户端。

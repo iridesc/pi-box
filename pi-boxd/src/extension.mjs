@@ -15,6 +15,7 @@ import {
 } from "./agents.mjs";
 import { runCommand } from "./exec.mjs";
 import { acquireScheduleLock, logLine, markOccurrence, openRunLog, writeSkippedLog } from "./schedule-log.mjs";
+import { scheduleOutcome } from "./schedule-outcome.mjs";
 
 // 主会话用 document 记录"子 agent 名 → 会话 id"
 export const Subagents = defineDoc({
@@ -614,7 +615,6 @@ export const ScheduleCommandTask = defineTask({
       const input = task.input;
       const cp = task.state.checkpoint;
       const command = cp.command ?? {};
-      const exitOk = command.exitCode === 0 && !command.timedOut;
       let answer = "";
       let llmStatus = "none";
 
@@ -659,7 +659,9 @@ export const ScheduleCommandTask = defineTask({
           log.write(logLine(`reportTo=${reportTo}：渠道推送将在二期实现，本次只落日志`));
         }
 
-        const ok = exitOk && llmStatus !== "failed" && llmStatus !== "aborted";
+        // 判定收在 schedules.mjs 里（纯函数，可单测）：纯 LLM 任务没有命令段时
+        // 不能拿 exitCode 去比 0，否则跑成功了也判 failed。
+        const ok = scheduleOutcome({ command: cp.command, llmStatus }) === "completed";
         log.write(logLine(`end: ${ok ? "completed" : "failed"}${answer ? ` answerChars=${answer.length}` : ""}`));
         await log.close();
 

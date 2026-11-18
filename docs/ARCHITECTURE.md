@@ -68,7 +68,7 @@ server.listen(PORT)
 
 ## 4. 后端模块表
 
-`src/` 下 28 个模块。一句话职责，细节读文件头注释。
+`src/` 下 29 个模块。一句话职责，细节读文件头注释。
 
 | 模块 | 职责 |
 |---|---|
@@ -89,6 +89,7 @@ server.listen(PORT)
 | `reports.mjs` | 报告组存储层：CRUD、publish、敏感扫描、保留期清理 |
 | `report-pages.mjs` | 报告阅读页 `/reports` 与公开访问 `/r/*`，含 CSP |
 | `schedules.mjs` | 定时任务定义：规则类型、会话模式、增删改 |
+| `schedule-outcome.mjs` | 定时任务成败判定（纯函数，避免与 extension 循环依赖） |
 | `schedule-log.mjs` | 定时任务运行日志：落盘、保留清理、并发锁、幂等标记 |
 | `exec.mjs` | 命令执行：spawn + 流式输出 + 超时杀整个进程组 |
 | `files.mjs` | 项目文件浏览：列目录、文本预览、原文件流（Range）、上传 |
