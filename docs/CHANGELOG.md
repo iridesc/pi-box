@@ -10,6 +10,23 @@
 
 ## 2026-11
 
+### 不再内置 msg-hub
+
+pi-box 现在**不依赖任何具体 MCP 服务**，只做 MCP 客户端。
+
+移除的东西：
+
+| 位置 | 原内容 |
+|---|---|
+| `Dockerfile` | 构建期 `git clone` msg-hub 到 `/opt/msg-hub` + 导入自检 |
+| `pi-boxd/seed/mcp.json` | 整个文件（唯一内容是 msg-hub） |
+| `entrypoint.sh` | 首启把 seed 复制成 `~/.pi/agent/mcp.json` 的逻辑 |
+| `.github/workflows/build.yml` | `MSG_HUB_REF` build-arg |
+
+外部服务的接入方式不变：`mcp.json` 里写 `command`（stdio）或 `url` + `headers`（Streamable HTTP），agent frontmatter 写 `mcps: [<server 名>]`。
+
+**升级注意**：已有实例的 `~/.pi/agent/mcp.json` 若仍指向 `/opt/msg-hub/src/msg_hub/stdio.py`，升级后该条目会连接失败（`[mcp] msg-hub 连接失败`，**服务不受影响**，只显示为断线）。此时编辑任何 `mcps: [msg-hub]` 的 agent 会报「MCP 未连接或不存在」，**需先在 MCP 设置里删掉那条记录**。pi-box 不做自动清理。
+
 ### 输入框支持图片与文件
 
 - **输入框从单行 `<input>` 换成 `<textarea>`**：`Enter` 发送、`Shift+Enter` 换行、自动增高（上限 200px）。中文输入法组合中的 Enter 不会误发。
