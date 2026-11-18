@@ -3300,6 +3300,37 @@ function renderAttachmentList(attachments, conversationId) {
   return box;
 }
 
+/**
+ * 处理过程框的贴底滚动。
+ * 步骤多时框内自带滚动条（见 style.css 的 .agent-process[open]），
+ * 默认跟随最新步骤贴底；用户一旦手动上翻（dataset.stick = "0"）就不再打扰，
+ * 翻回底部后自动恢复跟随。
+ */
+const PROCESS_STICK_SLACK = 24;
+
+function processListStuck(list) {
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= PROCESS_STICK_SLACK;
+}
+
+function stickProcessList(list) {
+  if (list.dataset.stick === "0") return;
+  list.scrollTop = list.scrollHeight;
+}
+
+/** 在指定子树里把所有该贴底的处理过程列表拉到底（节点需已挂进 DOM）。 */
+function stickProcessLists(root) {
+  if (!root) return;
+  for (const list of root.querySelectorAll(".agent-process-list")) stickProcessList(list);
+}
+
+function firstProcessList(nodes) {
+  for (const node of nodes ?? []) {
+    const list = node.querySelector?.(".agent-process-list");
+    if (list) return list;
+  }
+  return null;
+}
+
 function renderConversationTurn(turn) {
   const fragment = document.createDocumentFragment();
   let attachmentsDrawn = false;
@@ -3335,6 +3366,11 @@ function renderConversationTurn(turn) {
     const summary = el("summary", "agent-process-summary", `处理过程 · ${processItems.length} 个步骤`);
     process.appendChild(summary);
     const list = el("div", "agent-process-list");
+    // 默认贴底；用户手动上翻后本轮刷新不再把他拽回底部。
+    list.dataset.stick = "1";
+    list.addEventListener("scroll", () => {
+      list.dataset.stick = processListStuck(list) ? "1" : "0";
+    }, { passive: true });
     processItems.forEach(({ entry, msg }) => {
       const step = el("details", `agent-step agent-step-${msg.role}`);
       step.appendChild(el("summary", "agent-step-summary", messageRoleLabel(msg, entry)));
@@ -3342,7 +3378,10 @@ function renderConversationTurn(turn) {
       content.appendChild(markdownBlock(messageText(msg)));
       step.appendChild(content); list.appendChild(step);
     });
-    process.appendChild(list); group.appendChild(process);
+    process.appendChild(list);
+    // 折叠着的时候量不到高度；展开时补一次贴底。
+    process.addEventListener("toggle", () => { if (process.open) stickProcessList(list); });
+    group.appendChild(process);
   }
   if (finalIndex >= 0) {
     const final = el("div", "agent-final");
@@ -3426,6 +3465,8 @@ function renderConversationBody(convKey, detail) {
       // 一个 turn 可能产出多个兄弟节点（用户气泡 + 回复区），
       // replaceChild 不能直接传 DocumentFragment，否则会错位。
       const oldNodes = cached[cachedLast].nodes;
+      // 替换节点会丢掉「用户是否手动上翻」的状态，先记下来再迁移过去。
+      const stickState = firstProcessList(oldNodes)?.dataset.stick;
       const fragment = renderConversationTurn(turns[cachedLast]);
       const newNodes = [...fragment.childNodes];
       const parent = oldNodes[0]?.parentNode;
@@ -3434,6 +3475,8 @@ function renderConversationBody(convKey, detail) {
         for (const node of newNodes) parent.insertBefore(node, anchor);
         for (const node of oldNodes) node.remove();
       }
+      const newList = firstProcessList(newNodes);
+      if (newList && stickState === "0") newList.dataset.stick = "0";
       cached[cachedLast].nodes = newNodes;
       cached[cachedLast].sig = id.sig;
     }
@@ -3544,6 +3587,8 @@ function renderConversation(view) {
   // 用户已经往上翻时不要被后台推送拉回底部。
   if (rebuilt) body.scrollTop = viewScrollState.atBottom ? body.scrollHeight : viewScrollState.top;
   else if (viewScrollState.atBottom) body.scrollTop = body.scrollHeight;
+  // 处理过程框自己贴底：新步骤要等节点挂进 DOM 才量得到高度，放到下一帧统一处理。
+  requestAnimationFrame(() => stickProcessLists(body));
 
   const composer = getComposer(String(conv.id), conv);
   // 已经在视图里就保持原位（不重新 append），否则挂到末尾。
@@ -5897,6 +5942,21 @@ function refreshConversationDetail(conv, now) {
  * 只重建真正受影响的部分：项目树 / 会话列表 / 任务图 / 会话头部。
  */
 function applySnapshotDiff(prev, diff) {
+  // 文件 / 报告视图的第二、第四栏由文件浏览器、报告面板接管：#session-list 与 #task-graph
+  // 里放的是文件树和文件预览。不能继续走下面的会话列表 / 任务图重绘，
+  // 否则 agent 一跑起来 SSE 每隔几秒推一次，正在看的文件就被顶掉了。
+  if (selected?.type === "files" || selected?.type === "reports") {
+    if (diff.status) renderStatus();
+    if (diff.projects || diff.agents) renderTree();
+    if (diff.projects || diff.conversationList) refreshReportCachesIfStale();
+    if (selected.type === "files") {
+      ensureFileBrowser(selected.project);
+      renderFilePanels();
+    } else {
+      renderReportsPanels();
+    }
+    return;
+  }
   if (diff.status) renderStatus();
   if (diff.projects || diff.agents) renderTree();
   // 报告数据不在快照里，靠 TTL 自己刷新（agent 刚发完报告能很快看到）。

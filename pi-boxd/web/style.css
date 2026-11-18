@@ -282,6 +282,14 @@ section:last-child { border-right: none; }
 .agent-process-summary, .agent-step-summary { cursor: pointer; user-select: none; list-style: none; }
 .agent-process-summary::-webkit-details-marker, .agent-step-summary::-webkit-details-marker { display: none; }
 .agent-process-summary { padding: 8px 10px; color: #8b949e; font-size: 12px; }
+/* 步骤多时框内滚动：整块高度封顶，标题固定在顶部，只让步骤列表滚动。 */
+.agent-process[open] { display: flex; flex-direction: column; max-height: min(60vh, 560px); }
+.agent-process[open] > .agent-process-summary { flex: 0 0 auto; background: #161b22; border-radius: 6px 6px 0 0; }
+.agent-process[open] > .agent-process-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; scrollbar-gutter: stable;
+  border-radius: 0 0 6px 6px;
+}
 .agent-process-summary::before, .agent-step-summary::before { content: "▶"; display: inline-block; width: 16px; font-size: 9px; transition: transform .15s; }
 .agent-process[open] > .agent-process-summary::before, .agent-step[open] > .agent-step-summary::before { transform: rotate(90deg); }
 .agent-process-list { display: flex; flex-direction: column; gap: 6px; padding: 0 8px 8px; }
