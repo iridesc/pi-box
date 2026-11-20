@@ -5623,38 +5623,53 @@ async function renderDrawerSystem(panel) {
   }
   sec4.appendChild(notifyHint);
 
-  // 大图切块：像素阈值（每块送进上下文的像素数）。调小更清晰但块数变多。
-  const tileRow = el("div", "form-row");
-  tileRow.appendChild(el("label", "", "图片切块"));
-  const tileInput = document.createElement("input");
-  tileInput.type = "number";
-  tileInput.min = "0.2";
-  tileInput.max = "16";
-  tileInput.step = "0.1";
-  const tilePixels = Number(prefs.imageTiles?.targetPixels ?? 2458624);
-  tileInput.value = String(Math.round((tilePixels / 1e6) * 10) / 10);
-  tileInput.title = "每块送进上下文的像素数（百万像素）。2.4 ≈ 1568×1568，正好是服务端长边上限；调小更清晰但块数变多。";
+  // 大图处理：边长阈值 + 重叠率。比例正常（宽高比 ≤ 1.85）的图直接缩放到边长阈值；
+  // 长条图（> 1.85）先切成正方形块再缩放。
+  const tileEdgeRow = el("div", "form-row");
+  tileEdgeRow.appendChild(el("label", "", "图片边长"));
+  const tileEdgeInput = document.createElement("input");
+  tileEdgeInput.type = "number";
+  tileEdgeInput.min = "128";
+  tileEdgeInput.max = "8192";
+  tileEdgeInput.step = "1";
+  tileEdgeInput.value = String(prefs.imageTiles?.tileEdge ?? 1568);
+  tileEdgeInput.title =
+    "图片进上下文时缩放后的长边（像素）。1568 是 Anthropic 协议的服务端长边上限，交付后再也不会被缩。";
+  tileEdgeRow.appendChild(tileEdgeInput);
+  sec4.appendChild(tileEdgeRow);
+
+  const overlapRow = el("div", "form-row");
+  overlapRow.appendChild(el("label", "", "切块重叠"));
+  const overlapInput = document.createElement("input");
+  overlapInput.type = "number";
+  overlapInput.min = "0";
+  overlapInput.max = "50";
+  overlapInput.step = "1";
+  overlapInput.value = String(Math.round((prefs.imageTiles?.overlapRatio ?? 0.15) * 100));
+  overlapInput.title = "长条图切成方块时，相邻块之间的重叠比例（%）。";
+  overlapRow.appendChild(overlapInput);
+  sec4.appendChild(overlapRow);
+
   const tileHint = el("div", "muted", "");
   const renderTileHint = () => {
-    const pixels = Number(prefs.imageTiles?.targetPixels ?? 2458624);
-    tileHint.textContent = `每块 ${(pixels / 1e6).toFixed(1)}M 像素（长边约 ${Math.round(Math.sqrt(pixels))}px），相邻块重叠 ${Math.round((prefs.imageTiles?.overlapRatio ?? 0.15) * 100)}%，最多 ${prefs.imageTiles?.maxSlices ?? 20} 块。下次读图生效。`;
+    const tiles = prefs.imageTiles ?? {};
+    tileHint.textContent = `缩放到长边 ${tiles.tileEdge ?? 1568}px；宽高比 > 1.85 的长条图会切成正方形块，相邻块重叠 ${Math.round((tiles.overlapRatio ?? 0.15) * 100)}%。下次读图生效。`;
   };
   renderTileHint();
-  tileInput.onchange = async () => {
-    const value = Number(tileInput.value) * 1e6;
-    if (!Number.isFinite(value) || value <= 0) {
-      tileInput.value = String(Math.round((tilePixels / 1e6) * 10) / 10);
-      return;
-    }
+  const saveTilePrefs = async () => {
+    const edge = Number(tileEdgeInput.value);
+    const overlap = Number(overlapInput.value) / 100;
+    if (!Number.isFinite(edge) || !Number.isFinite(overlap)) return;
     const saved = await savePrefsPatch({
-      imageTiles: { ...prefs.imageTiles, targetPixels: Math.round(value) },
+      imageTiles: { tileEdge: Math.round(edge), overlapRatio: Math.round(overlap * 1000) / 1000 },
     });
     prefs.imageTiles = saved.imageTiles;
-    tileInput.value = String(Math.round((saved.imageTiles.targetPixels / 1e6) * 10) / 10);
+    tileEdgeInput.value = String(saved.imageTiles.tileEdge);
+    overlapInput.value = String(Math.round(saved.imageTiles.overlapRatio * 100));
     renderTileHint();
   };
-  tileRow.appendChild(tileInput);
-  sec4.appendChild(tileRow);
+  tileEdgeInput.onchange = saveTilePrefs;
+  overlapInput.onchange = saveTilePrefs;
   sec4.appendChild(tileHint);
   panel.appendChild(sec4);
 

@@ -94,7 +94,7 @@ server.listen(PORT)
 | `exec.mjs` | 命令执行：spawn + 流式输出 + 超时杀整个进程组 |
 | `files.mjs` | 项目文件浏览：列目录、文本预览、原文件流（Range）、上传 |
 | `attachments.mjs` | 会话附件：落盘 `.pi-box/uploads/`、路径校验、组装成消息内容 |
-| `image-slices.mjs` | 视觉输入的唯一入口 `prepareImageBlocks`：大图切块（网格 + 15% 重叠）+ 按像素阈值缩放 |
+| `image-slices.mjs` | 视觉输入的唯一入口 `prepareImageBlocks`：宽高比 > 1.85 切正方形块（15% 重叠），否则整图缩放；长边统一到边长阈值 |
 | `image-budget.mjs` | 上下文图片预算：按消息「组」原子淘汰，跨组按内容哈希去重 |
 | `cleanup.mjs` | 数据清理：日志（在线安全）与数据库（需短暂中断） |
 | `io.mjs` | 配置读写 + HTTP body 工具 |

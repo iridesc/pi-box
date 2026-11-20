@@ -63,8 +63,8 @@ export async function createHarness() {
   // 装图片处理器：`read` 读图时按模型尺寸上限（inputLimits.images.resize）缩放重编码，
   // 而不是把 2MB 原图原样塞进上下文。没有处理器时上游只做「≤2000px 且 ≤4.5MB 就放行」。
   registry.install(createCodingTools({ images: await createNodePhotonImages() }));
-  // 大图切片：整页截图这类图按方框缩小会糊到读不出字，改装成 read 的包装——
-  // 大图先切成网格状的多块（相邻块重叠 15%），再把每块缩到像素阈值（默认 1568²）。
+  // 大图处理：改装成 read 的包装——宽高比 > 1.85 的长条图切成正方形块（重叠 15%），
+  // 形状正常的图整图缩放；长边统一缩到边长阈值（默认 1568，与服务端上限一致）。
   registry.install(createImageSliceExtension());
   // 图片预算：历史图片每轮都要重发，超字节阈值就从最老的开始换成占位文本（只影响这一次请求）。
   registry.install(
