@@ -173,6 +173,12 @@ pi-box 启动时会在 `agent-home/.pi/agent/meta/` 下安装一个**身份特�
 | 面向客户 | 交互主题 | 平台管理 |
 | `name === "meta"` | 拒绝 | 占位名 |
 
+### 元项目助理的工具（固定，不可关闭）
+
+元项目助理的 `read / write / edit / bash` 是**平台强制项**：文件 `chmod 444` 只防误改，宿主机仍能改写，界面也不允许改写它，所以运行时由后端强制合并一次——文件被清空或改坏也补得回来。界面上这四项显示 🔒 必需且不可取消，元项目助理的编辑器整体只读。
+
+因此它提示词里描述的「查源码 / 调后端 API / 改项目配置」是真能用的。
+
 ### 元项目能做什么
 
 - **读**：所有业务项目的源码、`.pi/assistant.md`、`.pi/agents/*.md`、`.pi/schedules.json`、项目任意文件；业务项目助理的 Durable 会话（只读 snapshot）。
@@ -203,6 +209,14 @@ chmod 444 agent-home/.pi/agent/meta/assistant.md
 
 ```bash
 rm agent-home/.pi/agent/meta/assistant.md
+podman compose restart
+```
+
+> 镜像里的 seed 更新后，实际文件不会自动跟着变（避免覆盖你手工改过的提示词）。容器启动时若发现两者不一致，会在日志里打一行提示；确认要用新版 seed 时在宿主机执行：
+
+```bash
+cp pi-boxd/seed/meta/assistant.md agent-home/.pi/agent/meta/assistant.md
+chmod 444 agent-home/.pi/agent/meta/assistant.md
 podman compose restart
 ```
 
@@ -252,6 +266,7 @@ skills: [pdf-tools]        # 不写 = 不启用任何 skill
 - 系统设置 → Skills 里的开关是**全局闸门**：关掉后任何角色都无法使用（用户库里写一个 `.disabled` 标记）。
 - 最终生效 = 全局启用 ∧ 属于该角色的清单。上传一个 skill 不会自动对所有角色生效。
 - 引用不存在的 skill 会在保存配置时被拒绝；skill 被删除后，其他角色会跳过它并记录日志。
+- 元项目助理看不到项目私有 skill（它的技能解析只有「内置 + 用户库」两层）；它给业务项目装 skill 应走 `POST /api/skills/upload` 落用户库。
 
 ### read 是硬依赖
 

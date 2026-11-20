@@ -8,7 +8,7 @@ import { scanSkills, setSkillEnabled, installSkill, removeSkill, skillUsage, res
 import { PROJECTS_DIR, DATA_DIR, META_PROJECT, META_DIR, WEB_DIR } from "./paths.mjs";
 import { refreshProvider, currentModel, testProviderConnection } from "./model.mjs";
 import { PROVIDER_LIST, getAllProviderModels } from "./providers.mjs";
-import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, validateAgentConfig, toolCatalog, mcpCatalog, agentFilePath, ensureSkillReadTool, loadProjectIcon, saveProjectIcon, setAssistantIcon, setAgentIcon, normalizeIcon } from "./agents.mjs";
+import { listProjects, listAgents, listAgentCatalog, listGlobalAgents, loadAssistant, saveAgentFile, renameAgentFile, deleteAgentFile, saveAssistantFile, assistantInstructions, resolveAgentModel, resolveAgentTools, resolveAssistantTools, validateAgentConfig, toolCatalog, mcpCatalog, agentFilePath, ensureSkillReadTool, loadProjectIcon, saveProjectIcon, setAssistantIcon, setAgentIcon, normalizeIcon, META_ASSISTANT_REQUIRED_TOOLS } from "./agents.mjs";
 import { conversationContextSummary, createRoleConversation, renameSubagentRecords, syncAfterConfigChange, syncAllConfig } from "./harness.mjs";
 import { setConversationMeta } from "./extension.mjs";
 import { validatePublicMcpConfig } from "./mcp-bridge.mjs";
@@ -1050,8 +1050,11 @@ export function buildExtraRoutes(_harnessArg, _contextArg, _mcpBridgeArg) {
       async handler(req, res) {
         const url = new URL(req.url, `http://${req.headers.host}`);
         const role = url.searchParams.get("role") === "assistant" ? "assistant" : "agent";
+        const project = url.searchParams.get("project");
+        // 元项目助理：read/write/edit/bash 是平台级强制工具，界面锁定不可取消。
+        const required = project === META_PROJECT ? META_ASSISTANT_REQUIRED_TOOLS : [];
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-        res.end(JSON.stringify({ role, groups: toolCatalog({ role }), mcp: mcpCatalog() }));
+        res.end(JSON.stringify({ role, groups: toolCatalog({ role, required }), mcp: mcpCatalog() }));
       },
     },
     // agent 删除

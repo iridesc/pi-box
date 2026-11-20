@@ -3867,6 +3867,8 @@ function formRow(label, control) {
 
 async function openAssistantEditor(proj) {
   const asst = state.assistantByProject?.[proj] ?? { agents: [], instructions: "", model: null };
+  // 元项目助理由平台维护：工具是强制项（read/write/edit/bash），提示词与技能列表不可在界面改。
+  const isMeta = proj === state.metaProject;
   // agent 目录按需拉取：它只在打开编辑器时用得到，不再随 SSE 快照推送（约 100KB）。
   let catalog = state.agentCatalogByProject?.[proj];
   if (!catalog) {
@@ -3892,7 +3894,7 @@ async function openAssistantEditor(proj) {
   modal.appendChild(formRow("模型", modelSelect));
 
   // 显式模型：文件里没有 tools 就是零工具（不再默认全选），迁移脚本会把老配置补全。
-  const toolCatalogData = await fetchToolCatalog("assistant");
+  const toolCatalogData = await fetchToolCatalog("assistant", proj);
   const selectedTools = new Set(asst.tools ?? []);
   const enabledMcpNames = new Set(mcpServers.filter(([, config]) => config.enabled !== false).map(([name]) => name));
   const selectedMcps = new Set((asst.mcps ?? []).filter((name) => enabledMcpNames.has(name)));
@@ -3903,9 +3905,12 @@ async function openAssistantEditor(proj) {
   const toolsGroup = appendToolGroups(modal, { catalog: toolCatalogData, selected: selectedTools });
   appendAgentCheckboxGroup(modal, {
     title: "Skills",
-    description: "从全局技能库启用；勾选后自动附带 read（Skill 正文由模型读取）。未勾选则不注入任何 skill。",
+    description: isMeta
+      ? "元项目助理由平台维护：技能清单不可在界面修改（需在宿主机编辑 meta/assistant.md）。"
+      : "从全局技能库启用；勾选后自动附带 read（Skill 正文由模型读取）。未勾选则不注入任何 skill。",
     choices: skillChoicesFor(skillLibrary, asst.skills ?? []),
     selectedValues: selectedSkills,
+    disabledWhen: () => isMeta,
     onChange: () => { linkage.sync(); toolsGroup.refresh(); },
   });
   const mcpPicker = appendMcpPicker(modal, {
@@ -3942,6 +3947,13 @@ async function openAssistantEditor(proj) {
   cancel.type = "button";
   const save = el("button", "btn-primary", "保存");
   save.type = "button";
+  if (isMeta) {
+    // 元项目助理文件受保护（chmod 444 + 后端拒绝改写），界面直接锁死保存。
+    save.disabled = true;
+    save.title = "元项目助理由平台维护，不可编辑";
+    status.className = "form-status";
+    status.textContent = "元项目助理由平台维护：工具固定为 read / write / edit / bash，提示词与技能不可修改。如需调整，请在宿主机编辑 /home/agent/.pi/agent/meta/assistant.md。";
+  }
   actions.appendChild(cancel);
   actions.appendChild(save);
   modal.appendChild(actions);
@@ -4472,9 +4484,12 @@ function appendAgentCheckboxGroup(modal, {
 }
 
 /** 拉取工具目录：分组 + 可用性 + 锁定原因。role=assistant|agent 决定 subagent 是否可勾。 */
-async function fetchToolCatalog(role = "agent") {
+async function fetchToolCatalog(role = "agent", project = null) {
   try {
-    const res = await fetch(`/api/tool-catalog?role=${encodeURIComponent(role)}`);
+    const params = new URLSearchParams({ role });
+    // 项目维度决定哪些工具是平台强制项（元项目助理的 read/write/edit/bash）。
+    if (project) params.set("project", project);
+    const res = await fetch(`/api/tool-catalog?${params.toString()}`);
     if (!res.ok) return { role, groups: [], mcp: [] };
     return await res.json();
   } catch {
@@ -4500,8 +4515,11 @@ function appendToolGroups(modal, { catalog, selected, onChange = () => {} }) {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.value = tool.name;
-      checkbox.disabled = tool.available === false;
-      checkbox.checked = selected.has(tool.name);
+      // locked = 平台强制项（后端每次都会补回），不可取消勾选。
+      checkbox.disabled = tool.available === false || tool.locked === true;
+      checkbox.checked = selected.has(tool.name) || tool.locked === true;
+      // 强制项也计入提交集：它必然生效，提交与否不影响后端结果。
+      if (tool.locked === true) selected.add(tool.name);
       checkbox.onchange = () => {
         if (checkbox.checked) selected.add(tool.name);
         else selected.delete(tool.name);
@@ -4523,8 +4541,8 @@ function appendToolGroups(modal, { catalog, selected, onChange = () => {} }) {
   return {
     refresh() {
       for (const { tool, checkbox } of items) {
-        checkbox.checked = selected.has(tool.name);
-        checkbox.disabled = tool.available === false;
+        checkbox.checked = selected.has(tool.name) || tool.locked === true;
+        checkbox.disabled = tool.available === false || tool.locked === true;
       }
     },
   };

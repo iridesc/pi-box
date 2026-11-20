@@ -210,12 +210,13 @@ export function validateAgentConfig({ tools, mcps, mcpTools, reports, skills, ro
 
 /** 前端工具目录：分组 + 可用性 + 锁定原因。
  *  role 决定哪些项可勾选（子 agent 不能拿 subagent）。 */
-export function toolCatalog({ role = "agent" } = {}) {
+export function toolCatalog({ role = "agent", required = [] } = {}) {
   const isAssistant = role === "assistant";
+  const requiredSet = new Set(required);
   const groups = [];
 
   const builtin = [...BUILTIN_TOOL_BY_NAME.keys()].map((name) => ({
-    name, label: name, available: true, locked: false, reason: null,
+    name, label: name, available: true, locked: requiredSet.has(name), reason: null,
   }));
   if (builtin.length > 0) groups.push({ name: "内置", tools: builtin });
 
@@ -362,6 +363,14 @@ export async function listMetaAgents() {
   return listAgentsInDir(META_AGENTS_DIR, "meta", META_PROJECT);
 }
 
+/** 元项目助理的强制工具：平台管理员要读项目源码、写项目配置、跑脚本、调后端 API。
+ *  这四个**不可关闭**：
+ *   - 文件 chmod 444 只防误改，宿主机仍可改写；
+ *   - UI 与 API 都不允许改写元项目助理；
+ *   - 所以运行时再强制合并一次，文件被清空 / 改坏也补得回来。
+ *  放这里而不是只写在 seed 里，是为了保证「不可关闭」是运行时语义，不是文件约定。 */
+export const META_ASSISTANT_REQUIRED_TOOLS = ["read", "write", "edit", "bash"];
+
 /** 助理实际可派发的 Agent = 全部项目 Agent + 助理显式选择的全局 Agent。
  * 元项目：返回它自己目录下的全部子 agent（业务项目不会调用元项目助理，所以无需"授权"概念）。 */
 export async function listAgents(projectName) {
@@ -417,7 +426,10 @@ export async function loadAssistant(projectName) {
     const def = parseAgentDef(await readFile(p, "utf-8"));
     return {
       model: def.model,
-      tools: def.tools,
+      // 元项目助理：强制工具不可关闭（见 META_ASSISTANT_REQUIRED_TOOLS）。
+      tools: projectName === META_PROJECT
+        ? [...new Set([...META_ASSISTANT_REQUIRED_TOOLS, ...(def.tools ?? [])])]
+        : def.tools,
       mcps: def.mcps,
       mcpTools: def.mcpTools ?? null,
       skills: def.skills ?? null,
@@ -430,7 +442,9 @@ export async function loadAssistant(projectName) {
     // 文件不存在（而非字段缺失）：给默认内置工具，保证助理至少能读写文件。
     return {
       model: null,
-      tools: [...DEFAULT_ASSISTANT_TOOLS],
+      tools: projectName === META_PROJECT
+        ? [...new Set([...META_ASSISTANT_REQUIRED_TOOLS, ...DEFAULT_ASSISTANT_TOOLS])]
+        : [...DEFAULT_ASSISTANT_TOOLS],
       mcps: null,
       mcpTools: null,
       skills: null,
