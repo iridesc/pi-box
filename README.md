@@ -212,7 +212,7 @@ rm agent-home/.pi/agent/meta/assistant.md
 podman compose restart
 ```
 
-> 镜像里的 seed 更新后，实际文件不会自动跟着变（避免覆盖你手工改过的提示词）。容器启动时若发现两者不一致，会在日志里打一行提示；确认要用新版 seed 时在宿主机执行：
+> 镜像里的 seed 更新后，实际文件不会自动跟着变（避免覆盖你手工改过的提示词）。容器启动时若发现两者不一致，会在日志里打一行提示；**确认要用新版 seed 时**（同步会覆盖手工修改，先 diff 一下）在宿主机执行：
 
 ```bash
 cp pi-boxd/seed/meta/assistant.md agent-home/.pi/agent/meta/assistant.md

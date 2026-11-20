@@ -30,8 +30,8 @@ if [ -d "$SEED_DIR" ]; then
   done
   # seed 升级但实际文件没跟上的漂移提示：不自动覆盖（宿主可能手工改过提示词）。
   if [ -f "$META_DIR/assistant.md" ] && ! cmp -s "$SEED_DIR/assistant.md" "$META_DIR/assistant.md"; then
-    echo "[startup] 提示：meta/assistant.md 与镜像内 seed 不一致（可能是新版本 seed 待同步）。"
-    echo "[startup]       需要同步时在宿主机执行：cp pi-boxd/seed/meta/assistant.md agent-home/.pi/agent/meta/assistant.md"
+    echo "[startup] 提示：meta/assistant.md 与镜像内 seed 不一致。"
+    echo "[startup]       有意的手工修改可忽略；若要跟齐 seed，请先 diff 再同步（会覆盖手工修改）："
   fi
 fi
 
